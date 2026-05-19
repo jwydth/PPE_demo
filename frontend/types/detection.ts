@@ -16,6 +16,21 @@ export interface Detection {
   color: string;
 }
 
+export interface EquipmentStatus {
+  label: string;
+  status: Category;
+  confidence?: number;
+  bbox?: BoundingBox;
+}
+
+export interface PersonResult {
+  person_id: number;
+  bbox: BoundingBox;
+  confidence: number;
+  equipment: EquipmentStatus[];
+  compliant: boolean;
+}
+
 export interface Summary {
   total_persons: number;
   compliant: number;
@@ -25,5 +40,6 @@ export interface Summary {
 
 export interface DetectionResponse {
   detections: Detection[];
+  persons: PersonResult[];
   summary: Summary;
 }

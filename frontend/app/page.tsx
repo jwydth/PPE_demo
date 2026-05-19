@@ -96,7 +96,7 @@ export default function Home() {
         <div className="max-w-6xl mx-auto flex flex-col gap-6">
           <div className="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-6 items-start">
             <BoundingBoxCanvas imageFile={file} detections={result.detections} />
-            <ResultsPanel summary={result.summary} detections={result.detections} />
+            <ResultsPanel summary={result.summary} persons={result.persons} />
           </div>
 
           <button

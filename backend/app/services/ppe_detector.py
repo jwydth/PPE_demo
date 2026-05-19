@@ -12,9 +12,18 @@ PRODUCTION MODE (after ML engineer drops in the model)
 ─────────────────────────────────────────────────────────────────────────────
 1. Place the trained weights file at the path specified by MODEL_PATH in .env
    (default: weights/best.pt inside the backend/ directory).
-2. The class names in PPE_CLASSES must match your YOLOv8 training labels exactly.
-   Update them here if your label names differ.
-3. Restart the server — _load_model() auto-detects the file on startup.
+2. Restart the server — _load_model() auto-detects the file on startup.
+
+Model class IDs expected:
+  0 → person
+  1 → helmet
+  2 → vest
+
+Compliance logic:
+  For each detected person, the system checks whether a helmet and vest
+  bounding box overlaps with the person box by at least PPE_OVERLAP_THRESHOLD
+  (fraction of the equipment box area). If an item is missing the person is
+  flagged with a violation for that item.
 """
 
 import logging
@@ -24,32 +33,45 @@ from pathlib import Path
 from PIL import Image
 
 from app.core.config import settings
-from app.models.schemas import BoundingBox, Detection, DetectionResponse, Summary
+from app.models.schemas import (
+    BoundingBox,
+    Detection,
+    DetectionResponse,
+    EquipmentStatus,
+    PersonResult,
+    Summary,
+)
 
 logger = logging.getLogger(__name__)
 
-# ── Class map ────────────────────────────────────────────────────────────────
-# Keys = YOLOv8 class names as they appear in your data.yaml / model.names
-# Values = "compliant" | "violation"
-# Update this dict to match your training labels exactly.
-PPE_CLASSES: dict[str, str] = {
-    "hard_hat": "compliant",
-    "safety_vest": "compliant",
-    "gloves": "compliant",
-    "safety_glasses": "compliant",
-    "no_hard_hat": "violation",
-    "no_safety_vest": "violation",
-    "no_gloves": "violation",
-    "no_safety_glasses": "violation",
-}
-
 COMPLIANT_COLOR = "#22c55e"
 VIOLATION_COLOR = "#ef4444"
+PERSON_COLOR    = "#f97316"   # orange — used for person bbox on canvas
 
 
-def _category_color(category: str) -> str:
-    return COMPLIANT_COLOR if category == "compliant" else VIOLATION_COLOR
+# ── Geometry helpers ──────────────────────────────────────────────────────────
 
+def _area(b: dict) -> float:
+    return max(0.0, b["x2"] - b["x1"]) * max(0.0, b["y2"] - b["y1"])
+
+
+def _inter_area(a: dict, b: dict) -> float:
+    xA = max(a["x1"], b["x1"])
+    yA = max(a["y1"], b["y1"])
+    xB = min(a["x2"], b["x2"])
+    yB = min(a["y2"], b["y2"])
+    return max(0.0, xB - xA) * max(0.0, yB - yA)
+
+
+def _overlap_ratio(equipment: dict, person: dict) -> float:
+    """Fraction of the *equipment* box that lies inside the person box."""
+    eq_area = _area(equipment)
+    if eq_area == 0:
+        return 0.0
+    return _inter_area(equipment, person) / eq_area
+
+
+# ── Main class ────────────────────────────────────────────────────────────────
 
 class PPEDetector:
     def __init__(self) -> None:
@@ -93,33 +115,26 @@ class PPEDetector:
 
         results = self.model(image, conf=settings.CONFIDENCE_THRESHOLD)
 
-        detections: list[Detection] = []
-        detection_id = 0
+        persons: list[dict] = []
+        helmets: list[dict] = []
+        vests:   list[dict] = []
 
         for result in results:
             for box in result.boxes:
                 cls_id = int(box.cls[0])
-                label_raw: str = result.names[cls_id]
-                conf = float(box.conf[0])
+                conf   = float(box.conf[0])
                 x1, y1, x2, y2 = (float(v) for v in box.xyxy[0].tolist())
+                entry = {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "conf": conf}
 
-                category = PPE_CLASSES.get(label_raw, "violation")
-                label_display = label_raw.replace("_", " ").title()
-
-                detections.append(
-                    Detection(
-                        id=detection_id,
-                        label=label_display,
-                        category=category,  # type: ignore[arg-type]
-                        confidence=round(conf, 4),
-                        bbox=BoundingBox(x1=x1, y1=y1, x2=x2, y2=y2),
-                        color=_category_color(category),
-                    )
-                )
-                detection_id += 1
+                if cls_id == 0:
+                    persons.append(entry)
+                elif cls_id == 1:
+                    helmets.append(entry)
+                elif cls_id == 2:
+                    vests.append(entry)
 
         elapsed_ms = (time.perf_counter() - start) * 1000
-        return _build_response(detections, elapsed_ms)
+        return _build_response(persons, helmets, vests, elapsed_ms)
 
     # ── Mock inference ───────────────────────────────────────────────────────
 
@@ -131,82 +146,203 @@ class PPEDetector:
         start = time.perf_counter()
         time.sleep(0.06)  # simulate realistic inference latency
 
-        width, height = image.size
+        w, h = image.size
 
-        # Bounding boxes expressed as fractions of image dimensions
-        raw: list[dict] = [
-            {
-                "label": "Hard Hat",
-                "category": "compliant",
-                "confidence": 0.9412,
-                "rel": (0.12, 0.04, 0.28, 0.22),
-            },
-            {
-                "label": "Safety Vest",
-                "category": "compliant",
-                "confidence": 0.8897,
-                "rel": (0.10, 0.22, 0.32, 0.70),
-            },
-            {
-                "label": "No Hard Hat",
-                "category": "violation",
-                "confidence": 0.8734,
-                "rel": (0.55, 0.03, 0.74, 0.22),
-            },
-            {
-                "label": "No Safety Vest",
-                "category": "violation",
-                "confidence": 0.8112,
-                "rel": (0.52, 0.20, 0.78, 0.72),
-            },
-            {
-                "label": "Safety Glasses",
-                "category": "compliant",
-                "confidence": 0.7653,
-                "rel": (0.14, 0.07, 0.27, 0.18),
-            },
+        # All coordinates expressed as fractions of image dimensions
+        def px(rel_box: tuple) -> dict:
+            rx1, ry1, rx2, ry2 = rel_box
+            return {"x1": rx1 * w, "y1": ry1 * h, "x2": rx2 * w, "y2": ry2 * h}
+
+        persons = [
+            {**px((0.05, 0.02, 0.40, 0.98)), "conf": 0.96},   # worker 1 — compliant
+            {**px((0.55, 0.04, 0.95, 0.96)), "conf": 0.91},   # worker 2 — missing vest
         ]
-
-        detections = [
-            Detection(
-                id=i,
-                label=d["label"],
-                category=d["category"],  # type: ignore[arg-type]
-                confidence=d["confidence"],
-                bbox=BoundingBox(
-                    x1=d["rel"][0] * width,
-                    y1=d["rel"][1] * height,
-                    x2=d["rel"][2] * width,
-                    y2=d["rel"][3] * height,
-                ),
-                color=_category_color(d["category"]),
-            )
-            for i, d in enumerate(raw)
+        helmets = [
+            {**px((0.10, 0.03, 0.35, 0.20)), "conf": 0.94},   # matches person 0
+        ]
+        vests = [
+            {**px((0.08, 0.22, 0.38, 0.68)), "conf": 0.89},   # matches person 0
         ]
 
         elapsed_ms = (time.perf_counter() - start) * 1000
-        return _build_response(detections, elapsed_ms, total_persons=2)
+        return _build_response(persons, helmets, vests, elapsed_ms)
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Response builder ──────────────────────────────────────────────────────────
 
 def _build_response(
-    detections: list[Detection],
+    persons: list[dict],
+    helmets: list[dict],
+    vests:   list[dict],
     elapsed_ms: float,
-    total_persons: int | None = None,
 ) -> DetectionResponse:
-    compliant = sum(1 for d in detections if d.category == "compliant")
-    violations = len(detections) - compliant
+    """
+    Matches equipment to persons using the configurable overlap threshold,
+    infers absences, then builds both the flat Detection list (for the canvas)
+    and the grouped PersonResult list (for the results panel).
+    """
+    threshold = settings.PPE_OVERLAP_THRESHOLD
 
-    if total_persons is None:
-        total_persons = max(1, len(detections) // 2) if detections else 0
+    # ── Match equipment → person ──────────────────────────────────────────────
+    # Each equipment box is assigned to the person it overlaps with most,
+    # provided that overlap is >= threshold.
+
+    def best_match(equip_list: list[dict]) -> list[int | None]:
+        """Returns list of person indices (or None) for each equipment item."""
+        assignments: list[int | None] = []
+        for eq in equip_list:
+            best_idx: int | None = None
+            best_ratio: float = threshold  # must beat the threshold
+            for i, p in enumerate(persons):
+                ratio = _overlap_ratio(eq, p)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_idx = i
+            assignments.append(best_idx)
+        return assignments
+
+    helmet_assignments = best_match(helmets)
+    vest_assignments   = best_match(vests)
+
+    # ── Build per-person equipment map ────────────────────────────────────────
+    # Keep only the highest-confidence match per person per equipment type.
+
+    person_helmets: dict[int, dict] = {}
+    for eq, p_idx in zip(helmets, helmet_assignments):
+        if p_idx is None:
+            continue
+        if p_idx not in person_helmets or person_helmets[p_idx]["conf"] < eq["conf"]:
+            person_helmets[p_idx] = eq
+
+    person_vests: dict[int, dict] = {}
+    for eq, p_idx in zip(vests, vest_assignments):
+        if p_idx is None:
+            continue
+        if p_idx not in person_vests or person_vests[p_idx]["conf"] < eq["conf"]:
+            person_vests[p_idx] = eq
+
+    # ── Build PersonResult list ───────────────────────────────────────────────
+    person_results: list[PersonResult] = []
+    det_id = 0
+    flat_detections: list[Detection] = []
+
+    for i, p in enumerate(persons):
+        p_bbox = BoundingBox(x1=p["x1"], y1=p["y1"], x2=p["x2"], y2=p["y2"])
+
+        # Person box on canvas (orange)
+        flat_detections.append(Detection(
+            id=det_id, label=f"Person {i + 1}",
+            category="compliant",   # person box itself is always neutral/compliant color
+            confidence=round(p["conf"], 4),
+            bbox=p_bbox,
+            color=PERSON_COLOR,
+        ))
+        det_id += 1
+
+        equipment_statuses: list[EquipmentStatus] = []
+
+        # ── Helmet ────────────────────────────────────────────────────────────
+        h = person_helmets.get(i)
+        if h is not None:
+            h_bbox = BoundingBox(x1=h["x1"], y1=h["y1"], x2=h["x2"], y2=h["y2"])
+            flat_detections.append(Detection(
+                id=det_id, label="Helmet", category="compliant",
+                confidence=round(h["conf"], 4), bbox=h_bbox, color=COMPLIANT_COLOR,
+            ))
+            det_id += 1
+            equipment_statuses.append(EquipmentStatus(
+                label="Helmet", status="compliant",
+                confidence=round(h["conf"], 4), bbox=h_bbox,
+            ))
+        else:
+            # Synthesise a violation box covering the head region (top 30% of person)
+            head_bbox = BoundingBox(
+                x1=p["x1"], y1=p["y1"],
+                x2=p["x2"], y2=p["y1"] + (p["y2"] - p["y1"]) * 0.30,
+            )
+            flat_detections.append(Detection(
+                id=det_id, label="No Helmet", category="violation",
+                confidence=round(p["conf"], 4), bbox=head_bbox, color=VIOLATION_COLOR,
+            ))
+            det_id += 1
+            equipment_statuses.append(EquipmentStatus(
+                label="Helmet", status="violation", bbox=head_bbox,
+            ))
+
+        # ── Vest ──────────────────────────────────────────────────────────────
+        v = person_vests.get(i)
+        if v is not None:
+            v_bbox = BoundingBox(x1=v["x1"], y1=v["y1"], x2=v["x2"], y2=v["y2"])
+            flat_detections.append(Detection(
+                id=det_id, label="Vest", category="compliant",
+                confidence=round(v["conf"], 4), bbox=v_bbox, color=COMPLIANT_COLOR,
+            ))
+            det_id += 1
+            equipment_statuses.append(EquipmentStatus(
+                label="Vest", status="compliant",
+                confidence=round(v["conf"], 4), bbox=v_bbox,
+            ))
+        else:
+            # Synthesise a violation box covering the torso (middle 60% of person)
+            ph = p["y2"] - p["y1"]
+            torso_bbox = BoundingBox(
+                x1=p["x1"] + (p["x2"] - p["x1"]) * 0.15,
+                y1=p["y1"] + ph * 0.25,
+                x2=p["x2"] - (p["x2"] - p["x1"]) * 0.15,
+                y2=p["y1"] + ph * 0.75,
+            )
+            flat_detections.append(Detection(
+                id=det_id, label="No Vest", category="violation",
+                confidence=round(p["conf"], 4), bbox=torso_bbox, color=VIOLATION_COLOR,
+            ))
+            det_id += 1
+            equipment_statuses.append(EquipmentStatus(
+                label="Vest", status="violation", bbox=torso_bbox,
+            ))
+
+        is_compliant = all(eq.status == "compliant" for eq in equipment_statuses)
+        person_results.append(PersonResult(
+            person_id=i + 1,
+            bbox=p_bbox,
+            confidence=round(p["conf"], 4),
+            equipment=equipment_statuses,
+            compliant=is_compliant,
+        ))
+
+    # ── Unmatched equipment boxes (no associated person) ──────────────────────
+    matched_helmets = {id(h) for h, p_idx in zip(helmets, helmet_assignments) if p_idx is not None}
+    for h in helmets:
+        if id(h) not in matched_helmets:
+            flat_detections.append(Detection(
+                id=det_id, label="Helmet (unassigned)", category="compliant",
+                confidence=round(h["conf"], 4),
+                bbox=BoundingBox(x1=h["x1"], y1=h["y1"], x2=h["x2"], y2=h["y2"]),
+                color=COMPLIANT_COLOR,
+            ))
+            det_id += 1
+
+    matched_vests = {id(v) for v, p_idx in zip(vests, vest_assignments) if p_idx is not None}
+    for v in vests:
+        if id(v) not in matched_vests:
+            flat_detections.append(Detection(
+                id=det_id, label="Vest (unassigned)", category="compliant",
+                confidence=round(v["conf"], 4),
+                bbox=BoundingBox(x1=v["x1"], y1=v["y1"], x2=v["x2"], y2=v["y2"]),
+                color=COMPLIANT_COLOR,
+            ))
+            det_id += 1
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    compliant_count  = sum(1 for pr in person_results if pr.compliant)
+    violation_count  = len(person_results) - compliant_count
 
     return DetectionResponse(
-        detections=detections,
+        detections=flat_detections,
+        persons=person_results,
         summary=Summary(
-            total_persons=total_persons,
-            compliant=compliant,
-            violations=violations,
+            total_persons=len(person_results),
+            compliant=compliant_count,
+            violations=violation_count,
             inference_ms=round(elapsed_ms, 2),
         ),
     )

@@ -1,4 +1,4 @@
-from typing import List, Literal
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel
 
@@ -19,6 +19,21 @@ class Detection(BaseModel):
     color: str
 
 
+class EquipmentStatus(BaseModel):
+    label: str                          # e.g. "Helmet", "Vest"
+    status: Literal["compliant", "violation"]
+    confidence: Optional[float] = None  # None when inferred as missing
+    bbox: Optional[BoundingBox] = None  # None when inferred as missing
+
+
+class PersonResult(BaseModel):
+    person_id: int                      # 1-based for display
+    bbox: BoundingBox                   # the person bounding box
+    confidence: float
+    equipment: List[EquipmentStatus]
+    compliant: bool                     # True only if ALL equipment is present
+
+
 class Summary(BaseModel):
     total_persons: int
     compliant: int
@@ -27,5 +42,6 @@ class Summary(BaseModel):
 
 
 class DetectionResponse(BaseModel):
-    detections: List[Detection]
+    detections: List[Detection]         # flat list — for canvas drawing
+    persons: List[PersonResult]         # grouped — for the results panel
     summary: Summary
