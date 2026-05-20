@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useCallback } from "react";
 
 import { BoundingBoxCanvas } from "@/components/BoundingBoxCanvas";
 import { ResultsPanel } from "@/components/ResultsPanel";
+import { SummaryBar } from "@/components/SummaryBar";
 import { UploadZone } from "@/components/UploadZone";
 import { analyzeImage } from "@/lib/api";
 import { DetectionResponse } from "@/types/detection";
@@ -15,11 +16,13 @@ export default function Home() {
   const [result, setResult] = useState<DetectionResponse | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
   const [errorMsg, setErrorMsg] = useState("");
+  const [imageHeight, setImageHeight] = useState<number | null>(null);
 
   const handleFile = async (selected: File) => {
     setFile(selected);
     setResult(null);
     setErrorMsg("");
+    setImageHeight(null);
     setPhase("analyzing");
 
     try {
@@ -37,7 +40,12 @@ export default function Home() {
     setFile(null);
     setResult(null);
     setErrorMsg("");
+    setImageHeight(null);
   };
+
+  const onImageHeightReady = useCallback((h: number) => {
+    setImageHeight(h);
+  }, []);
 
   return (
     <main className="min-h-screen bg-[#0a0c0f] text-zinc-100 p-6 md:p-10">
@@ -93,10 +101,26 @@ export default function Home() {
 
       {/* Results state */}
       {phase === "done" && file && result && (
-        <div className="max-w-6xl mx-auto flex flex-col gap-6">
-          <div className="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-6 items-start">
-            <BoundingBoxCanvas imageFile={file} detections={result.detections} />
-            <ResultsPanel summary={result.summary} persons={result.persons} />
+        <div className="max-w-6xl mx-auto flex flex-col gap-4">
+          {/* Summary bar — sits above the image, full width */}
+          <SummaryBar summary={result.summary} />
+
+          {/* Image + sidebar row */}
+          <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-4 items-start">
+            {/* Image with bounding boxes */}
+            <BoundingBoxCanvas
+              imageFile={file}
+              detections={result.detections}
+              onHeightReady={onImageHeightReady}
+            />
+
+            {/* Workers sidebar — height matches the image */}
+            <div
+              className="bg-zinc-950 border border-zinc-800 rounded-lg p-3"
+              style={imageHeight ? { height: imageHeight, overflow: "hidden" } : undefined}
+            >
+              <ResultsPanel persons={result.persons} />
+            </div>
           </div>
 
           <button

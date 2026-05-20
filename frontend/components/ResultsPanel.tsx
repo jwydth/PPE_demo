@@ -1,60 +1,21 @@
-import { EquipmentStatus, PersonResult, Summary } from "@/types/detection";
-
-import { StatusBadge } from "./StatusBadge";
+import { EquipmentStatus, PersonResult } from "@/types/detection";
 
 interface ResultsPanelProps {
-  summary: Summary;
   persons: PersonResult[];
 }
 
-export function ResultsPanel({ summary, persons }: ResultsPanelProps) {
+export function ResultsPanel({ persons }: ResultsPanelProps) {
   return (
-    <div className="flex flex-col gap-4 h-full">
-      <StatusBadge violation={summary.violations > 0} />
+    <div className="flex flex-col h-full min-h-0">
+      <p className="font-mono text-[10px] text-zinc-600 tracking-widest mb-3 shrink-0">
+        WORKERS ({persons.length})
+      </p>
 
-      {/* Summary stats */}
-      <div className="grid grid-cols-2 gap-3">
-        <StatCard label="PERSONS"    value={summary.total_persons} />
-        <StatCard label="COMPLIANT"  value={summary.compliant}  accent="green" />
-        <StatCard label="VIOLATIONS" value={summary.violations} accent="red" />
-        <StatCard label="INFERENCE"  value={`${summary.inference_ms.toFixed(1)} ms`} />
-      </div>
-
-      {/* Per-person breakdown */}
       <div className="flex-1 overflow-y-auto flex flex-col gap-3 pr-1 min-h-0">
-        <p className="font-mono text-[10px] text-zinc-600 tracking-widest">
-          WORKERS ({persons.length})
-        </p>
         {persons.map((person) => (
           <PersonCard key={person.person_id} person={person} />
         ))}
       </div>
-    </div>
-  );
-}
-
-// ── Stat card ─────────────────────────────────────────────────────────────────
-
-function StatCard({
-  label,
-  value,
-  accent,
-}: {
-  label: string;
-  value: string | number;
-  accent?: "green" | "red";
-}) {
-  const valueClass =
-    accent === "green"
-      ? "text-green-400"
-      : accent === "red"
-        ? "text-red-400"
-        : "text-orange-400";
-
-  return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-3">
-      <p className="text-zinc-500 font-mono text-[10px] tracking-widest mb-1">{label}</p>
-      <p className={`font-mono text-xl font-bold ${valueClass}`}>{value}</p>
     </div>
   );
 }
@@ -74,7 +35,7 @@ function PersonCard({ person }: { person: PersonResult }) {
     : "bg-red-500/15 text-red-400";
 
   return (
-    <div className={`bg-zinc-900 border ${borderColor} rounded-lg overflow-hidden`}>
+    <div className={`bg-zinc-900 border ${borderColor} rounded-lg overflow-hidden shrink-0`}>
       {/* Person header */}
       <div className={`flex items-center justify-between px-3 py-2 ${headerBg}`}>
         <div className="flex items-center gap-2">
