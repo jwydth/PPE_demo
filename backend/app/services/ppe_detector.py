@@ -255,18 +255,8 @@ def _build_response(
                 confidence=round(h["conf"], 4), bbox=h_bbox,
             ))
         else:
-            # Synthesise a violation box covering the head region (top 30% of person)
-            head_bbox = BoundingBox(
-                x1=p["x1"], y1=p["y1"],
-                x2=p["x2"], y2=p["y1"] + (p["y2"] - p["y1"]) * 0.30,
-            )
-            flat_detections.append(Detection(
-                id=det_id, label="No Helmet", category="violation",
-                confidence=round(p["conf"], 4), bbox=head_bbox, color=VIOLATION_COLOR,
-            ))
-            det_id += 1
             equipment_statuses.append(EquipmentStatus(
-                label="Helmet", status="violation", bbox=head_bbox,
+                label="Helmet", status="violation",
             ))
 
         # ── Vest ──────────────────────────────────────────────────────────────
@@ -283,21 +273,8 @@ def _build_response(
                 confidence=round(v["conf"], 4), bbox=v_bbox,
             ))
         else:
-            # Synthesise a violation box covering the torso (middle 60% of person)
-            ph = p["y2"] - p["y1"]
-            torso_bbox = BoundingBox(
-                x1=p["x1"] + (p["x2"] - p["x1"]) * 0.15,
-                y1=p["y1"] + ph * 0.25,
-                x2=p["x2"] - (p["x2"] - p["x1"]) * 0.15,
-                y2=p["y1"] + ph * 0.75,
-            )
-            flat_detections.append(Detection(
-                id=det_id, label="No Vest", category="violation",
-                confidence=round(p["conf"], 4), bbox=torso_bbox, color=VIOLATION_COLOR,
-            ))
-            det_id += 1
             equipment_statuses.append(EquipmentStatus(
-                label="Vest", status="violation", bbox=torso_bbox,
+                label="Vest", status="violation",
             ))
 
         is_compliant = all(eq.status == "compliant" for eq in equipment_statuses)

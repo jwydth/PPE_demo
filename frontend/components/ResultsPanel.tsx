@@ -38,14 +38,9 @@ function PersonCard({ person }: { person: PersonResult }) {
     <div className={`bg-zinc-900 border ${borderColor} rounded-lg overflow-hidden shrink-0`}>
       {/* Person header */}
       <div className={`flex items-center justify-between px-3 py-2 ${headerBg}`}>
-        <div className="flex items-center gap-2">
-          <span className="text-zinc-400 font-mono text-xs">
-            👷 Person {person.person_id}
-          </span>
-          <span className="font-mono text-[10px] text-zinc-600">
-            {(person.confidence * 100).toFixed(0)}%
-          </span>
-        </div>
+        <span className="text-zinc-400 font-mono text-xs">
+          👷 Person {person.person_id}
+        </span>
         <span className={`font-mono text-[10px] px-2 py-0.5 rounded-full ${badgeColor}`}>
           {badgeText}
         </span>
@@ -69,8 +64,6 @@ function EquipmentRow({ eq }: { eq: EquipmentStatus }) {
   const iconColor   = isCompliant ? "text-green-400" : "text-red-400";
   const labelColor  = isCompliant ? "text-zinc-200"  : "text-red-300";
   const statusText  = isCompliant ? "Detected" : "Not detected";
-  const barColor    = isCompliant ? "#22c55e" : "#ef4444";
-  const pct         = eq.confidence !== undefined ? Math.round(eq.confidence * 100) : null;
 
   return (
     <div className="flex items-center gap-3 px-3 py-2">
@@ -85,21 +78,6 @@ function EquipmentRow({ eq }: { eq: EquipmentStatus }) {
           <span className={`font-mono text-xs ${labelColor} truncate`}>{eq.label}</span>
           <span className="font-mono text-[10px] text-zinc-500 shrink-0">{statusText}</span>
         </div>
-
-        {/* Confidence bar — only when detected */}
-        {pct !== null && (
-          <div className="flex items-center gap-2 mt-1">
-            <div className="flex-1 h-1 bg-zinc-800 rounded-full overflow-hidden">
-              <div
-                className="h-full rounded-full transition-all duration-500"
-                style={{ width: `${pct}%`, backgroundColor: barColor }}
-              />
-            </div>
-            <span className="font-mono text-[10px] text-zinc-500 w-8 text-right shrink-0">
-              {pct}%
-            </span>
-          </div>
-        )}
       </div>
     </div>
   );

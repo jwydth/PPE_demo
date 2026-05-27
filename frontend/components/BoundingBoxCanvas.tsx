@@ -124,7 +124,7 @@ function drawDetections(
     ctx.stroke();
 
     // Label
-    const label = `${det.label}  ${(det.confidence * 100).toFixed(0)}%`;
+    const label = det.label;
     const fontSize = Math.max(10, Math.min(14, canvasWidth / 55));
     ctx.font = `600 ${fontSize}px "IBM Plex Mono", monospace`;
     const textW = ctx.measureText(label).width;
