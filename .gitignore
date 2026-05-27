@@ -5,5 +5,4 @@ node_modules/
 __pycache__/
 *.pyc
 .venv/
-weights/*.pt
 *.pack.gz

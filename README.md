@@ -73,6 +73,12 @@ cp .env.example .env
 uvicorn app.main:app --reload --port 8000
 ```
 
+You can also start the backend from the repository root without import-path issues:
+
+```bash
+uvicorn app.main:app --app-dir backend --reload --port 8000
+```
+
 The API will be live at `http://localhost:8000`.  
 Interactive docs: `http://localhost:8000/docs`
 

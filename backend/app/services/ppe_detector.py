@@ -44,6 +44,8 @@ from app.models.schemas import (
 
 logger = logging.getLogger(__name__)
 
+BACKEND_DIR = Path(__file__).resolve().parents[2]
+
 COMPLIANT_COLOR = "#22c55e"
 VIOLATION_COLOR = "#ef4444"
 PERSON_COLOR    = "#f97316"   # orange — used for person bbox on canvas
@@ -81,7 +83,10 @@ class PPEDetector:
     # ── Startup ──────────────────────────────────────────────────────────────
 
     def _load_model(self) -> None:
-        model_path = Path(settings.MODEL_PATH)
+        model_path = Path(settings.MODEL_PATH).expanduser()
+        if not model_path.is_absolute():
+            model_path = BACKEND_DIR / model_path
+        model_path = model_path.resolve()
 
         if not model_path.exists():
             logger.warning(
