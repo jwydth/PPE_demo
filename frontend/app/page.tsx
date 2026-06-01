@@ -2,7 +2,9 @@
 
 import { useCallback, useState } from "react";
 
+import { BatchImagesPanel } from "@/components/BatchImagesPanel";
 import { BoundingBoxCanvas } from "@/components/BoundingBoxCanvas";
+import { DetectionHistoryPanel } from "@/components/DetectionHistoryPanel";
 import { ResultsPanel } from "@/components/ResultsPanel";
 import { SummaryBar } from "@/components/SummaryBar";
 import { UploadZone } from "@/components/UploadZone";
@@ -10,10 +12,74 @@ import { VideoReportsPanel } from "@/components/VideoReportsPanel";
 import { analyzeImage, analyzeVideo } from "@/lib/api";
 import { DetectionResponse, VideoProcessingResponse } from "@/types/detection";
 
+type ActiveTab = "detect" | "batch" | "history";
 type Phase = "idle" | "analyzing" | "done" | "error";
 type FileKind = "image" | "video";
 
 export default function Home() {
+  const [activeTab, setActiveTab] = useState<ActiveTab>("detect");
+
+  return (
+    <main className="min-h-screen bg-[#0a0c0f] text-zinc-100 p-6 md:p-10">
+      <header className="mb-6 border-b border-zinc-800 pb-6">
+        <div className="flex items-center gap-3 mb-2">
+          <span className="w-2 h-2 rounded-full bg-orange-500 animate-pulse" />
+          <p className="font-mono text-orange-500 text-xs tracking-widest uppercase">
+            De Heus / Smart Factory / Safety Monitor v1.1
+          </p>
+        </div>
+        <h1 className="font-sans text-2xl font-bold text-zinc-100">
+          PPE Compliance Detection
+        </h1>
+        <p className="text-zinc-500 text-sm mt-1 font-mono">
+          Upload image frames or CCTV clips to scan for personal protective equipment violations
+        </p>
+      </header>
+
+      <nav className="max-w-6xl mx-auto mb-6 flex flex-wrap gap-2">
+        <TabButton active={activeTab === "detect"} onClick={() => setActiveTab("detect")}>
+          Detect PPE
+        </TabButton>
+        <TabButton active={activeTab === "batch"} onClick={() => setActiveTab("batch")}>
+          Batch Images
+        </TabButton>
+        <TabButton active={activeTab === "history"} onClick={() => setActiveTab("history")}>
+          Detection History
+        </TabButton>
+      </nav>
+
+      {activeTab === "detect" && <DetectPpePanel />}
+      {activeTab === "batch" && <BatchImagesPanel />}
+      {activeTab === "history" && <DetectionHistoryPanel />}
+    </main>
+  );
+}
+
+function TabButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={[
+        "font-mono text-xs rounded border px-4 py-2 transition-colors",
+        active
+          ? "border-orange-500/50 bg-orange-500/10 text-orange-300"
+          : "border-zinc-800 bg-zinc-950 text-zinc-500 hover:text-zinc-200 hover:border-zinc-600",
+      ].join(" ")}
+    >
+      {children}
+    </button>
+  );
+}
+
+function DetectPpePanel() {
   const [file, setFile] = useState<File | null>(null);
   const [fileKind, setFileKind] = useState<FileKind>("image");
   const [result, setResult] = useState<DetectionResponse | null>(null);
@@ -59,22 +125,7 @@ export default function Home() {
   }, []);
 
   return (
-    <main className="min-h-screen bg-[#0a0c0f] text-zinc-100 p-6 md:p-10">
-      <header className="mb-8 border-b border-zinc-800 pb-6">
-        <div className="flex items-center gap-3 mb-2">
-          <span className="w-2 h-2 rounded-full bg-orange-500 animate-pulse" />
-          <p className="font-mono text-orange-500 text-xs tracking-widest uppercase">
-            De Heus / Smart Factory / Safety Monitor v1.1
-          </p>
-        </div>
-        <h1 className="font-sans text-2xl font-bold text-zinc-100">
-          PPE Compliance Detection
-        </h1>
-        <p className="text-zinc-500 text-sm mt-1 font-mono">
-          Upload an image frame or CCTV clip to scan for personal protective equipment violations
-        </p>
-      </header>
-
+    <>
       {phase !== "done" && (
         <div className="max-w-xl mx-auto flex flex-col gap-4">
           <UploadZone onFileSelect={handleFile} disabled={phase === "analyzing"} />
@@ -123,15 +174,7 @@ export default function Home() {
             </div>
           </div>
 
-          <button
-            onClick={reset}
-            className="
-              w-fit font-mono text-xs text-zinc-500 hover:text-orange-400 transition-colors
-              border border-zinc-800 hover:border-orange-500/30 rounded px-4 py-2
-            "
-          >
-            ANALYZE ANOTHER FILE
-          </button>
+          <ResetButton onClick={reset} />
         </div>
       )}
 
@@ -148,17 +191,23 @@ export default function Home() {
 
           <VideoReportsPanel result={videoResult} />
 
-          <button
-            onClick={reset}
-            className="
-              w-fit font-mono text-xs text-zinc-500 hover:text-orange-400 transition-colors
-              border border-zinc-800 hover:border-orange-500/30 rounded px-4 py-2
-            "
-          >
-            ANALYZE ANOTHER FILE
-          </button>
+          <ResetButton onClick={reset} />
         </div>
       )}
-    </main>
+    </>
+  );
+}
+
+function ResetButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className="
+        w-fit font-mono text-xs text-zinc-500 hover:text-orange-400 transition-colors
+        border border-zinc-800 hover:border-orange-500/30 rounded px-4 py-2
+      "
+    >
+      ANALYZE ANOTHER FILE
+    </button>
   );
 }

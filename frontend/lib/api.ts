@@ -1,4 +1,4 @@
-import { DetectionResponse, VideoProcessingResponse } from "@/types/detection";
+import { DetectionResponse, VideoProcessingResponse, ViolationReport } from "@/types/detection";
 
 const API_URL =
   process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? "http://localhost:8000";
@@ -42,6 +42,21 @@ export async function analyzeVideo(file: File): Promise<VideoProcessingResponse>
       snapshot_url: toAbsoluteUrl(report.snapshot_url),
     })),
   };
+}
+
+export async function getViolations(): Promise<ViolationReport[]> {
+  const res = await fetch(`${API_URL}/violations`);
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error((body as { detail?: string }).detail ?? "Could not load detection history");
+  }
+
+  const payload = (await res.json()) as ViolationReport[];
+  return payload.map((report) => ({
+    ...report,
+    snapshot_url: toAbsoluteUrl(report.snapshot_url),
+  }));
 }
 
 function toAbsoluteUrl(url?: string): string | undefined {
