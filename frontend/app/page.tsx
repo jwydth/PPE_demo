@@ -137,20 +137,13 @@ export default function Home() {
 
       {phase === "done" && file && videoResult && (
         <div className="max-w-6xl mx-auto flex flex-col gap-4">
-          <div className="flex items-center gap-3 flex-wrap">
-            <div
-              className={[
-                "font-mono text-xs rounded-full px-3 py-1 border",
-                videoResult.summary.unique_violations > 0
-                  ? "bg-red-500/10 border-red-500/40 text-red-300"
-                  : "bg-green-500/10 border-green-500/40 text-green-300",
-              ].join(" ")}
-            >
-              {videoResult.summary.unique_violations > 0 ? "VIOLATION DETECTED" : "COMPLIANT"}
-            </div>
-            <p className="font-mono text-xs text-zinc-500 truncate">
-              {videoResult.summary.video_name}
+          <div>
+            <p className="font-mono text-[10px] text-orange-500 tracking-widest uppercase">
+              Analysis Result
             </p>
+            <h2 className="mt-1 text-xl font-semibold text-zinc-100">
+              {videoResult.summary.video_name}
+            </h2>
           </div>
 
           <VideoReportsPanel result={videoResult} />

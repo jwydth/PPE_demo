@@ -7,3 +7,5 @@ __pycache__/
 .venv/
 *.pack.gz
 backend/storage/
+backend/weights/*.pt
+video_debug.log

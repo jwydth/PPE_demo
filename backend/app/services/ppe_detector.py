@@ -132,8 +132,6 @@ class PPEDetector:
         return _build_response(persons, helmets, vests, elapsed_ms)
 
     def _real_process_video(self, video_path: Path, video_name: str) -> VideoProcessingResponse:
-        import cv2
-
         fps, total_frames = _video_metadata(video_path)
         start = time.perf_counter()
         stride = max(1, settings.VIDEO_FRAME_STRIDE)
@@ -160,6 +158,7 @@ class PPEDetector:
             response = _build_response(persons, helmets, vests, 0.0)
             frame = result.orig_img.copy()
             frame_height, frame_width = frame.shape[:2]
+            used_worker_ids: set[int] = set()
 
             for person in response.persons:
                 decision = _update_worker_status(
@@ -169,6 +168,7 @@ class PPEDetector:
                     fps=fps,
                     frame_width=frame_width,
                     frame_height=frame_height,
+                    used_worker_ids=used_worker_ids,
                 )
                 candidate_violations += int(decision["candidate"])
                 missing_to_report = decision["missing_to_report"]
@@ -250,6 +250,7 @@ class PPEDetector:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             response = self._mock_predict(Image.fromarray(rgb))
             frame_height, frame_width = frame.shape[:2]
+            used_worker_ids: set[int] = set()
 
             for person in response.persons:
                 track_id = person.person_id
@@ -261,6 +262,7 @@ class PPEDetector:
                     fps=fps,
                     frame_width=frame_width,
                     frame_height=frame_height,
+                    used_worker_ids=used_worker_ids,
                 )
                 candidate_violations += int(decision["candidate"])
                 missing_to_report = decision["missing_to_report"]
@@ -306,8 +308,9 @@ def _update_worker_status(
     fps: float,
     frame_width: int,
     frame_height: int,
+    used_worker_ids: set[int],
 ) -> dict:
-    worker = _find_or_create_worker(workers, person, frame_index)
+    worker = _find_or_create_worker(workers, person, frame_index, used_worker_ids)
     _merge_worker_observation(worker, person, frame_index)
 
     present = _present_equipment(person)
@@ -316,8 +319,11 @@ def _update_worker_status(
     if "Vest" in present:
         worker.vest_seen_frame = frame_index
 
-    if not _is_worker_judgeable(worker, frame_index, fps, frame_width, frame_height):
-        reason = _unknown_reason(worker, frame_index, fps, frame_width, frame_height)
+    raw_missing = _missing_equipment(person)
+    judgeable = _is_worker_judgeable(worker, frame_index, fps, frame_width, frame_height)
+    reason = "" if judgeable else _unknown_reason(worker, frame_index, fps, frame_width, frame_height)
+
+    if not judgeable:
         if worker.status != "violation":
             worker.status = "unknown"
             _reset_missing_counts(worker)
@@ -325,13 +331,12 @@ def _update_worker_status(
             "unknown": worker.status != "violation",
             "candidate": False,
             "reason": reason,
-            "missing": _missing_equipment(person),
+            "missing": raw_missing,
             "worker": worker,
             "missing_to_report": [],
         }
 
-    missing = _missing_equipment(person)
-    missing = _suppress_recently_seen_ppe(worker, missing, frame_index, fps)
+    missing = _suppress_recently_seen_ppe(worker, raw_missing, frame_index, fps)
     if worker.reported_missing:
         missing = [label for label in missing if label not in worker.reported_missing]
     if not missing:
@@ -393,9 +398,11 @@ def _find_or_create_worker(
     workers: list[WorkerState],
     person: PersonResult,
     frame_index: int,
+    used_worker_ids: set[int],
 ) -> WorkerState:
-    worker = _find_existing_worker(workers, person, frame_index)
+    worker = _find_existing_worker(workers, person, frame_index, used_worker_ids)
     if worker is not None:
+        used_worker_ids.add(id(worker))
         return worker
 
     worker = WorkerState(
@@ -406,6 +413,7 @@ def _find_or_create_worker(
         recent_bboxes=[],
     )
     workers.append(worker)
+    used_worker_ids.add(id(worker))
     return worker
 
 
@@ -413,16 +421,21 @@ def _find_existing_worker(
     workers: list[WorkerState],
     person: PersonResult,
     frame_index: int,
+    used_worker_ids: set[int],
 ) -> WorkerState | None:
     if person.track_id is not None:
         for worker in workers:
+            if id(worker) in used_worker_ids:
+                continue
             if person.track_id in worker.track_ids:
                 return worker
+        return None
 
     fresh_workers = [
         worker
         for worker in workers
-        if frame_index - worker.last_frame <= settings.VIDEO_CASE_MAX_FRAME_GAP
+        if id(worker) not in used_worker_ids
+        and frame_index - worker.last_frame <= settings.VIDEO_CASE_MAX_FRAME_GAP
     ]
 
     best_worker: WorkerState | None = None
