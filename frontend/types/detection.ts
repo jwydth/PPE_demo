@@ -25,6 +25,7 @@ export interface EquipmentStatus {
 
 export interface PersonResult {
   person_id: number;
+  track_id?: number;
   bbox: BoundingBox;
   confidence: number;
   equipment: EquipmentStatus[];
@@ -42,4 +43,31 @@ export interface DetectionResponse {
   detections: Detection[];
   persons: PersonResult[];
   summary: Summary;
+}
+
+export interface ViolationReport {
+  id: number;
+  timestamp: string;
+  violation_type: string;
+  details: string;
+  snapshot_url?: string;
+  video_name?: string;
+  frame_index?: number;
+  track_id?: number;
+}
+
+export interface VideoSummary {
+  video_name: string;
+  total_frames: number;
+  processed_frames: number;
+  fps: number;
+  duration_seconds: number;
+  unique_violations: number;
+  candidate_violations: number;
+  inference_ms: number;
+}
+
+export interface VideoProcessingResponse {
+  summary: VideoSummary;
+  reports: ViolationReport[];
 }

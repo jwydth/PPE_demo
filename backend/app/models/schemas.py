@@ -20,18 +20,19 @@ class Detection(BaseModel):
 
 
 class EquipmentStatus(BaseModel):
-    label: str                          # e.g. "Helmet", "Vest"
+    label: str
     status: Literal["compliant", "violation"]
-    confidence: Optional[float] = None  # None when inferred as missing
-    bbox: Optional[BoundingBox] = None  # None when inferred as missing
+    confidence: Optional[float] = None
+    bbox: Optional[BoundingBox] = None
 
 
 class PersonResult(BaseModel):
-    person_id: int                      # 1-based for display
-    bbox: BoundingBox                   # the person bounding box
+    person_id: int
+    track_id: Optional[int] = None
+    bbox: BoundingBox
     confidence: float
     equipment: List[EquipmentStatus]
-    compliant: bool                     # True only if ALL equipment is present
+    compliant: bool
 
 
 class Summary(BaseModel):
@@ -42,6 +43,33 @@ class Summary(BaseModel):
 
 
 class DetectionResponse(BaseModel):
-    detections: List[Detection]         # flat list — for canvas drawing
-    persons: List[PersonResult]         # grouped — for the results panel
+    detections: List[Detection]
+    persons: List[PersonResult]
     summary: Summary
+
+
+class ViolationReport(BaseModel):
+    id: int
+    timestamp: str
+    violation_type: str
+    details: str
+    snapshot_url: Optional[str] = None
+    video_name: Optional[str] = None
+    frame_index: Optional[int] = None
+    track_id: Optional[int] = None
+
+
+class VideoSummary(BaseModel):
+    video_name: str
+    total_frames: int
+    processed_frames: int
+    fps: float
+    duration_seconds: float
+    unique_violations: int
+    candidate_violations: int = 0
+    inference_ms: float
+
+
+class VideoProcessingResponse(BaseModel):
+    summary: VideoSummary
+    reports: List[ViolationReport]
