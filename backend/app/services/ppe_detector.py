@@ -1,5 +1,6 @@
 import logging
 import math
+import statistics
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -19,7 +20,7 @@ from app.models.schemas import (
     VideoSummary,
     ViolationReport,
 )
-from app.services.violation_store import SNAPSHOT_DIR, save_violation, update_violation
+from app.services.violation_store import SNAPSHOT_DIR, save_violation
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ class WorkerState:
     vest_seen_frame: int | None = None
     missing_counts: dict[str, int] | None = None
     reported_missing: set[str] | None = None
+    reported: bool = False
     status: str = "unknown"
 
     def __post_init__(self) -> None:
@@ -138,6 +140,7 @@ class PPEDetector:
 
         cases: list[ViolationCase] = []
         workers: list[WorkerState] = []
+        confirmed_aspect_ratios: list[float] = []
         candidate_violations = 0
         processed_frames = 0
 
@@ -179,14 +182,17 @@ class PPEDetector:
                     cases=cases,
                     frame=frame,
                     person=person,
+                    worker=decision["worker"],
                     missing=missing_to_report,
                     video_name=video_name,
                     frame_index=frame_index,
+                    confirmed_aspect_ratios=confirmed_aspect_ratios,
                 )
 
         elapsed_ms = (time.perf_counter() - start) * 1000
         duration_seconds = total_frames / fps if fps > 0 else 0.0
         reports = [case.report for case in cases]
+        _log_incident_aspect_summary(video_name, confirmed_aspect_ratios)
 
         return VideoProcessingResponse(
             summary=VideoSummary(
@@ -236,6 +242,7 @@ class PPEDetector:
         processed_frames = 0
         cases: list[ViolationCase] = []
         workers: list[WorkerState] = []
+        confirmed_aspect_ratios: list[float] = []
         candidate_violations = 0
 
         while True:
@@ -273,9 +280,11 @@ class PPEDetector:
                     cases=cases,
                     frame=frame,
                     person=person,
+                    worker=decision["worker"],
                     missing=missing_to_report,
                     video_name=video_name,
                     frame_index=frame_index,
+                    confirmed_aspect_ratios=confirmed_aspect_ratios,
                 )
 
             frame_index += 1
@@ -284,6 +293,7 @@ class PPEDetector:
         elapsed_ms = (time.perf_counter() - start) * 1000
         duration_seconds = total_frames / fps if fps > 0 else 0.0
         reports = [case.report for case in cases]
+        _log_incident_aspect_summary(video_name, confirmed_aspect_ratios)
 
         return VideoProcessingResponse(
             summary=VideoSummary(
@@ -311,6 +321,7 @@ def _update_worker_status(
     used_worker_ids: set[int],
 ) -> dict:
     worker = _find_or_create_worker(workers, person, frame_index, used_worker_ids)
+    reported_before_update = worker.reported
     _merge_worker_observation(worker, person, frame_index)
 
     present = _present_equipment(person)
@@ -318,6 +329,30 @@ def _update_worker_status(
         worker.helmet_seen_frame = frame_index
     if "Vest" in present:
         worker.vest_seen_frame = frame_index
+
+    if worker.reported:
+        worker.status = "violation"
+        _reset_missing_counts(worker)
+        _log_worker_decision(
+            frame_index=frame_index,
+            person=person,
+            worker=worker,
+            reported_before_update=reported_before_update,
+            judgeable=True,
+            reason="already_reported",
+            raw_missing=[],
+            suppressed_missing=[],
+            confirm_frames=0,
+            stage="already_reported",
+        )
+        return {
+            "unknown": False,
+            "candidate": False,
+            "reason": "already_reported",
+            "missing": [],
+            "worker": worker,
+            "missing_to_report": [],
+        }
 
     raw_missing = _missing_equipment(person)
     judgeable = _is_worker_judgeable(worker, frame_index, fps, frame_width, frame_height)
@@ -327,6 +362,18 @@ def _update_worker_status(
         if worker.status != "violation":
             worker.status = "unknown"
             _reset_missing_counts(worker)
+        _log_worker_decision(
+            frame_index=frame_index,
+            person=person,
+            worker=worker,
+            reported_before_update=reported_before_update,
+            judgeable=False,
+            reason=reason,
+            raw_missing=raw_missing,
+            suppressed_missing=[],
+            confirm_frames=0,
+            stage="not_judgeable",
+        )
         return {
             "unknown": worker.status != "violation",
             "candidate": False,
@@ -368,6 +415,18 @@ def _update_worker_status(
             and label not in worker.reported_missing
         )
     ]
+    _log_worker_decision(
+        frame_index=frame_index,
+        person=person,
+        worker=worker,
+        reported_before_update=reported_before_update,
+        judgeable=True,
+        reason="",
+        raw_missing=raw_missing,
+        suppressed_missing=missing,
+        confirm_frames=confirm_frames,
+        stage="confirmed" if confirmed_missing else "candidate",
+    )
     if not confirmed_missing:
         if worker.status != "violation":
             worker.status = "unknown"
@@ -428,8 +487,15 @@ def _find_existing_worker(
             if id(worker) in used_worker_ids:
                 continue
             if person.track_id in worker.track_ids:
+                _log_worker_match(
+                    frame_index=frame_index,
+                    person=person,
+                    worker=worker,
+                    reason="same_track",
+                    candidates=workers,
+                    used_worker_ids=used_worker_ids,
+                )
                 return worker
-        return None
 
     fresh_workers = [
         worker
@@ -438,9 +504,50 @@ def _find_existing_worker(
         and frame_index - worker.last_frame <= settings.VIDEO_CASE_MAX_FRAME_GAP
     ]
 
+    reported_candidates = [worker for worker in fresh_workers if worker.reported]
+    reported_worker = _find_spatial_worker_match(
+        reported_candidates,
+        person,
+    )
+    if reported_worker is not None:
+        _log_worker_match(
+            frame_index=frame_index,
+            person=person,
+            worker=reported_worker,
+            reason="reported_spatial",
+            candidates=workers,
+            used_worker_ids=used_worker_ids,
+        )
+        return reported_worker
+
+    unreported_candidates = [worker for worker in fresh_workers if not worker.reported]
+    unreported_worker = _find_spatial_worker_match(unreported_candidates, person)
+    if unreported_worker is not None:
+        _log_worker_match(
+            frame_index=frame_index,
+            person=person,
+            worker=unreported_worker,
+            reason="unreported_spatial",
+            candidates=workers,
+            used_worker_ids=used_worker_ids,
+        )
+        return unreported_worker
+
+    _log_worker_match(
+        frame_index=frame_index,
+        person=person,
+        worker=None,
+        reason="new_worker",
+        candidates=workers,
+        used_worker_ids=used_worker_ids,
+    )
+    return None
+
+
+def _find_spatial_worker_match(workers: list[WorkerState], person: PersonResult) -> WorkerState | None:
     best_worker: WorkerState | None = None
     best_iou = 0.0
-    for worker in fresh_workers:
+    for worker in workers:
         iou = _bbox_iou(person.bbox, worker.last_bbox)
         if iou > best_iou:
             best_iou = iou
@@ -449,7 +556,7 @@ def _find_existing_worker(
     if best_worker is not None and best_iou >= settings.VIDEO_CASE_IOU_THRESHOLD:
         return best_worker
 
-    for worker in fresh_workers:
+    for worker in workers:
         if _center_distance_ratio(person.bbox, worker.last_bbox) <= settings.VIDEO_CASE_CENTER_DISTANCE_RATIO:
             return worker
 
@@ -483,6 +590,8 @@ def _is_worker_judgeable(
         return False
     if not _is_bbox_stable(worker.recent_bboxes):
         return False
+    if _has_unclear_posture(worker):
+        return False
     return True
 
 
@@ -502,6 +611,8 @@ def _unknown_reason(
         return "person_too_small"
     if not _is_bbox_stable(worker.recent_bboxes):
         return "unstable_bbox"
+    if _has_unclear_posture(worker):
+        return "unclear_posture"
     return "not_judgeable"
 
 
@@ -538,6 +649,21 @@ def _is_bbox_stable(boxes: list[BoundingBox]) -> bool:
     return size_change <= settings.VIDEO_MAX_SIZE_CHANGE_RATIO
 
 
+def _has_unclear_posture(worker: WorkerState) -> bool:
+    current_bbox = worker.last_bbox
+    if _bbox_aspect_ratio(current_bbox) < settings.VIDEO_MIN_CLEAR_PERSON_ASPECT_RATIO:
+        return True
+
+    recent_heights = [_bbox_height(box) for box in worker.recent_bboxes[:-1]]
+    history_frames = max(0, settings.VIDEO_POSTURE_HISTORY_MIN_FRAMES)
+    if len(recent_heights) >= history_frames and history_frames > 0:
+        median_height = statistics.median(recent_heights)
+        if _bbox_height(current_bbox) < median_height * settings.VIDEO_POSTURE_HEIGHT_DROP_RATIO:
+            return True
+
+    return False
+
+
 def _suppress_recently_seen_ppe(
     worker: WorkerState,
     missing: list[str],
@@ -572,12 +698,32 @@ def _record_violation_case(
     cases: list[ViolationCase],
     frame,
     person: PersonResult,
+    worker: WorkerState,
     missing: list[str],
     video_name: str,
     frame_index: int,
+    confirmed_aspect_ratios: list[float] | None = None,
 ) -> None:
-    case = _find_existing_case(cases, person, frame_index)
+    if worker.reported:
+        return
+
+    case, match_reason = _find_existing_case_match(cases, person, frame_index)
     missing_set = set(missing)
+    violation_type = _violation_type(missing)
+    timestamp = datetime.now(timezone.utc).isoformat()
+    _log_confirmed_incident(
+        timestamp=timestamp,
+        video_name=video_name,
+        frame_index=frame_index,
+        person=person,
+        worker=worker,
+        case=case,
+        violation_type=violation_type,
+        action="create" if case is None else "match_existing_immutable",
+        match_reason=match_reason,
+    )
+    if confirmed_aspect_ratios is not None:
+        confirmed_aspect_ratios.append(_bbox_aspect_ratio(person.bbox))
 
     if case is None:
         snapshot_filename = _save_violation_snapshot(
@@ -588,8 +734,8 @@ def _record_violation_case(
             frame_index=frame_index,
         )
         report = save_violation(
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            violation_type=_violation_type(missing),
+            timestamp=timestamp,
+            violation_type=violation_type,
             details=_violation_details(person, missing, frame_index),
             snapshot_filename=snapshot_filename,
             video_name=video_name,
@@ -606,26 +752,16 @@ def _record_violation_case(
                 last_frame=frame_index,
             )
         )
+        worker.reported = True
+        worker.status = "violation"
         return
 
     case.last_bbox = person.bbox
     case.last_frame = frame_index
     if person.track_id is not None:
         case.track_ids.add(person.track_id)
-
-    merged_missing = case.missing | missing_set
-    if merged_missing == case.missing:
-        return
-
-    case.missing = merged_missing
-    merged = _ordered_missing(case.missing)
-    case.report = update_violation(
-        report_id=case.report.id,
-        violation_type=_violation_type(merged),
-        details=_case_violation_details(case, merged),
-        frame_index=case.first_frame,
-        track_id=_primary_track_id(case),
-    )
+    worker.reported = True
+    worker.status = "violation"
 
 
 def _find_existing_case(
@@ -633,10 +769,19 @@ def _find_existing_case(
     person: PersonResult,
     frame_index: int,
 ) -> ViolationCase | None:
+    case, _ = _find_existing_case_match(cases, person, frame_index)
+    return case
+
+
+def _find_existing_case_match(
+    cases: list[ViolationCase],
+    person: PersonResult,
+    frame_index: int,
+) -> tuple[ViolationCase | None, str]:
     if person.track_id is not None:
         for case in cases:
             if person.track_id in case.track_ids:
-                return case
+                return case, "same_track"
 
     fresh_cases = [
         case
@@ -653,13 +798,13 @@ def _find_existing_case(
             best_case = case
 
     if best_case is not None and best_iou >= settings.VIDEO_CASE_IOU_THRESHOLD:
-        return best_case
+        return best_case, "iou"
 
     for case in fresh_cases:
         if _center_distance_ratio(person.bbox, case.last_bbox) <= settings.VIDEO_CASE_CENTER_DISTANCE_RATIO:
-            return case
+            return case, "center"
 
-    return None
+    return None, "new"
 
 
 def _bbox_iou(a: BoundingBox, b: BoundingBox) -> float:
@@ -681,27 +826,227 @@ def _center_distance_ratio(a: BoundingBox, b: BoundingBox) -> float:
     return distance / diagonal
 
 
+def _bbox_width(box: BoundingBox) -> float:
+    return max(0.0, box.x2 - box.x1)
+
+
+def _bbox_height(box: BoundingBox) -> float:
+    return max(0.0, box.y2 - box.y1)
+
+
+def _bbox_aspect_ratio(box: BoundingBox) -> float:
+    width = max(_bbox_width(box), 1.0)
+    return _bbox_height(box) / width
+
+
+def _log_worker_decision(
+    *,
+    frame_index: int,
+    person: PersonResult,
+    worker: WorkerState,
+    reported_before_update: bool,
+    judgeable: bool,
+    reason: str,
+    raw_missing: list[str],
+    suppressed_missing: list[str],
+    confirm_frames: int,
+    stage: str,
+) -> None:
+    bbox = person.bbox
+    logger.info(
+        "ppe_worker_decision frame_index=%s track_id=%s worker_id=%s "
+        "worker_track_ids=%s reported_before_update=%s worker_reported=%s "
+        "stage=%s judgeable=%s unknown_reason=%s raw_missing=%s suppressed_missing=%s "
+        "missing_counts=%s confirm_frames=%s unclear_posture=%s bbox=(%.1f,%.1f,%.1f,%.1f) "
+        "bbox_width=%.1f bbox_height=%.1f aspect_ratio=%.3f recent_bbox_count=%s",
+        frame_index,
+        person.track_id,
+        id(worker),
+        _format_track_ids(worker.track_ids),
+        reported_before_update,
+        worker.reported,
+        stage,
+        judgeable,
+        reason,
+        ",".join(raw_missing) if raw_missing else "-",
+        ",".join(suppressed_missing) if suppressed_missing else "-",
+        _format_missing_counts(worker.missing_counts),
+        confirm_frames,
+        _has_unclear_posture(worker),
+        bbox.x1,
+        bbox.y1,
+        bbox.x2,
+        bbox.y2,
+        _bbox_width(bbox),
+        _bbox_height(bbox),
+        _bbox_aspect_ratio(bbox),
+        len(worker.recent_bboxes),
+    )
+
+
+def _log_worker_match(
+    *,
+    frame_index: int,
+    person: PersonResult,
+    worker: WorkerState | None,
+    reason: str,
+    candidates: list[WorkerState],
+    used_worker_ids: set[int],
+) -> None:
+    unused_workers = [candidate for candidate in candidates if id(candidate) not in used_worker_ids]
+    recent_workers = [
+        candidate
+        for candidate in unused_workers
+        if frame_index - candidate.last_frame <= settings.VIDEO_CASE_MAX_FRAME_GAP
+    ]
+    expired_reported_workers = [
+        candidate
+        for candidate in unused_workers
+        if candidate.reported and frame_index - candidate.last_frame > settings.VIDEO_CASE_MAX_FRAME_GAP
+    ]
+    reported_metrics = _best_spatial_metrics(
+        [candidate for candidate in recent_workers if candidate.reported],
+        person,
+        frame_index,
+    )
+    unreported_metrics = _best_spatial_metrics(
+        [candidate for candidate in recent_workers if not candidate.reported],
+        person,
+        frame_index,
+    )
+    expired_reported_metrics = _best_spatial_metrics(expired_reported_workers, person, frame_index)
+
+    logger.info(
+        "ppe_worker_match frame_index=%s track_id=%s match_reason=%s selected_worker_id=%s "
+        "selected_reported=%s selected_track_ids=%s total_workers=%s unused_workers=%s "
+        "recent_workers=%s reported_recent=%s unreported_recent=%s expired_reported=%s "
+        "best_reported_iou=%.3f best_reported_center=%.3f best_reported_frame_gap=%s "
+        "best_unreported_iou=%.3f best_unreported_center=%.3f best_unreported_frame_gap=%s "
+        "best_expired_reported_iou=%.3f best_expired_reported_center=%.3f "
+        "best_expired_reported_frame_gap=%s",
+        frame_index,
+        person.track_id,
+        reason,
+        id(worker) if worker is not None else None,
+        worker.reported if worker is not None else None,
+        _format_track_ids(worker.track_ids if worker is not None else set()),
+        len(candidates),
+        len(unused_workers),
+        len(recent_workers),
+        sum(1 for candidate in recent_workers if candidate.reported),
+        sum(1 for candidate in recent_workers if not candidate.reported),
+        len(expired_reported_workers),
+        reported_metrics["iou"],
+        reported_metrics["center"],
+        reported_metrics["frame_gap"],
+        unreported_metrics["iou"],
+        unreported_metrics["center"],
+        unreported_metrics["frame_gap"],
+        expired_reported_metrics["iou"],
+        expired_reported_metrics["center"],
+        expired_reported_metrics["frame_gap"],
+    )
+
+
+def _best_spatial_metrics(
+    workers: list[WorkerState],
+    person: PersonResult,
+    frame_index: int,
+) -> dict[str, float | int | None]:
+    if not workers:
+        return {"iou": 0.0, "center": 999.0, "frame_gap": None}
+
+    best_iou = 0.0
+    best_center = 999.0
+    best_frame_gap: int | None = None
+    for worker in workers:
+        iou = _bbox_iou(person.bbox, worker.last_bbox)
+        center = _center_distance_ratio(person.bbox, worker.last_bbox)
+        if iou > best_iou or center < best_center:
+            best_iou = max(best_iou, iou)
+            if center < best_center:
+                best_center = center
+                best_frame_gap = frame_index - worker.last_frame
+
+    return {"iou": best_iou, "center": best_center, "frame_gap": best_frame_gap}
+
+
+def _format_track_ids(track_ids: set[int]) -> str:
+    if not track_ids:
+        return "-"
+    return ",".join(str(track_id) for track_id in sorted(track_ids))
+
+
+def _format_missing_counts(missing_counts: dict[str, int] | None) -> str:
+    if not missing_counts:
+        return "-"
+    return ",".join(f"{label}:{missing_counts.get(label, 0)}" for label in ("Helmet", "Vest"))
+
+
+def _log_confirmed_incident(
+    *,
+    timestamp: str,
+    video_name: str,
+    frame_index: int,
+    person: PersonResult,
+    worker: WorkerState,
+    case: ViolationCase | None,
+    violation_type: str,
+    action: str,
+    match_reason: str,
+) -> None:
+    bbox = person.bbox
+    logger.info(
+        "ppe_incident_confirmed timestamp=%s video=%s frame_index=%s track_id=%s "
+        "worker_id=%s worker_reported_before_record=%s violation_type=%s action=%s "
+        "match_reason=%s case_track_ids=%s case_first_frame=%s case_last_frame=%s "
+        "bbox=(%.1f,%.1f,%.1f,%.1f) bbox_width=%.1f bbox_height=%.1f aspect_ratio=%.3f",
+        timestamp,
+        video_name,
+        frame_index,
+        person.track_id,
+        id(worker),
+        worker.reported,
+        violation_type,
+        action,
+        match_reason,
+        _format_track_ids(case.track_ids if case is not None else set()),
+        case.first_frame if case is not None else None,
+        case.last_frame if case is not None else None,
+        bbox.x1,
+        bbox.y1,
+        bbox.x2,
+        bbox.y2,
+        _bbox_width(bbox),
+        _bbox_height(bbox),
+        _bbox_aspect_ratio(bbox),
+    )
+
+
+def _log_incident_aspect_summary(video_name: str, aspect_ratios: list[float]) -> None:
+    if not aspect_ratios:
+        logger.info("ppe_incident_aspect_summary video=%s confirmed_count=0", video_name)
+        return
+
+    sorted_ratios = sorted(aspect_ratios)
+    logger.info(
+        "ppe_incident_aspect_summary video=%s confirmed_count=%s min=%.3f max=%.3f "
+        "median=%.3f distribution=%s",
+        video_name,
+        len(sorted_ratios),
+        min(sorted_ratios),
+        max(sorted_ratios),
+        statistics.median(sorted_ratios),
+        ",".join(f"{ratio:.3f}" for ratio in sorted_ratios),
+    )
+
+
 def _bbox_diagonal(box: BoundingBox) -> float:
     return ((box.x2 - box.x1) ** 2 + (box.y2 - box.y1) ** 2) ** 0.5
 
 
 def _ordered_missing(missing: set[str]) -> list[str]:
     return [label for label in ("Helmet", "Vest") if label in missing]
-
-
-def _primary_track_id(case: ViolationCase) -> int | None:
-    if not case.track_ids:
-        return None
-    return sorted(case.track_ids)[0]
-
-
-def _case_violation_details(case: ViolationCase, missing: list[str]) -> str:
-    track_text = ", ".join(str(track_id) for track_id in sorted(case.track_ids))
-    subject = f"tracks {track_text}" if track_text else "person"
-    return (
-        f"{subject} counted as one worker violation case; "
-        f"missing {', '.join(missing)} first detected at frame {case.first_frame}"
-    )
 
 
 def _extract_result_boxes(result) -> tuple[list[dict], list[dict], list[dict]]:
@@ -946,9 +1291,10 @@ def _save_violation_snapshot(
     y1 = int(max(0, person.bbox.y1))
     x2 = int(max(0, person.bbox.x2))
     y2 = int(max(0, person.bbox.y2))
-    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+    snapshot = frame.copy()
+    cv2.rectangle(snapshot, (x1, y1), (x2, y2), (0, 0, 255), 3)
     cv2.putText(
-        frame,
+        snapshot,
         f"Violation: {', '.join(missing)}",
         (x1, max(24, y1 - 10)),
         cv2.FONT_HERSHEY_SIMPLEX,
@@ -957,7 +1303,7 @@ def _save_violation_snapshot(
         2,
         cv2.LINE_AA,
     )
-    cv2.imwrite(str(path), frame)
+    cv2.imwrite(str(path), snapshot)
     return filename
 
 

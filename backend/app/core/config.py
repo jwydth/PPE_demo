@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     VIDEO_STABILITY_WINDOW_FRAMES: int = 5
     VIDEO_MAX_CENTER_SHIFT_RATIO: float = 0.35
     VIDEO_MAX_SIZE_CHANGE_RATIO: float = 0.45
+    VIDEO_MIN_CLEAR_PERSON_ASPECT_RATIO: float = 1.20
+    VIDEO_POSTURE_HEIGHT_DROP_RATIO: float = 0.70
+    VIDEO_POSTURE_HISTORY_MIN_FRAMES: int = 3
     VIOLATION_DB_PATH: str = "storage/violations.sqlite3"
     SNAPSHOT_DIR: str = "storage/snapshots"
     ALLOWED_ORIGINS: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]

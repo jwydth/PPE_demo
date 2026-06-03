@@ -57,6 +57,9 @@ export function DetectionHistoryPanel() {
           <h2 className="mt-1 text-xl font-semibold text-zinc-100">
             Previous Safety Incidents
           </h2>
+          <p className="mt-1 font-mono text-xs text-zinc-500">
+            History shows confirmed incidents from video/CCTV analysis.
+          </p>
         </div>
         <button
           onClick={() => void loadHistory()}

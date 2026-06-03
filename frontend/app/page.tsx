@@ -128,6 +128,9 @@ function DetectPpePanel() {
     <>
       {phase !== "done" && (
         <div className="max-w-xl mx-auto flex flex-col gap-4">
+          <p className="font-mono text-xs text-zinc-500">
+            Image detection is for quick testing only. Confirmed incidents are saved from video/CCTV analysis.
+          </p>
           <UploadZone onFileSelect={handleFile} disabled={phase === "analyzing"} />
 
           {phase === "analyzing" && (
