@@ -8,8 +8,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements-cuda-cu128.txt ./
+ARG INSTALL_CUDA=false
+RUN if [ "$INSTALL_CUDA" = "true" ]; then \
+        pip install --no-cache-dir -r requirements-cuda-cu128.txt; \
+    fi \
+    && pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 

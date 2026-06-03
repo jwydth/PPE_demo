@@ -7,6 +7,9 @@ BACKEND_DIR = Path(__file__).resolve().parents[2]
 
 class Settings(BaseSettings):
     MODEL_PATH: str = "weights/ppe_v1.pt"
+    # "auto" uses the first CUDA GPU when PyTorch can access one, otherwise CPU.
+    # You can also force "cpu", "cuda", "cuda:0", "0", etc.
+    INFERENCE_DEVICE: str = "auto"
     CONFIDENCE_THRESHOLD: float = 0.5
     # Minimum fraction of an equipment box that must overlap its person box
     # for the two to be considered associated (0.0 – 1.0)

@@ -79,9 +79,76 @@ def _overlap_ratio(equipment: dict, person: dict) -> float:
     return _inter_area(equipment, person) / eq_area
 
 
+def _select_inference_device(preferred_device: str) -> str:
+    requested = (preferred_device or "auto").strip().lower()
+    if requested == "cpu":
+        logger.info("CUDA auto-detection skipped; INFERENCE_DEVICE is 'cpu'.")
+        return "cpu"
+
+    if requested not in {"auto", "cuda", "gpu"} and not (
+        requested.startswith("cuda:") or requested.isdigit()
+    ):
+        logger.warning(
+            "Unsupported INFERENCE_DEVICE '%s'. Falling back to CPU.",
+            preferred_device,
+        )
+        return "cpu"
+
+    try:
+        import torch
+    except Exception as exc:
+        logger.warning(
+            "PyTorch is unavailable for CUDA detection (%s). Falling back to CPU.",
+            exc,
+        )
+        return "cpu"
+
+    if not torch.cuda.is_available():
+        if requested != "auto":
+            logger.warning(
+                "INFERENCE_DEVICE='%s' was requested, but CUDA is not available. "
+                "Falling back to CPU.",
+                preferred_device,
+            )
+        else:
+            logger.info("CUDA is not available. Using CPU for YOLO inference.")
+        return "cpu"
+
+    device_count = torch.cuda.device_count()
+    if requested.isdigit():
+        device_index = int(requested)
+    elif requested.startswith("cuda:"):
+        try:
+            device_index = int(requested.split(":", 1)[1])
+        except ValueError:
+            logger.warning(
+                "Invalid INFERENCE_DEVICE '%s'. Using first CUDA GPU instead.",
+                preferred_device,
+            )
+            device_index = 0
+    else:
+        device_index = 0
+
+    if device_index >= device_count:
+        logger.warning(
+            "INFERENCE_DEVICE '%s' points to GPU index %s, but only %s CUDA GPU(s) "
+            "are available. Using CPU.",
+            preferred_device,
+            device_index,
+            device_count,
+        )
+        return "cpu"
+
+    device_name = torch.cuda.get_device_name(device_index)
+    device = f"cuda:{device_index}"
+    logger.info("CUDA is available. Using %s (%s) for YOLO inference.", device, device_name)
+    return device
+
+
 class PPEDetector:
     def __init__(self) -> None:
         self.model = None
+        self.device = _select_inference_device(settings.INFERENCE_DEVICE)
         self._load_model()
 
     def _load_model(self) -> None:
@@ -102,6 +169,7 @@ class PPEDetector:
 
             self.model = YOLO(str(model_path))
             logger.info("YOLO model loaded from '%s'", model_path)
+            logger.info("YOLO inference device set to '%s'", self.device)
         except Exception as exc:
             logger.error("Failed to load model from '%s': %s", model_path, exc)
             logger.warning("Falling back to mock mode.")
@@ -118,7 +186,12 @@ class PPEDetector:
 
     def _real_predict(self, image: Image.Image) -> DetectionResponse:
         start = time.perf_counter()
-        results = self.model(image, conf=settings.CONFIDENCE_THRESHOLD, verbose=False)
+        results = self.model(
+            image,
+            conf=settings.CONFIDENCE_THRESHOLD,
+            device=self.device,
+            verbose=False,
+        )
 
         persons: list[dict] = []
         helmets: list[dict] = []
@@ -152,6 +225,7 @@ class PPEDetector:
             tracker=settings.VIDEO_TRACKER,
             classes=[0, 1, 2],
             vid_stride=stride,
+            device=self.device,
             verbose=False,
         )
 
