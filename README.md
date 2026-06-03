@@ -82,6 +82,44 @@ uvicorn app.main:app --app-dir backend --reload --port 8000
 The API will be live at `http://localhost:8000`.  
 Interactive docs: `http://localhost:8000/docs`
 
+### NVIDIA CUDA setup
+
+The backend defaults to `INFERENCE_DEVICE=auto`. In auto mode it uses the first
+CUDA GPU when PyTorch can access one; otherwise it falls back to CPU. To force a
+device, set one of these values in `backend/.env`:
+
+```env
+INFERENCE_DEVICE=auto
+INFERENCE_DEVICE=cpu
+INFERENCE_DEVICE=cuda
+INFERENCE_DEVICE=cuda:0
+INFERENCE_DEVICE=0
+```
+
+For a CUDA-enabled local install, install the CUDA PyTorch wheel before the
+normal backend requirements:
+
+```bash
+cd backend
+.venv\Scripts\activate  # Windows PowerShell/cmd
+
+pip install --upgrade pip
+pip install -r requirements-cuda-cu132.txt
+pip install -r requirements.txt
+```
+
+If your GPU or driver needs a different PyTorch CUDA build, generate the exact
+command from the official selector: https://pytorch.org/get-started/locally/
+
+Verify that PyTorch can see the GPU:
+
+```bash
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU only')"
+```
+
+When `torch.cuda.is_available()` prints `True`, image and video inference will
+run on CUDA with `INFERENCE_DEVICE=auto`.
+
 ---
 
 ## Frontend setup
@@ -186,7 +224,21 @@ docker build -t de-heus-ppe-backend .
 docker run -p 8000:8000 \
   -v "$(pwd)/weights:/app/weights" \
   -e MODEL_PATH=weights/ppe_v1.pt \
+  -e INFERENCE_DEVICE=auto \
   de-heus-ppe-backend
+```
+
+For a CUDA-ready Docker image, install the NVIDIA Container Toolkit on the host,
+then build with the CUDA dependency layer and run with GPU access:
+
+```bash
+cd backend
+docker build --build-arg INSTALL_CUDA=true -t de-heus-ppe-backend:cuda .
+docker run --gpus all -p 8000:8000 \
+  -v "$(pwd)/weights:/app/weights" \
+  -e MODEL_PATH=weights/ppe_v1.pt \
+  -e INFERENCE_DEVICE=auto \
+  de-heus-ppe-backend:cuda
 ```
 
 Mount the `weights/` volume so you can swap the model later (e.g. `ppe_v2.pt`) without rebuilding the image.

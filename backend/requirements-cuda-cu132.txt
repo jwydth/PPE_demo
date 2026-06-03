@@ -1,0 +1,6 @@
+# Install before requirements.txt when this service should use NVIDIA CUDA.
+# If your GPU/driver needs another CUDA build, use the selector at:
+# https://pytorch.org/get-started/locally/
+--index-url https://download.pytorch.org/whl/cu132
+torch
+torchvision
