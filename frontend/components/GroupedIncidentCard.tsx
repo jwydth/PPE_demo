@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 
 import { ViolationReport } from "@/types/detection";
 
@@ -20,7 +20,6 @@ interface GroupedIncidentCardProps {
 }
 
 export function GroupedIncidentCard({ incident }: GroupedIncidentCardProps) {
-  const [showTechnicalDetails, setShowTechnicalDetails] = useState(false);
   const sortedRecords = useMemo(() => sortRecordsForDisplay(incident.records), [incident.records]);
   const incidentTitle = summarizeIncidentTypes(sortedRecords);
 
@@ -67,40 +66,6 @@ export function GroupedIncidentCard({ incident }: GroupedIncidentCardProps) {
           </div>
         </div>
 
-        <button
-          onClick={() => setShowTechnicalDetails((current) => !current)}
-          className="
-            font-mono text-xs text-zinc-500 hover:text-orange-400 transition-colors
-            border border-zinc-800 hover:border-orange-500/30 rounded px-3 py-2
-          "
-        >
-          {showTechnicalDetails ? "HIDE TECHNICAL DETAILS" : "SHOW TECHNICAL DETAILS"}
-        </button>
-
-        {showTechnicalDetails && (
-          <div className="bg-zinc-900/70 border border-zinc-800 rounded-lg p-3 space-y-3">
-            <p className="font-mono text-[10px] text-zinc-600 tracking-widest">
-              TECHNICAL DETAILS
-            </p>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-              <TechnicalField label="FRAME" value={incident.frameIndex ?? "-"} />
-              <TechnicalField label="RECORD IDS" value={sortedRecords.map((record) => `#${record.id}`).join(", ")} />
-              <TechnicalField label="TRACK IDS" value={formatTrackIds(sortedRecords)} />
-            </div>
-            <div>
-              <p className="font-mono text-[10px] text-zinc-600 tracking-widest mb-2">
-                RAW DETAILS
-              </p>
-              <div className="flex flex-col gap-2">
-                {sortedRecords.map((record) => (
-                  <p key={record.id} className="font-mono text-xs text-zinc-500 bg-zinc-950 border border-zinc-800 rounded px-3 py-2">
-                    {record.details}
-                  </p>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
       </div>
     </article>
   );
@@ -111,15 +76,6 @@ function ReviewField({ label, value }: { label: string; value: string | number }
     <div className="bg-zinc-900 border border-zinc-800 rounded px-3 py-2 min-w-0">
       <p className="font-mono text-[10px] text-zinc-600 tracking-widest">{label}</p>
       <p className="font-mono text-xs text-zinc-300 truncate">{value}</p>
-    </div>
-  );
-}
-
-function TechnicalField({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div className="min-w-0">
-      <p className="font-mono text-[10px] text-zinc-600 tracking-widest">{label}</p>
-      <p className="font-mono text-xs text-zinc-500 truncate">{value}</p>
     </div>
   );
 }
@@ -139,14 +95,6 @@ function summarizeIncidentTypes(records: ViolationReport[]): string {
   if (types.has("missing_helmet")) return "Missing Safety Helmet";
   if (types.has("missing_vest")) return "Missing Safety Vest";
   return formatIncidentType(records[0]?.violation_type ?? "ppe_violation");
-}
-
-function formatTrackIds(records: ViolationReport[]): string {
-  const trackIds = records
-    .map((record) => record.track_id)
-    .filter((trackId): trackId is number => trackId !== undefined && trackId !== null);
-
-  return trackIds.length > 0 ? trackIds.join(", ") : "-";
 }
 
 function formatDetectedTime(timestamp: string): string {
