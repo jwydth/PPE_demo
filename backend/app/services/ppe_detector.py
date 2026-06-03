@@ -1119,11 +1119,11 @@ def _build_response(
 
     for i, p in enumerate(persons):
         p_bbox = BoundingBox(x1=p["x1"], y1=p["y1"], x2=p["x2"], y2=p["y2"])
-        label_suffix = f" T{p['track_id']}" if "track_id" in p else f" {i + 1}"
+        label_suffix = f"T{p['track_id']}" if "track_id" in p else f"{i + 1}"
         flat_detections.append(
             Detection(
                 id=det_id,
-                label=f"Person{label_suffix}",
+                label=f"P{label_suffix}",
                 category="compliant",
                 confidence=round(p["conf"], 4),
                 bbox=p_bbox,
@@ -1159,9 +1159,6 @@ def _build_response(
                 compliant=is_compliant,
             )
         )
-
-    det_id = _append_unmatched_equipment(flat_detections, det_id, helmets, helmet_assignments, "Helmet")
-    _append_unmatched_equipment(flat_detections, det_id, vests, vest_assignments, "Vest")
 
     compliant_count = sum(1 for pr in person_results if pr.compliant)
     violation_count = len(person_results) - compliant_count
