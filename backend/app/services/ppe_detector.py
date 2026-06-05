@@ -245,26 +245,56 @@ class PPEDetector:
                         person, frame_width, frame_height
                     )
                     incursion_zones = check_zone_incursion(bev_zones, test_point)
+                    incursion_zone_ids = {z.zone_id for z in incursion_zones}
 
-                    for zone in incursion_zones:
-                        worker.zone_dwell[zone.zone_id] = worker.zone_dwell.get(
-                            zone.zone_id, 0
-                        ) + (stride / fps)
-                        if (
-                            worker.zone_dwell[zone.zone_id] > zone.threshold
-                            and zone.zone_id not in worker.reported_zones
-                        ):
-                            zv = record_zone_violation(
-                                worker_state=worker,
-                                zone=zone,
-                                frame=frame,
-                                person=person,
-                                video_name=video_name,
-                                frame_index=frame_index,
-                                save_snapshot_fn=_save_violation_snapshot,
-                            )
-                            if zv:
-                                zone_violations_list.append(zv)
+                    for zone in bev_zones:
+                        in_zone = zone.zone_id in incursion_zone_ids
+
+                        if zone.zone_type == "WALKWAY":
+                            if in_zone:
+                                # Person is safely inside walkway — reset outside-dwell counter
+                                worker.zone_dwell[zone.zone_id] = 0
+                            else:
+                                # Person has left the walkway — accumulate violation dwell
+                                worker.zone_dwell[zone.zone_id] = worker.zone_dwell.get(
+                                    zone.zone_id, 0
+                                ) + (stride / fps)
+                                if (
+                                    worker.zone_dwell[zone.zone_id] > zone.threshold
+                                    and zone.zone_id not in worker.reported_zones
+                                ):
+                                    zv = record_zone_violation(
+                                        worker_state=worker,
+                                        zone=zone,
+                                        frame=frame,
+                                        person=person,
+                                        video_name=video_name,
+                                        frame_index=frame_index,
+                                        save_snapshot_fn=_save_violation_snapshot,
+                                    )
+                                    if zv:
+                                        zone_violations_list.append(zv)
+                        else:
+                            # RESTRICTED / FORKLIFT_PATH: violation when person is inside
+                            if in_zone:
+                                worker.zone_dwell[zone.zone_id] = worker.zone_dwell.get(
+                                    zone.zone_id, 0
+                                ) + (stride / fps)
+                                if (
+                                    worker.zone_dwell[zone.zone_id] > zone.threshold
+                                    and zone.zone_id not in worker.reported_zones
+                                ):
+                                    zv = record_zone_violation(
+                                        worker_state=worker,
+                                        zone=zone,
+                                        frame=frame,
+                                        person=person,
+                                        video_name=video_name,
+                                        frame_index=frame_index,
+                                        save_snapshot_fn=_save_violation_snapshot,
+                                    )
+                                    if zv:
+                                        zone_violations_list.append(zv)
 
                 missing_to_report = decision["missing_to_report"]
                 if not missing_to_report:
@@ -801,9 +831,7 @@ def _record_violation_case(
             ViolationCase(
                 report=report,
                 missing=missing_set,
-                track_ids={
-                    person.track_id
-                } if person.track_id is not None else set(),
+                track_ids={person.track_id} if person.track_id is not None else set(),
                 last_bbox=person.bbox,
                 first_frame=frame_index,
                 last_frame=frame_index,
