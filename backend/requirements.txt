@@ -7,3 +7,5 @@ ultralytics>=8.3.0
 opencv-python-headless>=4.10.0
 pydantic-settings==2.2.1
 python-dotenv==1.0.1
+sqlmodel==0.0.38
+psycopg[binary]==3.3.4

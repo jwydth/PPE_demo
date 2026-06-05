@@ -6,7 +6,8 @@ BACKEND_DIR = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
-    MODEL_PATH: str = "weights/ppe_v1.pt"
+    MODEL_PATH: str = "weights/ppe_v4.pt"
+    DATABASE_URL: str | None = None
     # "auto" uses the first CUDA GPU when PyTorch can access one, otherwise CPU.
     # You can also force "cpu", "cuda", "cuda:0", "0", etc.
     INFERENCE_DEVICE: str = "auto"
