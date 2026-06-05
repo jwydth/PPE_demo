@@ -31,7 +31,7 @@ The **De Heus PPE Safety Monitor** is an industrial safety system designed to mo
 - `app/routers/zones.py`: CRUD for safety zones and calibrations.
 - `app/services/ppe_detector.py`: Core logic for YOLOv8 inference and mock data.
 - `app/services/spatial.py`: Homography and BEV logic.
-- `app/services/violation_store.py`: Database operations for zones and violations.
+- PostgreSQL repositories and services persist zones and violations; MinIO stores evidence.
 - `app/models/schemas.py`: Pydantic models for API requests/responses.
 
 ### Frontend (`/frontend`)

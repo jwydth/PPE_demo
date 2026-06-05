@@ -36,7 +36,6 @@ class Settings(BaseSettings):
     VIDEO_MIN_CLEAR_PERSON_ASPECT_RATIO: float = 1.20
     VIDEO_POSTURE_HEIGHT_DROP_RATIO: float = 0.70
     VIDEO_POSTURE_HISTORY_MIN_FRAMES: int = 3
-    VIOLATION_DB_PATH: str = "storage/violations.sqlite3"
     SNAPSHOT_DIR: str = "storage/snapshots"
     ALLOWED_ORIGINS: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
 
