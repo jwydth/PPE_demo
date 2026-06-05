@@ -64,6 +64,17 @@ export async function getViolations(): Promise<ViolationReport[]> {
   }));
 }
 
+export async function deleteZonesForVideo(videoName: string): Promise<{ deleted: number }> {
+  const res = await fetch(`${API_URL}/zones/video/${encodeURIComponent(videoName)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error((body as { detail?: string }).detail ?? "Could not delete zones");
+  }
+  return res.json();
+}
+
 export async function getZoneViolations(): Promise<ZoneViolation[]> {
   const res = await fetch(`${API_URL}/zone-violations`);
 

@@ -238,6 +238,14 @@ def delete_zone(zone_id: int) -> bool:
         return cursor.rowcount > 0
 
 
+def delete_zones_by_video(video_name: str) -> int:
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute("DELETE FROM zones WHERE video_name = ?", (video_name,))
+        conn.commit()
+        return cursor.rowcount
+
+
 def update_zone(zone: Zone) -> Zone:
     if zone.id is None:
         raise ValueError("Zone ID is required for update")
@@ -355,7 +363,7 @@ def list_zone_violations(limit: int = 100) -> list[ZoneViolation]:
                 timestamp=row["timestamp"],
                 video_name=row["video_name"],
                 frame_index=row["frame_index"],
-                snapshot_path=row["snapshot_path"],
+                snapshot_path=_snapshot_url(row["snapshot_path"]),
             )
             for row in rows
         ]

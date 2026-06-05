@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { fabric } from "fabric";
 import { UploadZone } from "./UploadZone";
 import { Point2D, ZoneConfiguration, ZoneType } from "@/types/zone";
-import { analyzeVideo, API_URL } from "@/lib/api";
+import { analyzeVideo, deleteZonesForVideo, API_URL } from "@/lib/api";
 import { VideoProcessingResponse, ViolationReport } from "@/types/detection";
 
 type Tool = "select" | "draw" | "delete" | "calibrate";
@@ -398,7 +398,22 @@ export function ZoneDrawingCanvas() {
     fabricCanvas.renderAll();
   };
 
-  const saveConfiguration = async () => {
+  const clearDbZones = async () => {
+    if (!videoName) return;
+    if (!confirm(`Delete all saved zones for "${videoName}" from the database? Canvas objects are kept.`)) return;
+    try {
+      const result = await deleteZonesForVideo(videoName);
+      // Clear the zoneId stamp on canvas objects so they can be re-saved with correct coords
+      fabricCanvas?.getObjects().forEach(obj => {
+        delete (obj as any).zoneId;
+      });
+      alert(`Deleted ${result.deleted} zone(s) from DB. You can now re-save with corrected coordinates.`);
+    } catch (err) {
+      alert(`Failed to clear zones: ${err}`);
+    }
+  };
+
+  const saveConfiguration = async (silent = false) => {
     if (!fabricCanvas || !videoName) return;
 
     const objects = fabricCanvas.getObjects();
@@ -426,9 +441,13 @@ export function ZoneDrawingCanvas() {
       }
     }
 
-    // 2. Save Zones
+    // 2. Save only NEW zones (no zoneId = not yet in DB); exclude calibration objects (no zoneType)
     const zonesToSave: ZoneConfiguration[] = objects
-      .filter(obj => obj instanceof fabric.Path || obj instanceof fabric.Polygon || obj instanceof fabric.Circle)
+      .filter(obj =>
+        (obj instanceof fabric.Path || obj instanceof fabric.Polygon || obj instanceof fabric.Circle) &&
+        !!(obj as any).zoneType &&
+        !(obj as any).zoneId
+      )
       .map(obj => {
         let flattened: Point2D[] = [];
         const matrix = obj.calcTransformMatrix();
@@ -446,10 +465,15 @@ export function ZoneDrawingCanvas() {
           document.body.appendChild(svg);
           
           try {
+            const pathOffset = pathObj.pathOffset || { x: 0, y: 0 };
             const totalLength = svgPath.getTotalLength();
             for (let i = 0; i <= 100; i++) {
               const p = svgPath.getPointAtLength(totalLength * (i / 100));
-              const transformed = fabric.util.transformPoint(new fabric.Point(p.x, p.y), matrix);
+              // SVG path data is in path-local space centered on pathOffset.
+              // Subtract pathOffset so the point is relative to the object's origin,
+              // then apply the transform matrix to get canvas coordinates.
+              const localPoint = new fabric.Point(p.x - pathOffset.x, p.y - pathOffset.y);
+              const transformed = fabric.util.transformPoint(localPoint, matrix);
               flattened.push({ x: transformed.x / canvasWidth, y: transformed.y / canvasHeight });
             }
           } catch (e) {
@@ -486,16 +510,26 @@ export function ZoneDrawingCanvas() {
       });
 
     try {
-      for (const zone of zonesToSave) {
-        await fetch(`${API_URL}/zones`, {
+      const zoneObjects = objects.filter(obj =>
+        (obj instanceof fabric.Path || obj instanceof fabric.Polygon || obj instanceof fabric.Circle) &&
+        !!(obj as any).zoneType &&
+        !(obj as any).zoneId
+      );
+      for (let i = 0; i < zonesToSave.length; i++) {
+        const res = await fetch(`${API_URL}/zones`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(zone),
+          body: JSON.stringify(zonesToSave[i]),
         });
+        if (res.ok) {
+          const saved = await res.json();
+          // Stamp the DB id back so this object won't be re-saved next time
+          (zoneObjects[i] as any).zoneId = saved.id;
+        }
       }
-      alert(`Saved ${zonesToSave.length} zones!`);
+      if (!silent) alert(`Saved ${zonesToSave.length} zones!`);
     } catch (err) {
-      alert("Failed to save configuration");
+      if (!silent) alert("Failed to save configuration");
     }
   };
 
@@ -508,13 +542,16 @@ export function ZoneDrawingCanvas() {
 
   const startMonitoring = async () => {
     if (!bgImage || !fabricCanvas || !videoName) return;
-    
+
     setIsAnalyzing(true);
     setIsMonitoring(false);
     setCurrentViolations([]);
     setActiveZoneBreaches(false);
-    
+
     try {
+      // Ensure zones are persisted to DB before analysis runs
+      await saveConfiguration(true);
+
       const result = await analyzeVideo(bgImage);
       setAnalysisResult(result);
       setIsMonitoring(true);
@@ -605,13 +642,22 @@ export function ZoneDrawingCanvas() {
           )}
 
           <div className="flex gap-2">
-            <ToolButton 
-              active={false} 
-              onClick={saveConfiguration} 
+            <ToolButton
+              active={false}
+              onClick={saveConfiguration}
               disabled={isMonitoring || !bgImage}
               className="bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border-none px-4"
             >
               Save Zones
+            </ToolButton>
+
+            <ToolButton
+              active={false}
+              onClick={clearDbZones}
+              disabled={isMonitoring || !videoName}
+              className="bg-red-900 hover:bg-red-800 text-zinc-100 border-none px-4"
+            >
+              Clear DB Zones
             </ToolButton>
             
             <button 
@@ -662,11 +708,13 @@ export function ZoneDrawingCanvas() {
             >
               {videoUrl && (
                 bgImage?.type.startsWith("video/") ? (
-                  <video 
+                  <video
                     ref={videoRef}
                     src={videoUrl}
                     muted
                     playsInline
+                    loop={isMonitoring}
+                    autoPlay={isMonitoring}
                     onLoadedMetadata={(e) => {
                       const v = e.currentTarget;
                       handleMediaLoad(v.videoWidth, v.videoHeight);

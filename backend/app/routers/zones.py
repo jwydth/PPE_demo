@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from app.models.schemas import CameraCalibration, Zone, ZoneViolation
 from app.services.violation_store import (
     delete_zone,
+    delete_zones_by_video,
     get_calibration,
     list_zone_violations,
     list_zones,
@@ -30,6 +31,12 @@ async def modify_zone(zone_id: int, zone: Zone) -> Zone:
         return update_zone(zone)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.delete("/zones/video/{video_name}")
+async def remove_zones_for_video(video_name: str):
+    deleted = delete_zones_by_video(video_name)
+    return {"status": "success", "deleted": deleted}
 
 
 @router.delete("/zones/{zone_id}")

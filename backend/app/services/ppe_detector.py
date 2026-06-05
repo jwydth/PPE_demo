@@ -258,10 +258,12 @@ class PPEDetector:
 
         # Fallback: pixel-space check when no calibration or BEV setup failed
         if not bev_zones and active_zones:
-            logger.info("No calibration found for '%s'; using pixel-space zone detection.", video_name)
             for zone in active_zones:
                 try:
-                    coords = [(p["x"] * COORD_SCALE, p["y"] * COORD_SCALE) for p in json.loads(zone.flattened_coordinates)]
+                    raw = json.loads(zone.flattened_coordinates)
+                    if not raw:
+                        continue
+                    coords = [(p["x"] * COORD_SCALE, p["y"] * COORD_SCALE) for p in raw]
                     bev_zones.append({"id": zone.id, "name": zone.zone_name, "poly": coords, "threshold": zone.dwell_threshold_seconds})
                 except Exception as exc:
                     logger.error("Failed to load zone %s: %s", zone.id, exc)
