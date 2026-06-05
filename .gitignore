@@ -5,5 +5,7 @@ node_modules/
 __pycache__/
 *.pyc
 .venv/
-weights/*.pt
 *.pack.gz
+backend/storage/
+backend/weights/*.pt
+video_debug.log

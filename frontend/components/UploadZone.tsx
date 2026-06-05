@@ -13,19 +13,26 @@ const ACCEPTED_MIME: Record<string, string[]> = {
   "image/png": [".png"],
   "image/webp": [".webp"],
   "image/bmp": [".bmp"],
+  "video/mp4": [".mp4"],
+  "video/mpeg": [".mpeg", ".mpg"],
+  "video/quicktime": [".mov"],
+  "video/x-msvideo": [".avi"],
+  "video/x-matroska": [".mkv"],
+  "video/webm": [".webm"],
 };
 
 export function UploadZone({ onFileSelect, disabled }: UploadZoneProps) {
   const [preview, setPreview] = useState<string | null>(null);
+  const [previewKind, setPreviewKind] = useState<"image" | "video">("image");
 
   const onDrop = useCallback(
     (accepted: File[]) => {
       const file = accepted[0];
       if (!file) return;
-      // Revoke previous object URL to avoid memory leak
       if (preview) URL.revokeObjectURL(preview);
-      const url = URL.createObjectURL(file);
-      setPreview(url);
+
+      setPreview(URL.createObjectURL(file));
+      setPreviewKind(file.type.startsWith("video/") ? "video" : "image");
       onFileSelect(file);
     },
     [onFileSelect, preview],
@@ -44,15 +51,15 @@ export function UploadZone({ onFileSelect, disabled }: UploadZoneProps) {
       className={[
         "relative border-2 border-dashed rounded-lg transition-all duration-200",
         "flex flex-col items-center justify-center min-h-[260px] overflow-hidden",
-        isDragActive
-          ? "border-orange-500 bg-orange-500/5"
-          : "border-zinc-700 hover:border-zinc-500",
+        isDragActive ? "border-orange-500 bg-orange-500/5" : "border-zinc-700 hover:border-zinc-500",
         disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer",
       ].join(" ")}
     >
       <input {...getInputProps()} />
 
-      {preview ? (
+      {preview && previewKind === "video" ? (
+        <video src={preview} className="max-h-[260px] max-w-full rounded" controls muted />
+      ) : preview ? (
         <img
           src={preview}
           alt="Upload preview"
@@ -74,9 +81,11 @@ export function UploadZone({ onFileSelect, disabled }: UploadZoneProps) {
             />
           </svg>
           <p className="text-zinc-400 font-mono text-sm">
-            {isDragActive ? "DROP IMAGE HERE" : "DRAG & DROP OR CLICK TO UPLOAD"}
+            {isDragActive ? "DROP FILE HERE" : "DRAG & DROP OR CLICK TO UPLOAD"}
           </p>
-          <p className="text-zinc-600 font-mono text-xs">JPG · PNG · WEBP · BMP</p>
+          <p className="text-zinc-600 font-mono text-xs">
+            JPG / PNG / WEBP / BMP / MP4 / MOV / AVI / MKV / WEBM
+          </p>
         </div>
       )}
     </div>

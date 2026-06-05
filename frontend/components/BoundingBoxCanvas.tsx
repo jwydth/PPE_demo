@@ -1,18 +1,26 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useCallback } from "react";
 
 import { Detection } from "@/types/detection";
 
 interface BoundingBoxCanvasProps {
   imageFile: File;
   detections: Detection[];
+  onHeightReady?: (height: number) => void;
 }
 
-export function BoundingBoxCanvas({ imageFile, detections }: BoundingBoxCanvasProps) {
+export function BoundingBoxCanvas({ imageFile, detections, onHeightReady }: BoundingBoxCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   const srcRef = useRef<string>("");
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const reportHeight = useCallback(() => {
+    if (containerRef.current && onHeightReady) {
+      onHeightReady(containerRef.current.offsetHeight);
+    }
+  }, [onHeightReady]);
 
   useEffect(() => {
     // Revoke the previous object URL
@@ -31,6 +39,8 @@ export function BoundingBoxCanvas({ imageFile, detections }: BoundingBoxCanvasPr
       if (!ctx) return;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       drawDetections(ctx, detections, canvas.width);
+      // Report rendered height after the image has loaded & sized
+      reportHeight();
     };
 
     img.src = url;
@@ -43,10 +53,17 @@ export function BoundingBoxCanvas({ imageFile, detections }: BoundingBoxCanvasPr
     return () => {
       img.onload = null;
     };
-  }, [imageFile, detections]);
+  }, [imageFile, detections, reportHeight]);
+
+  // Also report height on window resize (image scales with CSS)
+  useEffect(() => {
+    const handleResize = () => reportHeight();
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, [reportHeight]);
 
   return (
-    <div className="relative w-full">
+    <div ref={containerRef} className="relative w-full">
       <img
         ref={imgRef}
         alt="Analyzed frame"
@@ -59,6 +76,8 @@ export function BoundingBoxCanvas({ imageFile, detections }: BoundingBoxCanvasPr
     </div>
   );
 }
+
+// ── Drawing ──────────────────────────────────────────────────────────────────
 
 function drawDetections(
   ctx: CanvasRenderingContext2D,
@@ -105,7 +124,7 @@ function drawDetections(
     ctx.stroke();
 
     // Label
-    const label = `${det.label}  ${(det.confidence * 100).toFixed(0)}%`;
+    const label = det.label;
     const fontSize = Math.max(10, Math.min(14, canvasWidth / 55));
     ctx.font = `600 ${fontSize}px "IBM Plex Mono", monospace`;
     const textW = ctx.measureText(label).width;
@@ -113,10 +132,22 @@ function drawDetections(
     const padY = 4;
     const labelH = fontSize + padY * 2;
 
-    ctx.fillStyle = color;
-    ctx.fillRect(x1, y1 - labelH, textW + padX * 2, labelH);
+    // Person labels → bottom-inside of the box
+    // All other labels → top-outside of the box (original position)
+    const isPersonLabel = det.label.startsWith("Person");
 
-    ctx.fillStyle = "#0a0c0f";
-    ctx.fillText(label, x1 + padX, y1 - padY);
+    if (isPersonLabel) {
+      // Bottom-inside: label pill sits just inside the bottom edge
+      ctx.fillStyle = color;
+      ctx.fillRect(x1, y2 - labelH, textW + padX * 2, labelH);
+      ctx.fillStyle = "#0a0c0f";
+      ctx.fillText(label, x1 + padX, y2 - padY);
+    } else {
+      // Top-outside: label pill sits just above the top edge
+      ctx.fillStyle = color;
+      ctx.fillRect(x1, y1 - labelH, textW + padX * 2, labelH);
+      ctx.fillStyle = "#0a0c0f";
+      ctx.fillText(label, x1 + padX, y1 - padY);
+    }
   }
 }

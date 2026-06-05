@@ -1,4 +1,4 @@
-from typing import List, Literal
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel
 
@@ -19,6 +19,22 @@ class Detection(BaseModel):
     color: str
 
 
+class EquipmentStatus(BaseModel):
+    label: str
+    status: Literal["compliant", "violation"]
+    confidence: Optional[float] = None
+    bbox: Optional[BoundingBox] = None
+
+
+class PersonResult(BaseModel):
+    person_id: int
+    track_id: Optional[int] = None
+    bbox: BoundingBox
+    confidence: float
+    equipment: List[EquipmentStatus]
+    compliant: bool
+
+
 class Summary(BaseModel):
     total_persons: int
     compliant: int
@@ -28,4 +44,32 @@ class Summary(BaseModel):
 
 class DetectionResponse(BaseModel):
     detections: List[Detection]
+    persons: List[PersonResult]
     summary: Summary
+
+
+class ViolationReport(BaseModel):
+    id: int
+    timestamp: str
+    violation_type: str
+    details: str
+    snapshot_url: Optional[str] = None
+    video_name: Optional[str] = None
+    frame_index: Optional[int] = None
+    track_id: Optional[int] = None
+
+
+class VideoSummary(BaseModel):
+    video_name: str
+    total_frames: int
+    processed_frames: int
+    fps: float
+    duration_seconds: float
+    unique_violations: int
+    candidate_violations: int = 0
+    inference_ms: float
+
+
+class VideoProcessingResponse(BaseModel):
+    summary: VideoSummary
+    reports: List[ViolationReport]

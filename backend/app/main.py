@@ -1,8 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
 from app.routers import detection
+from app.services.violation_store import SNAPSHOT_DIR, init_db
 
 app = FastAPI(
     title="De Heus PPE Detection API",
@@ -21,6 +23,13 @@ app.add_middleware(
 )
 
 app.include_router(detection.router)
+SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/snapshots", StaticFiles(directory=SNAPSHOT_DIR), name="snapshots")
+
+
+@app.on_event("startup")
+async def startup() -> None:
+    init_db()
 
 
 @app.get("/health", tags=["meta"])

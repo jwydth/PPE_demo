@@ -1,21 +1,32 @@
 import io
+import tempfile
+from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from PIL import Image
 
-from app.models.schemas import DetectionResponse
+from app.models.schemas import DetectionResponse, VideoProcessingResponse, ViolationReport
 from app.services.ppe_detector import PPEDetector
+from app.services.violation_store import list_violations
 
 router = APIRouter(tags=["detection"])
 
 _detector = PPEDetector()
 
-_ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp", "image/bmp"}
+_ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/bmp"}
+_ALLOWED_VIDEO_TYPES = {
+    "video/mp4",
+    "video/mpeg",
+    "video/quicktime",
+    "video/x-msvideo",
+    "video/x-matroska",
+    "video/webm",
+}
 
 
 @router.post("/predict", response_model=DetectionResponse)
 async def predict(file: UploadFile = File(...)) -> DetectionResponse:
-    if file.content_type not in _ALLOWED_TYPES:
+    if file.content_type not in _ALLOWED_IMAGE_TYPES:
         raise HTTPException(
             status_code=415,
             detail=(
@@ -32,3 +43,36 @@ async def predict(file: UploadFile = File(...)) -> DetectionResponse:
         raise HTTPException(status_code=400, detail="Could not decode the uploaded image.")
 
     return _detector.predict(image)
+
+
+@router.post("/predict-video", response_model=VideoProcessingResponse)
+async def predict_video(file: UploadFile = File(...)) -> VideoProcessingResponse:
+    if file.content_type not in _ALLOWED_VIDEO_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=(
+                f"Unsupported content type '{file.content_type}'. "
+                "Accepted: mp4, mpeg, mov, avi, mkv, webm."
+            ),
+        )
+
+    suffix = Path(file.filename or "upload.mp4").suffix or ".mp4"
+    tmp_path: Path | None = None
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp_path = Path(tmp.name)
+            while chunk := await file.read(1024 * 1024):
+                tmp.write(chunk)
+
+        return _detector.process_video(tmp_path, file.filename or tmp_path.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    finally:
+        if tmp_path is not None and tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+
+
+@router.get("/violations", response_model=list[ViolationReport])
+async def violations(limit: int = Query(default=100, ge=1, le=500)) -> list[ViolationReport]:
+    return list_violations(limit=limit)
