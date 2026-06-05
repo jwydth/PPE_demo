@@ -23,14 +23,9 @@ from app.models.schemas import (
     ViolationReport,
     ZoneViolation,
 )
-from app.services.spatial import (
-    compute_homography_matrix,
-    is_point_in_polygon,
-    transform_points,
-)
+from app.services.spatial import is_point_in_polygon
 from app.services.violation_store import (
     SNAPSHOT_DIR,
-    get_calibration,
     list_zones,
     save_violation,
     save_zone_violation,
@@ -239,34 +234,18 @@ class PPEDetector:
         candidate_violations = 0
         processed_frames = 0
 
-        # Load Zones and Calibration for BEV
+        # Load zones; use normalized coordinates directly (no BEV / homography)
         active_zones = [z for z in list_zones(video_name) if z.is_active]
-        calibration = get_calibration(video_name)
-        bev_matrix = None
         bev_zones = []
-
-        if calibration:
+        for zone in active_zones:
             try:
-                src_pts = [(p["x"], p["y"]) for p in json.loads(calibration.source_points)]
-                bev_matrix = compute_homography_matrix(src_pts)
-                for zone in active_zones:
-                    coords = [(p["x"], p["y"]) for p in json.loads(zone.flattened_coordinates)]
-                    transformed = transform_points(bev_matrix, coords)
-                    bev_zones.append({"id": zone.id, "name": zone.zone_name, "poly": transformed, "threshold": zone.dwell_threshold_seconds})
+                raw = json.loads(zone.flattened_coordinates)
+                if not raw:
+                    continue
+                coords = [(p["x"] * COORD_SCALE, p["y"] * COORD_SCALE) for p in raw]
+                bev_zones.append({"id": zone.id, "name": zone.zone_name, "poly": coords, "threshold": zone.dwell_threshold_seconds})
             except Exception as exc:
-                logger.error("Failed to setup BEV: %s", exc)
-
-        # Fallback: pixel-space check when no calibration or BEV setup failed
-        if not bev_zones and active_zones:
-            for zone in active_zones:
-                try:
-                    raw = json.loads(zone.flattened_coordinates)
-                    if not raw:
-                        continue
-                    coords = [(p["x"] * COORD_SCALE, p["y"] * COORD_SCALE) for p in raw]
-                    bev_zones.append({"id": zone.id, "name": zone.zone_name, "poly": coords, "threshold": zone.dwell_threshold_seconds})
-                except Exception as exc:
-                    logger.error("Failed to load zone %s: %s", zone.id, exc)
+                logger.error("Failed to load zone %s: %s", zone.id, exc)
 
         results = self.model.track(
             source=str(video_path),
