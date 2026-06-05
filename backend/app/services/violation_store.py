@@ -247,6 +247,40 @@ def delete_zones_by_video(video_name: str) -> int:
         return cursor.rowcount
 
 
+def delete_all_violations() -> int:
+    """Delete all PPE violations from the database."""
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute("DELETE FROM violations")
+        conn.commit()
+        return cursor.rowcount
+
+
+def delete_all_zone_violations() -> int:
+    """Delete all zone violations from the database."""
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute("DELETE FROM zone_violations")
+        conn.commit()
+        return cursor.rowcount
+
+def delete_violation(violation_id: int) -> bool:
+    """Delete a PPE violation by ID."""
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute("DELETE FROM violations WHERE id = ?", (violation_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def delete_zone_violation(zone_violation_id: int) -> bool:
+    """Delete a zone violation by ID."""
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute("DELETE FROM zone_violations WHERE id = ?", (zone_violation_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
 def update_zone(zone: Zone) -> Zone:
     if zone.id is None:
         raise ValueError("Zone ID is required for update")

@@ -13,6 +13,13 @@ from app.services.ppe_violation_service import (
     PPEViolationService,
     get_ppe_violation_service,
 )
+from app.services.violation_store import (
+    list_violations,
+    delete_all_violations,
+    delete_all_zone_violations,
+    delete_violation,
+    delete_zone_violation,
+)
 
 router = APIRouter(tags=["detection"])
 
@@ -45,7 +52,9 @@ async def predict(file: UploadFile = File(...)) -> DetectionResponse:
     try:
         image = Image.open(io.BytesIO(data)).convert("RGB")
     except Exception:
-        raise HTTPException(status_code=400, detail="Could not decode the uploaded image.")
+        raise HTTPException(
+            status_code=400, detail="Could not decode the uploaded image."
+        )
 
     return _detector.predict(image)
 
@@ -87,3 +96,39 @@ async def violations(
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[ViolationReport]:
     return service.get_recent_violations(limit=limit)
+
+
+async def violations(
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[ViolationReport]:
+    return list_violations(limit=limit)
+
+
+@router.delete("/violations")
+async def delete_all_incidents() -> dict[str, int]:
+    """Delete all PPE and zone violations from the database."""
+    ppe_count = delete_all_violations()
+    zone_count = delete_all_zone_violations()
+    return {
+        "ppe_violations_deleted": ppe_count,
+        "zone_violations_deleted": zone_count,
+        "total_deleted": ppe_count + zone_count,
+    }
+
+
+@router.delete("/violations/{violation_id}")
+async def delete_single_violation(violation_id: int) -> dict[str, bool]:
+    """Delete a single PPE violation by ID."""
+    success = delete_violation(violation_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Violation not found")
+    return {"success": success}
+
+
+@router.delete("/zone-violations/{zone_violation_id}")
+async def delete_single_zone_violation(zone_violation_id: int) -> dict[str, bool]:
+    """Delete a single zone violation by ID."""
+    success = delete_zone_violation(zone_violation_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Zone violation not found")
+    return {"success": success}

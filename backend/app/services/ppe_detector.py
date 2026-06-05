@@ -1,5 +1,3 @@
-import json
-import logging
 import math
 import statistics
 import time
@@ -25,25 +23,20 @@ from app.schemas.violation import (
     ViolationReport,
     ZoneViolation,
 )
-from app.services.spatial import (
-    compute_homography_matrix,
-    is_point_in_polygon,
-    transform_points,
-)
 from app.services.violation_store import (
     SNAPSHOT_DIR,
-    get_calibration,
-    list_zones,
-    save_zone_violation,
+    save_violation,
 )
-from app.services.ppe_violation_service import open_ppe_violation_service
-
-logger = logging.getLogger(__name__)
+from app.services.zone_service import (
+    load_zones,
+    get_person_foot_point,
+    check_zone_incursion,
+    record_zone_violation,
+)
 
 COMPLIANT_COLOR = "#22c55e"
 VIOLATION_COLOR = "#ef4444"
 PERSON_COLOR = "#f97316"
-COORD_SCALE = 1000  # normalized coords are scaled to this before polygon test
 
 
 @dataclass
@@ -105,36 +98,19 @@ def _overlap_ratio(equipment: dict, person: dict) -> float:
 def _select_inference_device(preferred_device: str) -> str:
     requested = (preferred_device or "auto").strip().lower()
     if requested == "cpu":
-        logger.info("CUDA auto-detection skipped; INFERENCE_DEVICE is 'cpu'.")
         return "cpu"
 
     if requested not in {"auto", "cuda", "gpu"} and not (
         requested.startswith("cuda:") or requested.isdigit()
     ):
-        logger.warning(
-            "Unsupported INFERENCE_DEVICE '%s'. Falling back to CPU.",
-            preferred_device,
-        )
         return "cpu"
 
     try:
         import torch
-    except Exception as exc:
-        logger.warning(
-            "PyTorch is unavailable for CUDA detection (%s). Falling back to CPU.",
-            exc,
-        )
+    except Exception:
         return "cpu"
 
     if not torch.cuda.is_available():
-        if requested != "auto":
-            logger.warning(
-                "INFERENCE_DEVICE='%s' was requested, but CUDA is not available. "
-                "Falling back to CPU.",
-                preferred_device,
-            )
-        else:
-            logger.info("CUDA is not available. Using CPU for YOLO inference.")
         return "cpu"
 
     device_count = torch.cuda.device_count()
@@ -144,27 +120,15 @@ def _select_inference_device(preferred_device: str) -> str:
         try:
             device_index = int(requested.split(":", 1)[1])
         except ValueError:
-            logger.warning(
-                "Invalid INFERENCE_DEVICE '%s'. Using first CUDA GPU instead.",
-                preferred_device,
-            )
             device_index = 0
     else:
         device_index = 0
 
     if device_index >= device_count:
-        logger.warning(
-            "INFERENCE_DEVICE '%s' points to GPU index %s, but only %s CUDA GPU(s) "
-            "are available. Using CPU.",
-            preferred_device,
-            device_index,
-            device_count,
-        )
         return "cpu"
 
     device_name = torch.cuda.get_device_name(device_index)
     device = f"cuda:{device_index}"
-    logger.info("CUDA is available. Using %s (%s) for YOLO inference.", device, device_name)
     return device
 
 
@@ -181,28 +145,23 @@ class PPEDetector:
         model_path = model_path.resolve()
 
         if not model_path.exists():
-            logger.warning(
-                "Model weights not found at '%s'. Running in mock mode.",
-                model_path,
-            )
             return
 
         try:
             from ultralytics import YOLO
 
             self.model = YOLO(str(model_path))
-            logger.info("YOLO model loaded from '%s'", model_path)
-            logger.info("YOLO inference device set to '%s'", self.device)
-        except Exception as exc:
-            logger.error("Failed to load model from '%s': %s", model_path, exc)
-            logger.warning("Falling back to mock mode.")
+        except Exception:
+            pass
 
     def predict(self, image: Image.Image) -> DetectionResponse:
         if self.model is None:
             return self._mock_predict(image)
         return self._real_predict(image)
 
-    def process_video(self, video_path: Path, video_name: str) -> VideoProcessingResponse:
+    def process_video(
+        self, video_path: Path, video_name: str
+    ) -> VideoProcessingResponse:
         if self.model is None:
             return self._mock_process_video(video_path, video_name)
         return self._real_process_video(video_path, video_name)
@@ -229,7 +188,9 @@ class PPEDetector:
         elapsed_ms = (time.perf_counter() - start) * 1000
         return _build_response(persons, helmets, vests, elapsed_ms)
 
-    def _real_process_video(self, video_path: Path, video_name: str) -> VideoProcessingResponse:
+    def _real_process_video(
+        self, video_path: Path, video_name: str
+    ) -> VideoProcessingResponse:
         fps, total_frames = _video_metadata(video_path)
         start = time.perf_counter()
         stride = max(1, settings.VIDEO_FRAME_STRIDE)
@@ -241,34 +202,8 @@ class PPEDetector:
         candidate_violations = 0
         processed_frames = 0
 
-        # Load Zones and Calibration for BEV
-        active_zones = [z for z in list_zones(video_name) if z.is_active]
-        calibration = get_calibration(video_name)
-        bev_matrix = None
-        bev_zones = []
-
-        if calibration:
-            try:
-                src_pts = [(p["x"], p["y"]) for p in json.loads(calibration.source_points)]
-                bev_matrix = compute_homography_matrix(src_pts)
-                for zone in active_zones:
-                    coords = [(p["x"], p["y"]) for p in json.loads(zone.flattened_coordinates)]
-                    transformed = transform_points(bev_matrix, coords)
-                    bev_zones.append({"id": zone.id, "name": zone.zone_name, "poly": transformed, "threshold": zone.dwell_threshold_seconds})
-            except Exception as exc:
-                logger.error("Failed to setup BEV: %s", exc)
-
-        # Fallback: pixel-space check when no calibration or BEV setup failed
-        if not bev_zones and active_zones:
-            for zone in active_zones:
-                try:
-                    raw = json.loads(zone.flattened_coordinates)
-                    if not raw:
-                        continue
-                    coords = [(p["x"] * COORD_SCALE, p["y"] * COORD_SCALE) for p in raw]
-                    bev_zones.append({"id": zone.id, "name": zone.zone_name, "poly": coords, "threshold": zone.dwell_threshold_seconds})
-                except Exception as exc:
-                    logger.error("Failed to load zone %s: %s", zone.id, exc)
+        # Load zones
+        bev_zones = load_zones(video_name)
 
         results = self.model.track(
             source=str(video_path),
@@ -302,32 +237,34 @@ class PPEDetector:
                 )
                 worker = decision["worker"]
                 candidate_violations += int(decision["candidate"])
-                
-                # Check Incursions
-                if bev_zones:
-                    foot_x = (person.bbox.x1 + person.bbox.x2) / 2 / frame_width
-                    foot_y = person.bbox.y2 / frame_height
-                    if bev_matrix:
-                        test_point = transform_points(bev_matrix, [(foot_x, foot_y)])[0]
-                    else:
-                        test_point = (foot_x * COORD_SCALE, foot_y * COORD_SCALE)
 
-                    for bz in bev_zones:
-                        if is_point_in_polygon(test_point, bz["poly"]):
-                            worker.zone_dwell[bz["id"]] = worker.zone_dwell.get(bz["id"], 0) + (stride / fps)
-                            if worker.zone_dwell[bz["id"]] > bz["threshold"] and bz["id"] not in worker.reported_zones:
-                                zv = _record_zone_violation(
-                                    worker=worker,
-                                    zone_id=bz["id"],
-                                    zone_name=bz["name"],
-                                    frame=frame,
-                                    person=person,
-                                    video_name=video_name,
-                                    frame_index=frame_index,
-                                )
-                                if zv:
-                                    zone_violations_list.append(zv)
-                
+                # Check Zone Incursions
+                if bev_zones:
+                    test_point = get_person_foot_point(
+                        person, frame_width, frame_height
+                    )
+                    incursion_zones = check_zone_incursion(bev_zones, test_point)
+
+                    for zone in incursion_zones:
+                        worker.zone_dwell[zone.zone_id] = worker.zone_dwell.get(
+                            zone.zone_id, 0
+                        ) + (stride / fps)
+                        if (
+                            worker.zone_dwell[zone.zone_id] > zone.threshold
+                            and zone.zone_id not in worker.reported_zones
+                        ):
+                            zv = record_zone_violation(
+                                worker_state=worker,
+                                zone=zone,
+                                frame=frame,
+                                person=person,
+                                video_name=video_name,
+                                frame_index=frame_index,
+                                save_snapshot_fn=_save_violation_snapshot,
+                            )
+                            if zv:
+                                zone_violations_list.append(zv)
+
                 missing_to_report = decision["missing_to_report"]
                 if not missing_to_report:
                     continue
@@ -346,7 +283,6 @@ class PPEDetector:
         elapsed_ms = (time.perf_counter() - start) * 1000
         duration_seconds = total_frames / fps if fps > 0 else 0.0
         reports = [case.report for case in cases]
-        _log_incident_aspect_summary(video_name, confirmed_aspect_ratios)
 
         return VideoProcessingResponse(
             summary=VideoSummary(
@@ -383,7 +319,9 @@ class PPEDetector:
         elapsed_ms = (time.perf_counter() - start) * 1000
         return _build_response(persons, helmets, vests, elapsed_ms)
 
-    def _mock_process_video(self, video_path: Path, video_name: str) -> VideoProcessingResponse:
+    def _mock_process_video(
+        self, video_path: Path, video_name: str
+    ) -> VideoProcessingResponse:
         import cv2
 
         fps, total_frames = _video_metadata(video_path)
@@ -448,7 +386,6 @@ class PPEDetector:
         elapsed_ms = (time.perf_counter() - start) * 1000
         duration_seconds = total_frames / fps if fps > 0 else 0.0
         reports = [case.report for case in cases]
-        _log_incident_aspect_summary(video_name, confirmed_aspect_ratios)
 
         return VideoProcessingResponse(
             summary=VideoSummary(
@@ -488,18 +425,6 @@ def _update_worker_status(
     if worker.reported:
         worker.status = "violation"
         _reset_missing_counts(worker)
-        _log_worker_decision(
-            frame_index=frame_index,
-            person=person,
-            worker=worker,
-            reported_before_update=reported_before_update,
-            judgeable=True,
-            reason="already_reported",
-            raw_missing=[],
-            suppressed_missing=[],
-            confirm_frames=0,
-            stage="already_reported",
-        )
         return {
             "unknown": False,
             "candidate": False,
@@ -510,25 +435,19 @@ def _update_worker_status(
         }
 
     raw_missing = _missing_equipment(person)
-    judgeable = _is_worker_judgeable(worker, frame_index, fps, frame_width, frame_height)
-    reason = "" if judgeable else _unknown_reason(worker, frame_index, fps, frame_width, frame_height)
+    judgeable = _is_worker_judgeable(
+        worker, frame_index, fps, frame_width, frame_height
+    )
+    reason = (
+        ""
+        if judgeable
+        else _unknown_reason(worker, frame_index, fps, frame_width, frame_height)
+    )
 
     if not judgeable:
         if worker.status != "violation":
             worker.status = "unknown"
             _reset_missing_counts(worker)
-        _log_worker_decision(
-            frame_index=frame_index,
-            person=person,
-            worker=worker,
-            reported_before_update=reported_before_update,
-            judgeable=False,
-            reason=reason,
-            raw_missing=raw_missing,
-            suppressed_missing=[],
-            confirm_frames=0,
-            stage="not_judgeable",
-        )
         return {
             "unknown": worker.status != "violation",
             "candidate": False,
@@ -558,7 +477,9 @@ def _update_worker_status(
     for label in ("Helmet", "Vest"):
         if worker.missing_counts is None:
             worker.missing_counts = {"Helmet": 0, "Vest": 0}
-        worker.missing_counts[label] = worker.missing_counts.get(label, 0) + 1 if label in missing else 0
+        worker.missing_counts[label] = (
+            worker.missing_counts.get(label, 0) + 1 if label in missing else 0
+        )
 
     confirmed_missing = [
         label
@@ -570,18 +491,6 @@ def _update_worker_status(
             and label not in worker.reported_missing
         )
     ]
-    _log_worker_decision(
-        frame_index=frame_index,
-        person=person,
-        worker=worker,
-        reported_before_update=reported_before_update,
-        judgeable=True,
-        reason="",
-        raw_missing=raw_missing,
-        suppressed_missing=missing,
-        confirm_frames=confirm_frames,
-        stage="confirmed" if confirmed_missing else "candidate",
-    )
     if not confirmed_missing:
         if worker.status != "violation":
             worker.status = "unknown"
@@ -642,14 +551,6 @@ def _find_existing_worker(
             if id(worker) in used_worker_ids:
                 continue
             if person.track_id in worker.track_ids:
-                _log_worker_match(
-                    frame_index=frame_index,
-                    person=person,
-                    worker=worker,
-                    reason="same_track",
-                    candidates=workers,
-                    used_worker_ids=used_worker_ids,
-                )
                 return worker
 
     fresh_workers = [
@@ -665,41 +566,19 @@ def _find_existing_worker(
         person,
     )
     if reported_worker is not None:
-        _log_worker_match(
-            frame_index=frame_index,
-            person=person,
-            worker=reported_worker,
-            reason="reported_spatial",
-            candidates=workers,
-            used_worker_ids=used_worker_ids,
-        )
         return reported_worker
 
     unreported_candidates = [worker for worker in fresh_workers if not worker.reported]
     unreported_worker = _find_spatial_worker_match(unreported_candidates, person)
     if unreported_worker is not None:
-        _log_worker_match(
-            frame_index=frame_index,
-            person=person,
-            worker=unreported_worker,
-            reason="unreported_spatial",
-            candidates=workers,
-            used_worker_ids=used_worker_ids,
-        )
         return unreported_worker
 
-    _log_worker_match(
-        frame_index=frame_index,
-        person=person,
-        worker=None,
-        reason="new_worker",
-        candidates=workers,
-        used_worker_ids=used_worker_ids,
-    )
     return None
 
 
-def _find_spatial_worker_match(workers: list[WorkerState], person: PersonResult) -> WorkerState | None:
+def _find_spatial_worker_match(
+    workers: list[WorkerState], person: PersonResult
+) -> WorkerState | None:
     best_worker: WorkerState | None = None
     best_iou = 0.0
     for worker in workers:
@@ -712,13 +591,18 @@ def _find_spatial_worker_match(workers: list[WorkerState], person: PersonResult)
         return best_worker
 
     for worker in workers:
-        if _center_distance_ratio(person.bbox, worker.last_bbox) <= settings.VIDEO_CASE_CENTER_DISTANCE_RATIO:
+        if (
+            _center_distance_ratio(person.bbox, worker.last_bbox)
+            <= settings.VIDEO_CASE_CENTER_DISTANCE_RATIO
+        ):
             return worker
 
     return None
 
 
-def _merge_worker_observation(worker: WorkerState, person: PersonResult, frame_index: int) -> None:
+def _merge_worker_observation(
+    worker: WorkerState, person: PersonResult, frame_index: int
+) -> None:
     if person.track_id is not None:
         worker.track_ids.add(person.track_id)
     worker.last_frame = frame_index
@@ -741,7 +625,10 @@ def _is_worker_judgeable(
         return False
     if _is_near_frame_edge(worker.last_bbox, frame_width, frame_height):
         return False
-    if _bbox_height_ratio(worker.last_bbox, frame_height) < settings.VIDEO_MIN_PERSON_HEIGHT_RATIO:
+    if (
+        _bbox_height_ratio(worker.last_bbox, frame_height)
+        < settings.VIDEO_MIN_PERSON_HEIGHT_RATIO
+    ):
         return False
     if not _is_bbox_stable(worker.recent_bboxes):
         return False
@@ -762,7 +649,10 @@ def _unknown_reason(
         return "new_track_grace"
     if _is_near_frame_edge(worker.last_bbox, frame_width, frame_height):
         return "near_frame_edge"
-    if _bbox_height_ratio(worker.last_bbox, frame_height) < settings.VIDEO_MIN_PERSON_HEIGHT_RATIO:
+    if (
+        _bbox_height_ratio(worker.last_bbox, frame_height)
+        < settings.VIDEO_MIN_PERSON_HEIGHT_RATIO
+    ):
         return "person_too_small"
     if not _is_bbox_stable(worker.recent_bboxes):
         return "unstable_bbox"
@@ -813,7 +703,10 @@ def _has_unclear_posture(worker: WorkerState) -> bool:
     history_frames = max(0, settings.VIDEO_POSTURE_HISTORY_MIN_FRAMES)
     if len(recent_heights) >= history_frames and history_frames > 0:
         median_height = statistics.median(recent_heights)
-        if _bbox_height(current_bbox) < median_height * settings.VIDEO_POSTURE_HEIGHT_DROP_RATIO:
+        if (
+            _bbox_height(current_bbox)
+            < median_height * settings.VIDEO_POSTURE_HEIGHT_DROP_RATIO
+        ):
             return True
 
     return False
@@ -828,7 +721,9 @@ def _suppress_recently_seen_ppe(
     memory_frames = _seconds_to_frames(settings.VIDEO_RECENT_PPE_MEMORY_SECONDS, fps)
     filtered: list[str] = []
     for label in missing:
-        seen_frame = worker.helmet_seen_frame if label == "Helmet" else worker.vest_seen_frame
+        seen_frame = (
+            worker.helmet_seen_frame if label == "Helmet" else worker.vest_seen_frame
+        )
         if seen_frame is not None and frame_index - seen_frame <= memory_frames:
             continue
         filtered.append(label)
@@ -862,63 +757,42 @@ def _record_violation_case(
     if worker.reported:
         return
 
-    case, match_reason = _find_existing_case_match(cases, person, frame_index)
+    # Force a new violation case on every confirmed incident. Do not group.
+    case, match_reason = None, "new"
+
     missing_set = set(missing)
     violation_type = _violation_type(missing)
     timestamp = datetime.now(timezone.utc).isoformat()
-    _log_confirmed_incident(
-        timestamp=timestamp,
-        video_name=video_name,
-        frame_index=frame_index,
-        person=person,
-        worker=worker,
-        case=case,
-        violation_type=violation_type,
-        action="create" if case is None else "match_existing_immutable",
-        match_reason=match_reason,
-    )
+
     if confirmed_aspect_ratios is not None:
         confirmed_aspect_ratios.append(_bbox_aspect_ratio(person.bbox))
 
-    if case is None:
-        snapshot_filename = _save_violation_snapshot(
-            frame=frame,
-            person=person,
-            missing=missing,
-            video_stem=Path(video_name).stem,
-            frame_index=frame_index,
+    snapshot_filename = _save_violation_snapshot(
+        frame=frame,
+        person=person,
+        missing=missing,
+        video_stem=Path(video_name).stem,
+        frame_index=frame_index,
+    )
+    report = save_violation(
+        timestamp=timestamp,
+        violation_type=violation_type,
+        details=_violation_details(person, missing, frame_index),
+        snapshot_filename=snapshot_filename,
+        video_name=video_name,
+        frame_index=frame_index,
+        track_id=person.track_id,
+    )
+    cases.append(
+        ViolationCase(
+            report=report,
+            missing=missing_set,
+            track_ids={person.track_id} if person.track_id is not None else set(),
+            last_bbox=person.bbox,
+            first_frame=frame_index,
+            last_frame=frame_index,
         )
-        report = save_violation(
-            timestamp=timestamp,
-            violation_type=violation_type,
-            details=_violation_details(person, missing, frame_index),
-            snapshot_filename=snapshot_filename,
-            video_name=video_name,
-            frame_index=frame_index,
-            track_id=person.track_id,
-            person_index=person.person_id,
-            missing_equipment=missing,
-            bounding_box=person.bbox.model_dump(),
-            confidence=person.confidence,
-        )
-        cases.append(
-            ViolationCase(
-                report=report,
-                missing=missing_set,
-                track_ids={person.track_id} if person.track_id is not None else set(),
-                last_bbox=person.bbox,
-                first_frame=frame_index,
-                last_frame=frame_index,
-            )
-        )
-        worker.reported = True
-        worker.status = "violation"
-        return
-
-    case.last_bbox = person.bbox
-    case.last_frame = frame_index
-    if person.track_id is not None:
-        case.track_ids.add(person.track_id)
+    )
     worker.reported = True
     worker.status = "violation"
 
@@ -960,7 +834,10 @@ def _find_existing_case_match(
         return best_case, "iou"
 
     for case in fresh_cases:
-        if _center_distance_ratio(person.bbox, case.last_bbox) <= settings.VIDEO_CASE_CENTER_DISTANCE_RATIO:
+        if (
+            _center_distance_ratio(person.bbox, case.last_bbox)
+            <= settings.VIDEO_CASE_CENTER_DISTANCE_RATIO
+        ):
             return case, "center"
 
     return None, "new"
@@ -996,208 +873,6 @@ def _bbox_height(box: BoundingBox) -> float:
 def _bbox_aspect_ratio(box: BoundingBox) -> float:
     width = max(_bbox_width(box), 1.0)
     return _bbox_height(box) / width
-
-
-def _log_worker_decision(
-    *,
-    frame_index: int,
-    person: PersonResult,
-    worker: WorkerState,
-    reported_before_update: bool,
-    judgeable: bool,
-    reason: str,
-    raw_missing: list[str],
-    suppressed_missing: list[str],
-    confirm_frames: int,
-    stage: str,
-) -> None:
-    bbox = person.bbox
-    logger.info(
-        "ppe_worker_decision frame_index=%s track_id=%s worker_id=%s "
-        "worker_track_ids=%s reported_before_update=%s worker_reported=%s "
-        "stage=%s judgeable=%s unknown_reason=%s raw_missing=%s suppressed_missing=%s "
-        "missing_counts=%s confirm_frames=%s unclear_posture=%s bbox=(%.1f,%.1f,%.1f,%.1f) "
-        "bbox_width=%.1f bbox_height=%.1f aspect_ratio=%.3f recent_bbox_count=%s",
-        frame_index,
-        person.track_id,
-        id(worker),
-        _format_track_ids(worker.track_ids),
-        reported_before_update,
-        worker.reported,
-        stage,
-        judgeable,
-        reason,
-        ",".join(raw_missing) if raw_missing else "-",
-        ",".join(suppressed_missing) if suppressed_missing else "-",
-        _format_missing_counts(worker.missing_counts),
-        confirm_frames,
-        _has_unclear_posture(worker),
-        bbox.x1,
-        bbox.y1,
-        bbox.x2,
-        bbox.y2,
-        _bbox_width(bbox),
-        _bbox_height(bbox),
-        _bbox_aspect_ratio(bbox),
-        len(worker.recent_bboxes),
-    )
-
-
-def _log_worker_match(
-    *,
-    frame_index: int,
-    person: PersonResult,
-    worker: WorkerState | None,
-    reason: str,
-    candidates: list[WorkerState],
-    used_worker_ids: set[int],
-) -> None:
-    unused_workers = [candidate for candidate in candidates if id(candidate) not in used_worker_ids]
-    recent_workers = [
-        candidate
-        for candidate in unused_workers
-        if frame_index - candidate.last_frame <= settings.VIDEO_CASE_MAX_FRAME_GAP
-    ]
-    expired_reported_workers = [
-        candidate
-        for candidate in unused_workers
-        if candidate.reported and frame_index - candidate.last_frame > settings.VIDEO_CASE_MAX_FRAME_GAP
-    ]
-    reported_metrics = _best_spatial_metrics(
-        [candidate for candidate in recent_workers if candidate.reported],
-        person,
-        frame_index,
-    )
-    unreported_metrics = _best_spatial_metrics(
-        [candidate for candidate in recent_workers if not candidate.reported],
-        person,
-        frame_index,
-    )
-    expired_reported_metrics = _best_spatial_metrics(expired_reported_workers, person, frame_index)
-
-    logger.info(
-        "ppe_worker_match frame_index=%s track_id=%s match_reason=%s selected_worker_id=%s "
-        "selected_reported=%s selected_track_ids=%s total_workers=%s unused_workers=%s "
-        "recent_workers=%s reported_recent=%s unreported_recent=%s expired_reported=%s "
-        "best_reported_iou=%.3f best_reported_center=%.3f best_reported_frame_gap=%s "
-        "best_unreported_iou=%.3f best_unreported_center=%.3f best_unreported_frame_gap=%s "
-        "best_expired_reported_iou=%.3f best_expired_reported_center=%.3f "
-        "best_expired_reported_frame_gap=%s",
-        frame_index,
-        person.track_id,
-        reason,
-        id(worker) if worker is not None else None,
-        worker.reported if worker is not None else None,
-        _format_track_ids(worker.track_ids if worker is not None else set()),
-        len(candidates),
-        len(unused_workers),
-        len(recent_workers),
-        sum(1 for candidate in recent_workers if candidate.reported),
-        sum(1 for candidate in recent_workers if not candidate.reported),
-        len(expired_reported_workers),
-        reported_metrics["iou"],
-        reported_metrics["center"],
-        reported_metrics["frame_gap"],
-        unreported_metrics["iou"],
-        unreported_metrics["center"],
-        unreported_metrics["frame_gap"],
-        expired_reported_metrics["iou"],
-        expired_reported_metrics["center"],
-        expired_reported_metrics["frame_gap"],
-    )
-
-
-def _best_spatial_metrics(
-    workers: list[WorkerState],
-    person: PersonResult,
-    frame_index: int,
-) -> dict[str, float | int | None]:
-    if not workers:
-        return {"iou": 0.0, "center": 999.0, "frame_gap": None}
-
-    best_iou = 0.0
-    best_center = 999.0
-    best_frame_gap: int | None = None
-    for worker in workers:
-        iou = _bbox_iou(person.bbox, worker.last_bbox)
-        center = _center_distance_ratio(person.bbox, worker.last_bbox)
-        if iou > best_iou or center < best_center:
-            best_iou = max(best_iou, iou)
-            if center < best_center:
-                best_center = center
-                best_frame_gap = frame_index - worker.last_frame
-
-    return {"iou": best_iou, "center": best_center, "frame_gap": best_frame_gap}
-
-
-def _format_track_ids(track_ids: set[int]) -> str:
-    if not track_ids:
-        return "-"
-    return ",".join(str(track_id) for track_id in sorted(track_ids))
-
-
-def _format_missing_counts(missing_counts: dict[str, int] | None) -> str:
-    if not missing_counts:
-        return "-"
-    return ",".join(f"{label}:{missing_counts.get(label, 0)}" for label in ("Helmet", "Vest"))
-
-
-def _log_confirmed_incident(
-    *,
-    timestamp: str,
-    video_name: str,
-    frame_index: int,
-    person: PersonResult,
-    worker: WorkerState,
-    case: ViolationCase | None,
-    violation_type: str,
-    action: str,
-    match_reason: str,
-) -> None:
-    bbox = person.bbox
-    logger.info(
-        "ppe_incident_confirmed timestamp=%s video=%s frame_index=%s track_id=%s "
-        "worker_id=%s worker_reported_before_record=%s violation_type=%s action=%s "
-        "match_reason=%s case_track_ids=%s case_first_frame=%s case_last_frame=%s "
-        "bbox=(%.1f,%.1f,%.1f,%.1f) bbox_width=%.1f bbox_height=%.1f aspect_ratio=%.3f",
-        timestamp,
-        video_name,
-        frame_index,
-        person.track_id,
-        id(worker),
-        worker.reported,
-        violation_type,
-        action,
-        match_reason,
-        _format_track_ids(case.track_ids if case is not None else set()),
-        case.first_frame if case is not None else None,
-        case.last_frame if case is not None else None,
-        bbox.x1,
-        bbox.y1,
-        bbox.x2,
-        bbox.y2,
-        _bbox_width(bbox),
-        _bbox_height(bbox),
-        _bbox_aspect_ratio(bbox),
-    )
-
-
-def _log_incident_aspect_summary(video_name: str, aspect_ratios: list[float]) -> None:
-    if not aspect_ratios:
-        logger.info("ppe_incident_aspect_summary video=%s confirmed_count=0", video_name)
-        return
-
-    sorted_ratios = sorted(aspect_ratios)
-    logger.info(
-        "ppe_incident_aspect_summary video=%s confirmed_count=%s min=%.3f max=%.3f "
-        "median=%.3f distribution=%s",
-        video_name,
-        len(sorted_ratios),
-        min(sorted_ratios),
-        max(sorted_ratios),
-        statistics.median(sorted_ratios),
-        ",".join(f"{ratio:.3f}" for ratio in sorted_ratios),
-    )
 
 
 def _bbox_diagonal(box: BoundingBox) -> float:
@@ -1334,7 +1009,9 @@ def _build_response(
     )
 
 
-def _best_equipment_by_person(equipment: list[dict], assignments: list[int | None]) -> dict[int, dict]:
+def _best_equipment_by_person(
+    equipment: list[dict], assignments: list[int | None]
+) -> dict[int, dict]:
     best: dict[int, dict] = {}
     for eq, person_idx in zip(equipment, assignments):
         if person_idx is None:
@@ -1389,7 +1066,11 @@ def _append_unmatched_equipment(
     assignments: list[int | None],
     label: str,
 ) -> int:
-    matched = {id(eq) for eq, person_idx in zip(equipment, assignments) if person_idx is not None}
+    matched = {
+        id(eq)
+        for eq, person_idx in zip(equipment, assignments)
+        if person_idx is not None
+    }
     for eq in equipment:
         if id(eq) in matched:
             continue
@@ -1422,8 +1103,14 @@ def _violation_type(missing: list[str]) -> str:
     return "ppe_violation"
 
 
-def _violation_details(person: PersonResult, missing: list[str], frame_index: int) -> str:
-    subject = f"track {person.track_id}" if person.track_id is not None else f"person {person.person_id}"
+def _violation_details(
+    person: PersonResult, missing: list[str], frame_index: int
+) -> str:
+    subject = (
+        f"track {person.track_id}"
+        if person.track_id is not None
+        else f"person {person.person_id}"
+    )
     return f"{subject} missing {', '.join(missing)} at frame {frame_index}"
 
 
@@ -1438,7 +1125,9 @@ def _save_violation_snapshot(
     import cv2
 
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-    safe_stem = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in video_stem)
+    safe_stem = "".join(
+        ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in video_stem
+    )
     track_label = person.track_id if person.track_id is not None else person.person_id
     filename = f"{safe_stem}_frame_{frame_index}_track_{track_label}_{int(time.time() * 1000)}.jpg"
     path = SNAPSHOT_DIR / filename
@@ -1505,51 +1194,11 @@ def _video_metadata(video_path: Path) -> tuple[float, int]:
     ret, frame = cap.read()
     if not ret or frame is None:
         cap.release()
-        raise ValueError("Video file opened but frames could not be read. The codec might be unsupported by the server.")
+        raise ValueError(
+            "Video file opened but frames could not be read. The codec might be unsupported by the server."
+        )
 
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     cap.release()
     return fps, total_frames
-
-
-def _record_zone_violation(
-    *,
-    worker: WorkerState,
-    zone_id: int,
-    zone_name: str,
-    frame: np.ndarray,
-    person: PersonResult,
-    video_name: str,
-    frame_index: int,
-) -> ZoneViolation:
-    timestamp = datetime.now(timezone.utc).isoformat()
-    snapshot_filename = _save_violation_snapshot(
-        frame=frame,
-        person=person,
-        missing=[f"Zone: {zone_name}"],
-        video_stem=Path(video_name).stem,
-        frame_index=frame_index,
-    )
-
-    violation = ZoneViolation(
-        zone_id=zone_id,
-        track_id=person.track_id or 0,
-        timestamp=timestamp,
-        video_name=video_name,
-        frame_index=frame_index,
-        snapshot_path=snapshot_filename,
-    )
-
-    saved = save_zone_violation(violation)
-    worker.reported_zones.add(zone_id)
-    logger.info(
-        "ppe_zone_violation confirmed timestamp=%s video=%s frame_index=%s track_id=%s zone_id=%s zone_name=%s",
-        timestamp,
-        video_name,
-        frame_index,
-        person.track_id,
-        zone_id,
-        zone_name,
-    )
-    return saved

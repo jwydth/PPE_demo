@@ -97,6 +97,45 @@ export async function getSafetyEvents(): Promise<(ViolationReport | ZoneViolatio
   );
 }
 
+export async function deleteAllIncidents(): Promise<{ ppe_violations_deleted: number; zone_violations_deleted: number; total_deleted: number }> {
+  const res = await fetch(`${API_URL}/violations`, {
+    method: "DELETE",
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error((body as { detail?: string }).detail ?? "Could not delete incidents");
+  }
+
+  return res.json();
+}
+
+export async function deleteViolation(violationId: number): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_URL}/violations/${violationId}`, {
+    method: "DELETE",
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error((body as { detail?: string }).detail ?? "Could not delete violation");
+  }
+
+  return res.json();
+}
+
+export async function deleteZoneViolation(zoneViolationId: number): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_URL}/zone-violations/${zoneViolationId}`, {
+    method: "DELETE",
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error((body as { detail?: string }).detail ?? "Could not delete zone violation");
+  }
+
+  return res.json();
+}
+
 function toAbsoluteUrl(url?: string): string | undefined {
   if (!url) return undefined;
   if (/^https?:\/\//i.test(url)) return url;
