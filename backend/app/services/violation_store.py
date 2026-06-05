@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import BACKEND_DIR, settings
-from app.models.schemas import ViolationReport
+from app.models.schemas import CameraCalibration, ViolationReport, Zone, ZoneViolation
 
 
 def _resolve_backend_path(value: str) -> Path:
@@ -38,9 +38,45 @@ def init_db() -> None:
         )
         conn.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_violations_timestamp
-            ON violations(timestamp)
+            CREATE TABLE IF NOT EXISTS zones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                video_name TEXT NOT NULL,
+                zone_name TEXT NOT NULL,
+                zone_type TEXT NOT NULL,
+                dwell_threshold_seconds INTEGER DEFAULT 0,
+                is_active INTEGER DEFAULT 1,
+                ui_shape_data TEXT NOT NULL,
+                flattened_coordinates TEXT NOT NULL
+            )
             """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS zone_violations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                zone_id INTEGER NOT NULL,
+                track_id INTEGER NOT NULL,
+                timestamp TEXT NOT NULL,
+                video_name TEXT NOT NULL,
+                frame_index INTEGER NOT NULL,
+                snapshot_path TEXT,
+                FOREIGN KEY (zone_id) REFERENCES zones (id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS camera_calibrations (
+                video_name TEXT PRIMARY KEY,
+                source_points TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_violations_timestamp ON violations(timestamp)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_zones_video_name ON zones(video_name)"
         )
         conn.commit()
 
@@ -146,6 +182,92 @@ def list_violations(limit: int = 100) -> list[ViolationReport]:
     return [_row_to_report(dict(row)) for row in rows]
 
 
+def save_zone(zone: Zone) -> Zone:
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO zones (
+                video_name, zone_name, zone_type, dwell_threshold_seconds,
+                is_active, ui_shape_data, flattened_coordinates
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                zone.video_name,
+                zone.zone_name,
+                zone.zone_type,
+                zone.dwell_threshold_seconds,
+                1 if zone.is_active else 0,
+                zone.ui_shape_data,
+                zone.flattened_coordinates,
+            ),
+        )
+        conn.commit()
+        zone.id = cursor.lastrowid
+    return zone
+
+
+def list_zones(video_name: str) -> list[Zone]:
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM zones WHERE video_name = ?", (video_name,)
+        ).fetchall()
+    return [
+        Zone(
+            id=row["id"],
+            video_name=row["video_name"],
+            zone_name=row["zone_name"],
+            zone_type=row["zone_type"],
+            dwell_threshold_seconds=row["dwell_threshold_seconds"],
+            is_active=bool(row["is_active"]),
+            ui_shape_data=row["ui_shape_data"],
+            flattened_coordinates=row["flattened_coordinates"],
+        )
+        for row in rows
+    ]
+
+
+def delete_zone(zone_id: int) -> bool:
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute("DELETE FROM zones WHERE id = ?", (zone_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def update_zone(zone: Zone) -> Zone:
+    if zone.id is None:
+        raise ValueError("Zone ID is required for update")
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE zones
+            SET zone_name = ?,
+                zone_type = ?,
+                dwell_threshold_seconds = ?,
+                is_active = ?,
+                ui_shape_data = ?,
+                flattened_coordinates = ?
+            WHERE id = ?
+            """,
+            (
+                zone.zone_name,
+                zone.zone_type,
+                zone.dwell_threshold_seconds,
+                1 if zone.is_active else 0,
+                zone.ui_shape_data,
+                zone.flattened_coordinates,
+                zone.id,
+            ),
+        )
+        conn.commit()
+    return zone
+
+
 def _row_to_report(row: dict[str, Any]) -> ViolationReport:
     return ViolationReport(
         id=row["id"],
@@ -163,3 +285,77 @@ def _snapshot_url(snapshot_filename: str | None) -> str | None:
     if not snapshot_filename:
         return None
     return f"/snapshots/{snapshot_filename}"
+
+
+def save_calibration(calibration: CameraCalibration) -> CameraCalibration:
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO camera_calibrations (video_name, source_points)
+            VALUES (?, ?)
+            ON CONFLICT(video_name) DO UPDATE SET source_points = excluded.source_points
+            """,
+            (calibration.video_name, calibration.source_points),
+        )
+        conn.commit()
+    return calibration
+
+
+def get_calibration(video_name: str) -> CameraCalibration | None:
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM camera_calibrations WHERE video_name = ?", (video_name,)
+        ).fetchone()
+        if row:
+            return CameraCalibration(
+                video_name=row["video_name"], source_points=row["source_points"]
+            )
+    return None
+
+
+def save_zone_violation(violation: ZoneViolation) -> ZoneViolation:
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO zone_violations (
+                zone_id, track_id, timestamp, video_name, frame_index, snapshot_path
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                violation.zone_id,
+                violation.track_id,
+                violation.timestamp,
+                violation.video_name,
+                violation.frame_index,
+                violation.snapshot_path,
+            ),
+        )
+        conn.commit()
+        violation.id = cursor.lastrowid
+    return violation
+
+
+def list_zone_violations(limit: int = 100) -> list[ZoneViolation]:
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM zone_violations ORDER BY timestamp DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [
+            ZoneViolation(
+                id=row["id"],
+                zone_id=row["zone_id"],
+                track_id=row["track_id"],
+                timestamp=row["timestamp"],
+                video_name=row["video_name"],
+                frame_index=row["frame_index"],
+                snapshot_path=row["snapshot_path"],
+            )
+            for row in rows
+        ]

@@ -73,3 +73,29 @@ class VideoSummary(BaseModel):
 class VideoProcessingResponse(BaseModel):
     summary: VideoSummary
     reports: List[ViolationReport]
+
+
+class Zone(BaseModel):
+    id: Optional[int] = None
+    video_name: str
+    zone_name: str
+    zone_type: Literal["RESTRICTED", "WALKWAY", "FORKLIFT_PATH"]
+    dwell_threshold_seconds: int = 0
+    is_active: bool = True
+    ui_shape_data: str  # JSON string
+    flattened_coordinates: str  # JSON string
+
+
+class ZoneViolation(BaseModel):
+    id: Optional[int] = None
+    zone_id: int
+    track_id: int
+    timestamp: str
+    video_name: str
+    frame_index: int
+    snapshot_path: Optional[str] = None
+
+
+class CameraCalibration(BaseModel):
+    video_name: str
+    source_points: str  # JSON string of 4 normalized [x, y] points

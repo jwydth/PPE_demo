@@ -9,10 +9,11 @@ import { ResultsPanel } from "@/components/ResultsPanel";
 import { SummaryBar } from "@/components/SummaryBar";
 import { UploadZone } from "@/components/UploadZone";
 import { VideoReportsPanel } from "@/components/VideoReportsPanel";
+import { ZoneDrawingCanvas } from "@/components/ZoneDrawingCanvas";
 import { analyzeImage, analyzeVideo } from "@/lib/api";
 import { DetectionResponse, VideoProcessingResponse } from "@/types/detection";
 
-type ActiveTab = "detect" | "batch" | "history";
+type ActiveTab = "detect" | "batch" | "history" | "zones";
 type Phase = "idle" | "analyzing" | "done" | "error";
 type FileKind = "image" | "video";
 
@@ -46,11 +47,15 @@ export default function Home() {
         <TabButton active={activeTab === "history"} onClick={() => setActiveTab("history")}>
           Detection History
         </TabButton>
+        <TabButton active={activeTab === "zones"} onClick={() => setActiveTab("zones")}>
+          Zone Configuration
+        </TabButton>
       </nav>
 
       {activeTab === "detect" && <DetectPpePanel />}
       {activeTab === "batch" && <BatchImagesPanel />}
       {activeTab === "history" && <DetectionHistoryPanel />}
+      {activeTab === "zones" && <ZoneDrawingCanvas />}
     </main>
   );
 }
@@ -84,6 +89,7 @@ function DetectPpePanel() {
   const [fileKind, setFileKind] = useState<FileKind>("image");
   const [result, setResult] = useState<DetectionResponse | null>(null);
   const [videoResult, setVideoResult] = useState<VideoProcessingResponse | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
   const [errorMsg, setErrorMsg] = useState("");
   const [imageHeight, setImageHeight] = useState<number | null>(null);
@@ -97,6 +103,9 @@ function DetectPpePanel() {
     setErrorMsg("");
     setImageHeight(null);
     setPhase("analyzing");
+
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setPreviewUrl(URL.createObjectURL(selected));
 
     try {
       if (selectedKind === "video") {
@@ -116,6 +125,8 @@ function DetectPpePanel() {
     setFile(null);
     setResult(null);
     setVideoResult(null);
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setPreviewUrl(null);
     setErrorMsg("");
     setImageHeight(null);
   };
@@ -192,7 +203,7 @@ function DetectPpePanel() {
             </h2>
           </div>
 
-          <VideoReportsPanel result={videoResult} />
+          <VideoReportsPanel result={videoResult} previewUrl={previewUrl || undefined} />
 
           <ResetButton onClick={reset} />
         </div>

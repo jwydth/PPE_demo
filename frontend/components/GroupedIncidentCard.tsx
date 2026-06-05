@@ -3,6 +3,7 @@
 import { useMemo } from "react";
 
 import { ViolationReport } from "@/types/detection";
+import { ZoneViolation } from "@/types/zone";
 
 import { formatIncidentType } from "./ViolationReportCard";
 
@@ -12,7 +13,7 @@ interface GroupedIncident {
   snapshotUrl?: string;
   videoName?: string;
   frameIndex?: number;
-  records: ViolationReport[];
+  records: (ViolationReport | ZoneViolation)[];
 }
 
 interface GroupedIncidentCardProps {
@@ -41,7 +42,7 @@ export function GroupedIncidentCard({ incident }: GroupedIncidentCardProps) {
           </div>
 
           <div className="bg-red-500/10 border border-red-500/30 rounded px-3 py-2 text-right shrink-0">
-            <p className="font-mono text-[10px] text-red-300 tracking-widest">WORKERS</p>
+            <p className="font-mono text-[10px] text-red-300 tracking-widest">EVENTS</p>
             <p className="font-mono text-sm font-bold text-red-300">{incident.records.length}</p>
           </div>
         </div>
@@ -53,16 +54,21 @@ export function GroupedIncidentCard({ incident }: GroupedIncidentCardProps) {
 
         <div className="pt-3 border-t border-zinc-800">
           <p className="font-mono text-[10px] text-zinc-600 tracking-widest mb-2">
-            WORKER PPE ISSUES
+            INCIDENT DETAILS
           </p>
           <div className="flex flex-col gap-2">
-            {sortedRecords.map((record, index) => (
-              <div key={record.id} className="bg-zinc-900 border border-zinc-800 rounded px-3 py-2">
-                <p className="font-mono text-xs text-zinc-200">
-                  Worker {index + 1}: {formatIncidentType(record.violation_type)}
-                </p>
-              </div>
-            ))}
+            {sortedRecords.map((record, index) => {
+              const isPpe = "violation_type" in record;
+              return (
+                <div key={record.id} className="bg-zinc-900 border border-zinc-800 rounded px-3 py-2">
+                  <p className="font-mono text-xs text-zinc-200">
+                    {isPpe 
+                      ? `PPE Violation: ${formatIncidentType(record.violation_type)}`
+                      : `Zone Incursion: Track ${record.track_id} in restricted area`}
+                  </p>
+                </div>
+              );
+            })}
           </div>
         </div>
 
@@ -80,21 +86,27 @@ function ReviewField({ label, value }: { label: string; value: string | number }
   );
 }
 
-function sortRecordsForDisplay(records: ViolationReport[]): ViolationReport[] {
+function sortRecordsForDisplay(records: (ViolationReport | ZoneViolation)[]): (ViolationReport | ZoneViolation)[] {
   return [...records].sort((a, b) => {
     const aTrack = a.track_id ?? Number.MAX_SAFE_INTEGER;
     const bTrack = b.track_id ?? Number.MAX_SAFE_INTEGER;
-    return aTrack - bTrack || a.id - b.id;
+    return aTrack - bTrack || (a.id ?? 0) - (b.id ?? 0);
   });
 }
 
-function summarizeIncidentTypes(records: ViolationReport[]): string {
-  const types = new Set(records.map((record) => record.violation_type));
+function summarizeIncidentTypes(records: (ViolationReport | ZoneViolation)[]): string {
+  const ppeRecords = records.filter((r): r is ViolationReport => "violation_type" in r);
+  const zoneRecords = records.filter((r): r is ZoneViolation => !("violation_type" in r));
+
+  if (ppeRecords.length > 0 && zoneRecords.length > 0) return "PPE Violation & Zone Incursion";
+  if (zoneRecords.length > 0) return "Restricted Zone Incursion";
+  
+  const types = new Set(ppeRecords.map((record) => record.violation_type));
   if (types.has("missing_helmet_and_vest")) return "Missing Safety Helmet and Vest";
   if (types.has("missing_helmet") && types.has("missing_vest")) return "Missing Safety Helmet and Vest";
   if (types.has("missing_helmet")) return "Missing Safety Helmet";
   if (types.has("missing_vest")) return "Missing Safety Vest";
-  return formatIncidentType(records[0]?.violation_type ?? "ppe_violation");
+  return formatIncidentType(ppeRecords[0]?.violation_type ?? "ppe_violation");
 }
 
 function formatDetectedTime(timestamp: string): string {

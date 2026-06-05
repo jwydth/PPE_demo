@@ -2,22 +2,24 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { getViolations } from "@/lib/api";
+import { getSafetyEvents } from "@/lib/api";
 import { ViolationReport } from "@/types/detection";
+import { ZoneViolation } from "@/types/zone";
 
 import { GroupedIncidentCard, GroupedIncident } from "./GroupedIncidentCard";
 
-type ViolationFilter = "all" | "missing_helmet" | "missing_vest" | "missing_helmet_and_vest";
+type ViolationFilter = "all" | "missing_helmet" | "missing_vest" | "missing_helmet_and_vest" | "zone_incursion";
 
 const FILTERS: Array<{ label: string; value: ViolationFilter }> = [
   { label: "All", value: "all" },
   { label: "Missing Helmet", value: "missing_helmet" },
   { label: "Missing Vest", value: "missing_vest" },
   { label: "Missing Helmet and Vest", value: "missing_helmet_and_vest" },
+  { label: "Zone Incursion", value: "zone_incursion" },
 ];
 
 export function DetectionHistoryPanel() {
-  const [reports, setReports] = useState<ViolationReport[]>([]);
+  const [reports, setReports] = useState<(ViolationReport | ZoneViolation)[]>([]);
   const [activeFilter, setActiveFilter] = useState<ViolationFilter>("all");
   const [isLoading, setIsLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState("");
@@ -26,7 +28,10 @@ export function DetectionHistoryPanel() {
   const filteredIncidents = useMemo(() => {
     if (activeFilter === "all") return incidents;
     return incidents.filter((incident) =>
-      incident.records.some((record) => record.violation_type === activeFilter),
+      incident.records.some((record) => {
+        if ("violation_type" in record) return record.violation_type === activeFilter;
+        return activeFilter === "zone_incursion";
+      }),
     );
   }, [activeFilter, incidents]);
 
@@ -35,7 +40,7 @@ export function DetectionHistoryPanel() {
     setErrorMsg("");
 
     try {
-      setReports(await getViolations());
+      setReports(await getSafetyEvents());
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "Could not load detection history");
     } finally {
@@ -127,8 +132,8 @@ export function DetectionHistoryPanel() {
   );
 }
 
-function groupReportsByIncident(reports: ViolationReport[]): GroupedIncident[] {
-  const grouped = new Map<string, ViolationReport[]>();
+function groupReportsByIncident(reports: (ViolationReport | ZoneViolation)[]): GroupedIncident[] {
+  const grouped = new Map<string, (ViolationReport | ZoneViolation)[]>();
 
   for (const report of reports) {
     const key = `${report.video_name ?? "unknown"}:${report.frame_index ?? "unknown"}`;
@@ -138,15 +143,21 @@ function groupReportsByIncident(reports: ViolationReport[]): GroupedIncident[] {
   return [...grouped.entries()]
     .map(([id, records]) => {
       const sortedByTimestamp = [...records].sort(
-        (a, b) => timestampValue(a.timestamp) - timestampValue(b.timestamp) || a.id - b.id,
+        (a, b) => timestampValue(a.timestamp) - timestampValue(b.timestamp) || (a.id ?? 0) - (b.id ?? 0),
       );
       const firstRecord = sortedByTimestamp[0];
-      const firstSnapshot = records.find((record) => record.snapshot_url)?.snapshot_url;
+      const firstSnapshot = records.find((r) => {
+        if ("snapshot_url" in r) return r.snapshot_url;
+        return r.snapshot_path;
+      });
+      const snapshotUrl = firstSnapshot 
+        ? ("snapshot_url" in firstSnapshot ? firstSnapshot.snapshot_url : firstSnapshot.snapshot_path)
+        : undefined;
 
       return {
         id,
         timestamp: firstRecord?.timestamp ?? "",
-        snapshotUrl: firstSnapshot,
+        snapshotUrl,
         videoName: firstRecord?.video_name,
         frameIndex: firstRecord?.frame_index,
         records,

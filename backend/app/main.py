@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
-from app.routers import detection
+from app.routers import detection, zones
 from app.services.violation_store import SNAPSHOT_DIR, init_db
 
 app = FastAPI(
@@ -23,6 +23,7 @@ app.add_middleware(
 )
 
 app.include_router(detection.router)
+app.include_router(zones.router)
 SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/snapshots", StaticFiles(directory=SNAPSHOT_DIR), name="snapshots")
 

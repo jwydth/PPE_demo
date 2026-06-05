@@ -1,3 +1,4 @@
+import json
 import logging
 import math
 import statistics
@@ -6,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 from PIL import Image
 
 from app.core.config import BACKEND_DIR, settings
@@ -19,8 +21,20 @@ from app.models.schemas import (
     VideoProcessingResponse,
     VideoSummary,
     ViolationReport,
+    ZoneViolation,
 )
-from app.services.violation_store import SNAPSHOT_DIR, save_violation
+from app.services.spatial import (
+    compute_homography_matrix,
+    is_point_in_polygon,
+    transform_points,
+)
+from app.services.violation_store import (
+    SNAPSHOT_DIR,
+    get_calibration,
+    list_zones,
+    save_violation,
+    save_zone_violation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +66,18 @@ class WorkerState:
     reported_missing: set[str] | None = None
     reported: bool = False
     status: str = "unknown"
+    zone_dwell: dict[int, float] | None = None  # zone_id -> seconds
+    reported_zones: set[int] | None = None  # zone_ids
 
     def __post_init__(self) -> None:
         if self.missing_counts is None:
             self.missing_counts = {"Helmet": 0, "Vest": 0}
         if self.reported_missing is None:
             self.reported_missing = set()
+        if self.zone_dwell is None:
+            self.zone_dwell = {}
+        if self.reported_zones is None:
+            self.reported_zones = set()
 
 
 def _area(b: dict) -> float:
@@ -217,6 +237,23 @@ class PPEDetector:
         candidate_violations = 0
         processed_frames = 0
 
+        # Load Zones and Calibration for BEV
+        active_zones = [z for z in list_zones(video_name) if z.is_active]
+        calibration = get_calibration(video_name)
+        bev_matrix = None
+        bev_zones = []
+
+        if calibration:
+            try:
+                src_pts = [(p["x"], p["y"]) for p in json.loads(calibration.source_points)]
+                bev_matrix = compute_homography_matrix(src_pts)
+                for zone in active_zones:
+                    coords = [(p["x"], p["y"]) for p in json.loads(zone.flattened_coordinates)]
+                    transformed = transform_points(bev_matrix, coords)
+                    bev_zones.append({"id": zone.id, "name": zone.zone_name, "poly": transformed, "threshold": zone.dwell_threshold_seconds})
+            except Exception as exc:
+                logger.error("Failed to setup BEV: %s", exc)
+
         results = self.model.track(
             source=str(video_path),
             stream=True,
@@ -247,7 +284,29 @@ class PPEDetector:
                     frame_height=frame_height,
                     used_worker_ids=used_worker_ids,
                 )
+                worker = decision["worker"]
                 candidate_violations += int(decision["candidate"])
+                
+                # Check Incursions
+                if bev_matrix and bev_zones:
+                    # Foot point: bottom center
+                    foot_point = ((person.bbox.x1 + person.bbox.x2) / 2 / frame_width, person.bbox.y2 / frame_height)
+                    bev_foot = transform_points(bev_matrix, [foot_point])[0]
+                    
+                    for bz in bev_zones:
+                        if is_point_in_polygon(bev_foot, bz["poly"]):
+                            worker.zone_dwell[bz["id"]] = worker.zone_dwell.get(bz["id"], 0) + (stride / fps)
+                            if worker.zone_dwell[bz["id"]] > bz["threshold"] and bz["id"] not in worker.reported_zones:
+                                _record_zone_violation(
+                                    worker=worker,
+                                    zone_id=bz["id"],
+                                    zone_name=bz["name"],
+                                    frame=frame,
+                                    person=person,
+                                    video_name=video_name,
+                                    frame_index=frame_index
+                                )
+                
                 missing_to_report = decision["missing_to_report"]
                 if not missing_to_report:
                     continue
@@ -256,7 +315,7 @@ class PPEDetector:
                     cases=cases,
                     frame=frame,
                     person=person,
-                    worker=decision["worker"],
+                    worker=worker,
                     missing=missing_to_report,
                     video_name=video_name,
                     frame_index=frame_index,
@@ -1385,7 +1444,54 @@ def _video_metadata(video_path: Path) -> tuple[float, int]:
     if not cap.isOpened():
         raise ValueError("Could not decode the uploaded video.")
 
+    # Try to read the first frame to ensure the codec is supported
+    ret, frame = cap.read()
+    if not ret or frame is None:
+        cap.release()
+        raise ValueError("Video file opened but frames could not be read. The codec might be unsupported by the server.")
+
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     cap.release()
     return fps, total_frames
+
+
+def _record_zone_violation(
+    *,
+    worker: WorkerState,
+    zone_id: int,
+    zone_name: str,
+    frame: np.ndarray,
+    person: PersonResult,
+    video_name: str,
+    frame_index: int,
+) -> None:
+    timestamp = datetime.now(timezone.utc).isoformat()
+    snapshot_filename = _save_violation_snapshot(
+        frame=frame,
+        person=person,
+        missing=[],  # No missing PPE, just zone violation
+        video_stem=Path(video_name).stem,
+        frame_index=frame_index,
+    )
+    
+    violation = ZoneViolation(
+        zone_id=zone_id,
+        track_id=person.track_id or 0,
+        timestamp=timestamp,
+        video_name=video_name,
+        frame_index=frame_index,
+        snapshot_path=snapshot_filename,
+    )
+    
+    save_zone_violation(violation)
+    worker.reported_zones.add(zone_id)
+    logger.info(
+        "ppe_zone_violation confirmed timestamp=%s video=%s frame_index=%s track_id=%s zone_id=%s zone_name=%s",
+        timestamp,
+        video_name,
+        frame_index,
+        person.track_id,
+        zone_id,
+        zone_name
+    )
