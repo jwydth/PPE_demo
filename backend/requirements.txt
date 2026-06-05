@@ -9,3 +9,4 @@ pydantic-settings==2.2.1
 python-dotenv==1.0.1
 sqlmodel==0.0.38
 psycopg[binary]==3.3.4
+minio==7.2.20

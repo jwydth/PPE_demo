@@ -8,6 +8,11 @@ BACKEND_DIR = Path(__file__).resolve().parents[2]
 class Settings(BaseSettings):
     MODEL_PATH: str = "weights/ppe_v4.pt"
     DATABASE_URL: str | None = None
+    MINIO_ENDPOINT: str | None = None
+    MINIO_ACCESS_KEY: str | None = None
+    MINIO_SECRET_KEY: str | None = None
+    MINIO_BUCKET_NAME: str | None = None
+    MINIO_SECURE: bool = False
     # "auto" uses the first CUDA GPU when PyTorch can access one, otherwise CPU.
     # You can also force "cpu", "cuda", "cuda:0", "0", etc.
     INFERENCE_DEVICE: str = "auto"
