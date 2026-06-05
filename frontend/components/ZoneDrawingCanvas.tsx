@@ -240,63 +240,6 @@ export function ZoneDrawingCanvas() {
         return; // Let fabric.js handle selection/dragging
       }
 
-      if (tool === "calibrate") {
-        const rawPointer = fabricCanvas.getPointer(opt.e);
-        const pointer = clampPointer(rawPointer);
-        const newPoint: Point2D = { x: pointer.x, y: pointer.y };
-
-        if (calibrationPoints.length < 4) {
-          const newPoints = [...calibrationPoints, newPoint];
-          setCalibrationPoints(newPoints);
-
-          const circle = new fabric.Circle({
-            radius: 5,
-            fill: "#3b82f6",
-            left: pointer.x,
-            top: pointer.y,
-            selectable: false,
-            originX: "center",
-            originY: "center",
-            evented: false,
-          });
-          fabricCanvas.add(circle);
-          setActivePoints((prev) => [...prev, circle]);
-
-          if (newPoints.length === 4) {
-            const poly = new fabric.Polygon(newPoints, {
-              fill: "rgba(59, 130, 246, 0.2)",
-              stroke: "#3b82f6",
-              strokeWidth: 2,
-              strokeDashArray: [5, 5],
-              selectable: false,
-              evented: false,
-            });
-            fabricCanvas.add(poly);
-            setCalibrationPolygon(poly);
-          }
-        } else {
-          // Reset calibration
-          activePoints.forEach((p) => fabricCanvas.remove(p));
-          if (calibrationPolygon) fabricCanvas.remove(calibrationPolygon);
-          setCalibrationPoints([newPoint]);
-          setCalibrationPolygon(null);
-
-          const circle = new fabric.Circle({
-            radius: 5,
-            fill: "#3b82f6",
-            left: pointer.x,
-            top: pointer.y,
-            selectable: false,
-            originX: "center",
-            originY: "center",
-            evented: false,
-          });
-          fabricCanvas.add(circle);
-          setActivePoints([circle]);
-        }
-        return;
-      }
-
       if (tool !== "draw") return;
 
       const rawPointer = fabricCanvas.getPointer(opt.e);
