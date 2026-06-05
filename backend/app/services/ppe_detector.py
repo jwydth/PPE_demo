@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 COMPLIANT_COLOR = "#22c55e"
 VIOLATION_COLOR = "#ef4444"
 PERSON_COLOR = "#f97316"
+COORD_SCALE = 1000  # normalized coords are scaled to this before polygon test
 
 
 @dataclass
@@ -233,6 +234,7 @@ class PPEDetector:
 
         cases: list[ViolationCase] = []
         workers: list[WorkerState] = []
+        zone_violations_list: list[ZoneViolation] = []
         confirmed_aspect_ratios: list[float] = []
         candidate_violations = 0
         processed_frames = 0
@@ -253,6 +255,16 @@ class PPEDetector:
                     bev_zones.append({"id": zone.id, "name": zone.zone_name, "poly": transformed, "threshold": zone.dwell_threshold_seconds})
             except Exception as exc:
                 logger.error("Failed to setup BEV: %s", exc)
+
+        # Fallback: pixel-space check when no calibration or BEV setup failed
+        if not bev_zones and active_zones:
+            logger.info("No calibration found for '%s'; using pixel-space zone detection.", video_name)
+            for zone in active_zones:
+                try:
+                    coords = [(p["x"] * COORD_SCALE, p["y"] * COORD_SCALE) for p in json.loads(zone.flattened_coordinates)]
+                    bev_zones.append({"id": zone.id, "name": zone.zone_name, "poly": coords, "threshold": zone.dwell_threshold_seconds})
+                except Exception as exc:
+                    logger.error("Failed to load zone %s: %s", zone.id, exc)
 
         results = self.model.track(
             source=str(video_path),
@@ -288,24 +300,29 @@ class PPEDetector:
                 candidate_violations += int(decision["candidate"])
                 
                 # Check Incursions
-                if bev_matrix and bev_zones:
-                    # Foot point: bottom center
-                    foot_point = ((person.bbox.x1 + person.bbox.x2) / 2 / frame_width, person.bbox.y2 / frame_height)
-                    bev_foot = transform_points(bev_matrix, [foot_point])[0]
-                    
+                if bev_zones:
+                    foot_x = (person.bbox.x1 + person.bbox.x2) / 2 / frame_width
+                    foot_y = person.bbox.y2 / frame_height
+                    if bev_matrix:
+                        test_point = transform_points(bev_matrix, [(foot_x, foot_y)])[0]
+                    else:
+                        test_point = (foot_x * COORD_SCALE, foot_y * COORD_SCALE)
+
                     for bz in bev_zones:
-                        if is_point_in_polygon(bev_foot, bz["poly"]):
+                        if is_point_in_polygon(test_point, bz["poly"]):
                             worker.zone_dwell[bz["id"]] = worker.zone_dwell.get(bz["id"], 0) + (stride / fps)
                             if worker.zone_dwell[bz["id"]] > bz["threshold"] and bz["id"] not in worker.reported_zones:
-                                _record_zone_violation(
+                                zv = _record_zone_violation(
                                     worker=worker,
                                     zone_id=bz["id"],
                                     zone_name=bz["name"],
                                     frame=frame,
                                     person=person,
                                     video_name=video_name,
-                                    frame_index=frame_index
+                                    frame_index=frame_index,
                                 )
+                                if zv:
+                                    zone_violations_list.append(zv)
                 
                 missing_to_report = decision["missing_to_report"]
                 if not missing_to_report:
@@ -339,6 +356,7 @@ class PPEDetector:
                 inference_ms=round(elapsed_ms, 2),
             ),
             reports=reports,
+            zone_violations=zone_violations_list,
         )
 
     def _mock_predict(self, image: Image.Image) -> DetectionResponse:
@@ -1465,16 +1483,16 @@ def _record_zone_violation(
     person: PersonResult,
     video_name: str,
     frame_index: int,
-) -> None:
+) -> ZoneViolation:
     timestamp = datetime.now(timezone.utc).isoformat()
     snapshot_filename = _save_violation_snapshot(
         frame=frame,
         person=person,
-        missing=[],  # No missing PPE, just zone violation
+        missing=[f"Zone: {zone_name}"],
         video_stem=Path(video_name).stem,
         frame_index=frame_index,
     )
-    
+
     violation = ZoneViolation(
         zone_id=zone_id,
         track_id=person.track_id or 0,
@@ -1483,8 +1501,8 @@ def _record_zone_violation(
         frame_index=frame_index,
         snapshot_path=snapshot_filename,
     )
-    
-    save_zone_violation(violation)
+
+    saved = save_zone_violation(violation)
     worker.reported_zones.add(zone_id)
     logger.info(
         "ppe_zone_violation confirmed timestamp=%s video=%s frame_index=%s track_id=%s zone_id=%s zone_name=%s",
@@ -1493,5 +1511,6 @@ def _record_zone_violation(
         frame_index,
         person.track_id,
         zone_id,
-        zone_name
+        zone_name,
     )
+    return saved

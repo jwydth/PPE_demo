@@ -67,7 +67,10 @@ export interface VideoSummary {
   inference_ms: number;
 }
 
+import { ZoneViolation } from "./zone";
+
 export interface VideoProcessingResponse {
   summary: VideoSummary;
   reports: ViolationReport[];
+  zone_violations?: ZoneViolation[];
 }

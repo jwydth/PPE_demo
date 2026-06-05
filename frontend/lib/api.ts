@@ -42,6 +42,10 @@ export async function analyzeVideo(file: File): Promise<VideoProcessingResponse>
       ...report,
       snapshot_url: toAbsoluteUrl(report.snapshot_url),
     })),
+    zone_violations: (payload.zone_violations ?? []).map((zv) => ({
+      ...zv,
+      snapshot_path: toAbsoluteUrl(zv.snapshot_path),
+    })),
   };
 }
 

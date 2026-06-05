@@ -70,9 +70,20 @@ class VideoSummary(BaseModel):
     inference_ms: float
 
 
+class ZoneViolation(BaseModel):
+    id: Optional[int] = None
+    zone_id: int
+    track_id: int
+    timestamp: str
+    video_name: str
+    frame_index: int
+    snapshot_path: Optional[str] = None
+
+
 class VideoProcessingResponse(BaseModel):
     summary: VideoSummary
     reports: List[ViolationReport]
+    zone_violations: List[ZoneViolation] = []
 
 
 class Zone(BaseModel):
@@ -84,16 +95,6 @@ class Zone(BaseModel):
     is_active: bool = True
     ui_shape_data: str  # JSON string
     flattened_coordinates: str  # JSON string
-
-
-class ZoneViolation(BaseModel):
-    id: Optional[int] = None
-    zone_id: int
-    track_id: int
-    timestamp: str
-    video_name: str
-    frame_index: int
-    snapshot_path: Optional[str] = None
 
 
 class CameraCalibration(BaseModel):

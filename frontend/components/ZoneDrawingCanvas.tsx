@@ -27,6 +27,7 @@ export function ZoneDrawingCanvas() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisResult, setAnalysisResult] = useState<VideoProcessingResponse | null>(null);
   const [currentViolations, setCurrentViolations] = useState<ViolationReport[]>([]);
+  const [activeZoneBreaches, setActiveZoneBreaches] = useState(false);
   const [playbackTime, setPlaybackTime] = useState(0);
 
   // Calibration state
@@ -54,7 +55,7 @@ export function ZoneDrawingCanvas() {
     };
   }, [bgImage]);
 
-  // Initialize Fabric Canvas once
+  // Initialize Fabric Canvas when canvas element enters the DOM (after bgImage is set)
   useEffect(() => {
     if (!canvasRef.current || fabricCanvas) return;
 
@@ -70,7 +71,9 @@ export function ZoneDrawingCanvas() {
       canvas.dispose();
       setFabricCanvas(null);
     };
-  }, []);
+  // bgImage controls whether the canvas element is in the DOM; re-run when it changes
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bgImage]);
 
   // Update canvas dimensions when they change
   useEffect(() => {
@@ -509,6 +512,7 @@ export function ZoneDrawingCanvas() {
     setIsAnalyzing(true);
     setIsMonitoring(false);
     setCurrentViolations([]);
+    setActiveZoneBreaches(false);
     
     try {
       const result = await analyzeVideo(bgImage);
@@ -540,17 +544,26 @@ export function ZoneDrawingCanvas() {
 
     const fps = analysisResult.summary.fps || 30;
     const currentFrame = Math.floor(playbackTime * fps);
-    
-    const activeThisFrame = analysisResult.reports.filter(r => 
-      Math.abs(r.frame_index - currentFrame) < (fps / 1.5)
+    const window = fps / 1.5;
+
+    const activeThisFrame = analysisResult.reports.filter(r =>
+      r.frame_index != null && Math.abs(r.frame_index - currentFrame) < window
+    );
+
+    const activeZoneViolations = (analysisResult.zone_violations ?? []).filter(zv =>
+      Math.abs(zv.frame_index - currentFrame) < window
     );
 
     setCurrentViolations(activeThisFrame);
+    setActiveZoneBreaches(activeZoneViolations.length > 0);
+
+    const violatingZoneIds = new Set(activeZoneViolations.map(zv => zv.zone_id));
 
     fabricCanvas.getObjects().forEach(obj => {
-      const isViolating = activeThisFrame.some(v => v.violation_type === 'zone_incursion');
-      
-      if (isViolating && (obj as any).zoneType === 'RESTRICTED') {
+      const zoneId = (obj as any).zoneId;
+      const isViolating = violatingZoneIds.has(zoneId);
+
+      if (isViolating) {
         obj.set({ fill: 'rgba(255, 0, 0, 0.6)', stroke: '#ff0000', strokeWidth: 4 });
       } else {
         const originalStyles = getZoneStyles((obj as any).zoneType || 'RESTRICTED');
@@ -675,11 +688,11 @@ export function ZoneDrawingCanvas() {
               )}
               
               {/* Isolated container for Fabric.js to avoid React reconciliation conflicts */}
-              <div key="fabric-host" className="absolute inset-0 z-10 pointer-events-none">
-                <canvas ref={canvasRef} className="pointer-events-auto" />
+              <div key="fabric-host" className="absolute inset-0 z-10">
+                <canvas ref={canvasRef} />
               </div>
               
-              {isMonitoring && currentViolations.length > 0 && (
+              {isMonitoring && activeZoneBreaches && (
                 <div className="absolute top-4 left-4 z-20 animate-bounce">
                   <div className="bg-red-600 text-white text-[10px] font-bold px-3 py-1 rounded shadow-lg border border-red-400 uppercase tracking-widest">
                     ⚠️ Restricted Area Breach
