@@ -349,6 +349,21 @@ export function ZoneDrawingCanvas() {
     isMonitoring,
   ]);
 
+  // Prevent existing zones from being interactive while a new one is being drawn
+  useEffect(() => {
+    if (!fabricCanvas) return;
+
+    const isActivelyDrawing = tool === "draw" && points.length > 0;
+
+    // Disable selection on all objects while drawing a new polygon
+    // to prevent mouse events from being captured by existing shapes.
+    fabricCanvas.selection = !isActivelyDrawing;
+    fabricCanvas.forEachObject((obj) => {
+      obj.selectable = !isActivelyDrawing;
+      obj.evented = !isActivelyDrawing;
+    });
+  }, [fabricCanvas, tool, points.length]);
+
   const pointInPolygon = (point: Point2D, polygon: Point2D[]): boolean => {
     let inside = false;
     for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
@@ -742,84 +757,85 @@ export function ZoneDrawingCanvas() {
 
   return (
     <div className="flex flex-col gap-4 items-center w-full max-w-6xl mx-auto">
-      <div className="flex flex-wrap gap-4 items-center justify-between w-full bg-zinc-900 p-3 rounded-lg border border-zinc-800">
-        <div className="flex gap-2">
-          <ToolButton
-            active={tool === "select"}
-            onClick={() => setTool("select")}
-            disabled={isMonitoring || drawingActive}
-          >
-            Select
-          </ToolButton>
-          <ToolButton
-            active={tool === "draw"}
-            onClick={() => setTool("draw")}
-            disabled={isMonitoring}
-          >
-            Draw
-          </ToolButton>
-          {/* Calibrate removed - BEV disabled */}
-          <div className="w-px h-6 bg-zinc-800 mx-1" />
-          <ToolButton
-            active={false}
-            onClick={deleteSelected}
-            disabled={isMonitoring || drawingActive}
-            className="border-red-900/50 text-red-500 hover:bg-red-500/10"
-          >
-            Delete
-          </ToolButton>
-        </div>
-
-        <div className="flex gap-4 items-center">
-          {!isMonitoring && (
-            <div className="flex gap-2 items-center">
-              <span className="text-[10px] font-mono text-zinc-500 uppercase">
-                Zone Type:
-              </span>
-              <select
-                value={zoneType}
-                onChange={(e) => setZoneType(e.target.value as ZoneType)}
-                disabled={drawingActive}
-                className="bg-zinc-950 border border-zinc-800 text-xs font-mono px-2 py-1 rounded text-zinc-300 focus:outline-none focus:border-orange-500/50"
-              >
-                <option value="RESTRICTED">RESTRICTED</option>
-                <option value="WALKWAY">WALKWAY</option>
-                <option value="FORKLIFT_PATH">FORKLIFT_PATH</option>
-              </select>
-            </div>
-          )}
-
+      {bgImage && (
+        <div className="flex flex-wrap gap-4 items-center justify-between w-full bg-zinc-900 p-3 rounded-lg border border-zinc-800">
           <div className="flex gap-2">
             <ToolButton
-              active={false}
-              onClick={() => saveConfiguration(false)}
-              disabled={isMonitoring || !bgImage || drawingActive}
-              className={`border-none px-4 ${saveStatus === "saved" ? "bg-emerald-700 hover:bg-emerald-600" : "bg-zinc-800 hover:bg-zinc-700"}`}
+              active={tool === "select"}
+              onClick={() => setTool("select")}
+              disabled={isMonitoring || drawingActive}
             >
-              {saveStatus === "saving"
-                ? "Saving..."
-                : saveStatus === "saved"
-                  ? "Saved ✓"
-                  : "Save Zones"}
+              Select
             </ToolButton>
+            <ToolButton
+              active={tool === "draw"}
+              onClick={() => setTool("draw")}
+              disabled={isMonitoring}
+            >
+              Draw
+            </ToolButton>
+            {/* Calibrate removed - BEV disabled */}
+            <div className="w-px h-6 bg-zinc-800 mx-1" />
+            <ToolButton
+              active={false}
+              onClick={deleteSelected}
+              disabled={isMonitoring || drawingActive}
+              className="border-red-900/50 text-red-500 hover:bg-red-500/10"
+            >
+              Delete
+            </ToolButton>
+          </div>
 
-            <button
-              onClick={
-                isMonitoring ? () => setIsMonitoring(false) : startMonitoring
-              }
-              disabled={
-                isAnalyzing ||
-                !bgImage ||
-                !bgImage.type.startsWith("video/") ||
-                !hasSavedConfiguration ||
-                drawingActive
-              }
-              title={
-                !hasSavedConfiguration
-                  ? "Save zones before starting monitoring"
-                  : undefined
-              }
-              className={`
+          <div className="flex gap-4 items-center">
+            {!isMonitoring && (
+              <div className="flex gap-2 items-center">
+                <span className="text-[10px] font-mono text-zinc-500 uppercase">
+                  Zone Type:
+                </span>
+                <select
+                  value={zoneType}
+                  onChange={(e) => setZoneType(e.target.value as ZoneType)}
+                  disabled={drawingActive}
+                  className="bg-zinc-950 border border-zinc-800 text-xs font-mono px-2 py-1 rounded text-zinc-300 focus:outline-none focus:border-orange-500/50"
+                >
+                  <option value="RESTRICTED">RESTRICTED</option>
+                  <option value="WALKWAY">WALKWAY</option>
+                  <option value="FORKLIFT_PATH">FORKLIFT_PATH</option>
+                </select>
+              </div>
+            )}
+
+            <div className="flex gap-2">
+              <ToolButton
+                active={false}
+                onClick={() => saveConfiguration(false)}
+                disabled={isMonitoring || !bgImage || drawingActive}
+                className={`border-none px-4 ${saveStatus === "saved" ? "bg-emerald-700 hover:bg-emerald-600" : "bg-zinc-800 hover:bg-zinc-700"}`}
+              >
+                {saveStatus === "saving"
+                  ? "Saving..."
+                  : saveStatus === "saved"
+                    ? "Saved ✓"
+                    : "Save Zones"}
+              </ToolButton>
+
+              <button
+                onClick={
+                  isMonitoring ? () => setIsMonitoring(false) : startMonitoring
+                }
+                disabled={
+                  isAnalyzing ||
+                  !bgImage ||
+                  !bgImage.type.startsWith("video/") ||
+                  !hasSavedConfiguration ||
+                  drawingActive
+                }
+                title={
+                  !hasSavedConfiguration
+                    ? "Save zones before starting monitoring"
+                    : undefined
+                }
+                className={`
                 px-6 py-1 rounded text-xs font-mono font-bold transition-all
                 ${
                   isMonitoring
@@ -827,16 +843,17 @@ export function ZoneDrawingCanvas() {
                     : "bg-orange-600 hover:bg-orange-500 text-white disabled:opacity-30 disabled:grayscale"
                 }
               `}
-            >
-              {isAnalyzing
-                ? "ANALYZING..."
-                : isMonitoring
-                  ? "STOP MONITOR"
-                  : "START MONITORING"}
-            </button>
+              >
+                {isAnalyzing
+                  ? "ANALYZING..."
+                  : isMonitoring
+                    ? "STOP MONITOR"
+                    : "START MONITORING"}
+              </button>
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       {!bgImage ? (
         <div className="w-full max-w-xl py-20">
