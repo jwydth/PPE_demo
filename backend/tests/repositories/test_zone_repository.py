@@ -53,3 +53,16 @@ def test_zone_repository_create_read_update_and_delete(session):
     assert violation.zone_id is None
     assert repository.get_by_id(zone.id) is None
     assert repository.delete(zone.id) is False
+
+
+def test_zone_repository_deletes_all_zones_for_camera(session):
+    camera = CameraRepository(session).create(
+        Camera(name="Warehouse", source_key="warehouse.mp4")
+    )
+    assert camera.id is not None
+    repository = ZoneRepository(session)
+    repository.create(_zone(camera.id))
+    repository.create(_zone(camera.id))
+
+    assert repository.delete_by_camera(camera.id) == 2
+    assert repository.get_by_camera(camera.id) == []

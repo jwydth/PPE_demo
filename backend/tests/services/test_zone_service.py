@@ -2,14 +2,20 @@ import json
 from datetime import datetime, timezone
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 
 from app.models.camera import Camera
 from app.models.zone import Zone as ZoneModel
 from app.repositories import RepositoryError
+from app.schemas.detection import BoundingBox, PersonResult
 from app.schemas.zone import Zone
 from app.services import ServiceNotFoundError, ServiceValidationError
-from app.services.zone_service import ZoneService
+from app.services.zone_service import (
+    ZoneService,
+    ZoneViolationRecord,
+    record_zone_violation,
+)
 
 
 def _camera() -> Camera:
@@ -69,6 +75,26 @@ def test_zone_service_maps_video_name_and_json_fields():
     assert not isinstance(result, ZoneModel)
 
 
+def test_zone_service_creates_missing_camera():
+    zone_repository = Mock()
+    camera_repository = Mock()
+    camera_repository.get_by_source_key.return_value = None
+    camera_repository.create.side_effect = lambda camera: camera.model_copy(
+        update={"id": 7}
+    )
+    zone_repository.create.return_value = _zone_model()
+    service = ZoneService(zone_repository, camera_repository)
+
+    result = service.create_zone(_zone_schema())
+
+    created_camera = camera_repository.create.call_args.args[0]
+    assert created_camera.name == "factory.mp4"
+    assert created_camera.source_key == "factory.mp4"
+    assert created_camera.source_uri is None
+    assert created_camera.is_active is True
+    assert result.video_name == "factory.mp4"
+
+
 def test_zone_service_reads_updates_and_deletes():
     zone_repository = Mock()
     camera_repository = Mock()
@@ -107,3 +133,48 @@ def test_zone_service_validation_and_error_propagation():
     )
     with pytest.raises(RepositoryError, match="database failed"):
         service.get_zones_by_source_key("factory.mp4")
+
+
+def test_record_zone_violation_passes_zone_name_to_storage(monkeypatch):
+    saved_violations = []
+
+    def save_violation(violation):
+        saved_violations.append(violation)
+        return violation
+
+    monkeypatch.setattr(
+        "app.services.zone_service.save_zone_violation",
+        save_violation,
+    )
+    worker_state = Mock(reported_zones=set())
+    zone = ZoneViolationRecord(
+        zone_id=3,
+        zone_name="Restricted Area",
+        zone_type="RESTRICTED",
+        poly=[],
+        threshold=0,
+    )
+    person = PersonResult(
+        person_id=1,
+        track_id=42,
+        bbox=BoundingBox(x1=10, y1=20, x2=30, y2=80),
+        confidence=0.9,
+        equipment=[],
+        compliant=True,
+    )
+
+    result = record_zone_violation(
+        worker_state=worker_state,
+        zone=zone,
+        frame=np.zeros((100, 100, 3), dtype=np.uint8),
+        person=person,
+        video_name="factory.mp4",
+        frame_index=15,
+        save_snapshot_fn=Mock(return_value="zone.jpg"),
+    )
+
+    assert saved_violations == [result]
+    assert result.zone_name == "Restricted Area"
+    assert result.zone_type == "RESTRICTED"
+    assert result.track_id == 42
+    assert worker_state.reported_zones == {3}

@@ -5,7 +5,9 @@ from typing import Annotated, Any
 
 import numpy as np
 from fastapi import Depends
+from sqlmodel import Session
 
+from app.db.session import get_engine, get_session
 from app.models.camera import Camera
 from app.models.zone import Zone as ZoneModel
 from app.repositories.camera_repository import CameraRepository
@@ -15,7 +17,7 @@ from app.schemas.violation import ZoneViolation
 from app.schemas.zone import Zone
 from app.services import ServiceNotFoundError, ServiceValidationError
 from app.services.spatial import is_point_in_polygon
-from app.services.violation_store import list_zones, save_zone_violation
+from app.services.violation_store import save_zone_violation
 
 COORD_SCALE = 1000
 
@@ -33,7 +35,7 @@ class ZoneService:
         self.camera_repository = camera_repository
 
     def create_zone(self, zone: Zone) -> Zone:
-        camera = self._get_camera_by_video_name(zone.video_name)
+        camera = self._get_or_create_camera(zone.video_name)
         if camera.id is None:
             raise ServiceValidationError("Persisted camera is missing an ID.")
 
@@ -86,6 +88,13 @@ class ZoneService:
             raise ServiceNotFoundError(f"Zone {zone_id} was not found.")
         return True
 
+    def delete_zones_by_source_key(self, source_key: str) -> int:
+        normalized_source_key = _require_text(source_key, "video_name")
+        camera = self.camera_repository.get_by_source_key(normalized_source_key)
+        if camera is None or camera.id is None:
+            return 0
+        return self.repository.delete_by_camera(camera.id)
+
     def get_zone(self, zone_id: int) -> Zone:
         zone = self._get_zone_model(zone_id)
         camera = self.camera_repository.get_by_id(zone.camera_id)
@@ -116,6 +125,29 @@ class ZoneService:
             )
         return camera
 
+    def _get_or_create_camera(self, video_name: str) -> Camera:
+        source_key = _require_text(video_name, "video_name")
+        camera = self.camera_repository.get_by_source_key(source_key)
+        if camera is not None:
+            return camera
+        return self.camera_repository.create(
+            Camera(
+                name=source_key,
+                source_key=source_key,
+                source_uri=None,
+                is_active=True,
+            )
+        )
+
+
+def get_zone_service(
+    session: Annotated[Session, Depends(get_session)],
+) -> ZoneService:
+    return ZoneService(
+        ZoneRepository(session),
+        CameraRepository(session),
+    )
+
 
 class ZoneViolationRecord:
     """Tracks zone violation data for a person"""
@@ -134,7 +166,16 @@ class ZoneViolationRecord:
 
 def load_zones(video_name: str) -> list[ZoneViolationRecord]:
     """Load all active zones for a video with normalized coordinates"""
-    active_zones = [z for z in list_zones(video_name) if z.is_active]
+    with Session(get_engine()) as session:
+        service = ZoneService(
+            ZoneRepository(session),
+            CameraRepository(session),
+        )
+        active_zones = [
+            zone
+            for zone in service.get_zones_by_source_key(video_name)
+            if zone.is_active
+        ]
     zones: list[ZoneViolationRecord] = []
 
     for zone in active_zones:

@@ -61,18 +61,6 @@ class VideoSummary(BaseModel):
     inference_ms: float
 
 
-class ZoneViolation(BaseModel):
-    id: Optional[int] = None
-    zone_id: int
-    zone_name: Optional[str] = None
-    zone_type: Optional[str] = None
-    track_id: int
-    timestamp: str
-    video_name: str
-    frame_index: int
-    snapshot_path: Optional[str] = None
-
-
 class VideoProcessingResponse(BaseModel):
     summary: VideoSummary
     reports: List[ViolationReport]

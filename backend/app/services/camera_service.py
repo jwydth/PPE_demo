@@ -1,11 +1,15 @@
+import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends
+from sqlmodel import Session
 
+from app.db.session import get_session
 from app.models.camera import Camera
 from app.repositories.camera_repository import CameraRepository
+from app.schemas.zone import CameraCalibration
 from app.services import ServiceNotFoundError, ServiceValidationError
 
 
@@ -15,7 +19,7 @@ class CameraDTO:
     name: str
     source_key: str
     source_uri: str | None
-    calibration_source_points: list[dict[str, float]] | None
+    calibration_source_points: list[Any] | None
     is_active: bool
     created_at: datetime
     updated_at: datetime
@@ -34,7 +38,7 @@ class CameraService:
         name: str,
         source_key: str,
         source_uri: str | None = None,
-        calibration_source_points: list[dict[str, float]] | None = None,
+        calibration_source_points: list[Any] | None = None,
         is_active: bool = True,
     ) -> CameraDTO:
         normalized_name = _require_text(name, "name")
@@ -77,6 +81,47 @@ class CameraService:
             raise ServiceNotFoundError(f"Camera {camera_id} was not found.")
         return _to_dto(camera)
 
+    def save_calibration(
+        self,
+        calibration: CameraCalibration,
+    ) -> CameraCalibration:
+        source_key = _require_text(calibration.video_name, "video_name")
+        source_points = _parse_source_points(calibration.source_points)
+        camera = self.repository.get_by_source_key(source_key)
+        if camera is None:
+            camera = self.repository.create(
+                Camera(
+                    name=source_key,
+                    source_key=source_key,
+                    source_uri=None,
+                    is_active=True,
+                    calibration_source_points=source_points,
+                )
+            )
+        else:
+            camera.calibration_source_points = source_points
+            self.repository.update(camera)
+        return CameraCalibration(
+            video_name=source_key,
+            source_points=_json_string(source_points),
+        )
+
+    def get_calibration(self, video_name: str) -> CameraCalibration:
+        source_key = _require_text(video_name, "video_name")
+        camera = self.repository.get_by_source_key(source_key)
+        if camera is None or camera.calibration_source_points is None:
+            raise ServiceNotFoundError("Calibration not found")
+        return CameraCalibration(
+            video_name=camera.source_key,
+            source_points=_json_string(camera.calibration_source_points),
+        )
+
+
+def get_camera_service(
+    session: Annotated[Session, Depends(get_session)],
+) -> CameraService:
+    return CameraService(CameraRepository(session))
+
 
 def _to_dto(camera: Camera) -> CameraDTO:
     if camera.id is None:
@@ -111,3 +156,21 @@ def _optional_text(value: str | None) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def _parse_source_points(value: str) -> Any:
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ServiceValidationError(
+            "source_points must contain valid JSON."
+        ) from exc
+    if not isinstance(parsed, list):
+        raise ServiceValidationError(
+            "source_points must contain a JSON array."
+        )
+    return parsed
+
+
+def _json_string(value: Any) -> str:
+    return json.dumps(value, separators=(",", ":"))

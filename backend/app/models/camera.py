@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import BigInteger, Column, DateTime, String, func
 from sqlalchemy.dialects.postgresql import JSONB
@@ -23,7 +23,7 @@ class Camera(SQLModel, table=True):
         sa_column=Column(String(500), nullable=False, unique=True, index=True)
     )
     source_uri: str | None = Field(default=None)
-    calibration_source_points: list[dict[str, float]] | None = Field(
+    calibration_source_points: list[Any] | None = Field(
         default=None,
         sa_column=Column(JSONB, nullable=True),
     )

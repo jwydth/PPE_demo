@@ -2,7 +2,7 @@ from typing import Annotated
 
 from fastapi import Depends
 from sqlalchemy.exc import SQLAlchemyError
-from sqlmodel import Session, select
+from sqlmodel import Session, delete, select
 
 from app.db.session import get_session
 from app.models.camera import Camera
@@ -83,6 +83,17 @@ class ZoneRepository:
         except SQLAlchemyError as exc:
             self.session.rollback()
             raise RepositoryError("Could not delete zone.") from exc
+
+    def delete_by_camera(self, camera_id: int) -> int:
+        try:
+            result = self.session.exec(
+                delete(Zone).where(Zone.camera_id == camera_id)
+            )
+            self.session.commit()
+            return result.rowcount or 0
+        except SQLAlchemyError as exc:
+            self.session.rollback()
+            raise RepositoryError("Could not delete zones for camera.") from exc
 
     def _commit_and_refresh(self, zone: Zone, operation: str) -> Zone:
         try:
