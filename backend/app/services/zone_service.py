@@ -14,9 +14,10 @@ COORD_SCALE = 1000
 class ZoneViolationRecord:
     """Tracks zone violation data for a person"""
 
-    def __init__(self, zone_id: int, zone_name: str, poly: list, threshold: float):
+    def __init__(self, zone_id: int, zone_name: str, zone_type: str, poly: list, threshold: float):
         self.zone_id = zone_id
         self.zone_name = zone_name
+        self.zone_type = zone_type
         self.poly = poly
         self.threshold = threshold
 
@@ -40,6 +41,7 @@ def load_zones(video_name: str) -> list[ZoneViolationRecord]:
                 ZoneViolationRecord(
                     zone_id=zone.id,
                     zone_name=zone.zone_name,
+                    zone_type=zone.zone_type,
                     poly=coords,
                     threshold=zone.dwell_threshold_seconds,
                 )
@@ -80,16 +82,23 @@ def record_zone_violation(
 ) -> ZoneViolation:
     """Record a zone violation for a person"""
     timestamp = datetime.now(timezone.utc).isoformat()
+    if zone.zone_type == "WALKWAY":
+        label = f"Left Walkway: {zone.zone_name}"
+    else:
+        label = f"Entered Zone: {zone.zone_name}"
+
     snapshot_filename = save_snapshot_fn(
         frame=frame,
         person=person,
-        missing=[f"Zone: {zone.zone_name}"],
+        missing=[label],
         video_stem=Path(video_name).stem,
         frame_index=frame_index,
     )
 
     violation = ZoneViolation(
         zone_id=zone.zone_id,
+        zone_name=zone.zone_name,
+        zone_type=zone.zone_type,
         track_id=person.track_id or 0,
         timestamp=timestamp,
         video_name=video_name,

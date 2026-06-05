@@ -20,6 +20,8 @@ export interface ZoneConfiguration {
 export interface ZoneViolation {
   id?: number;
   zone_id: number;
+  zone_name?: string;
+  zone_type?: ZoneType;
   track_id: number;
   timestamp: string;
   video_name: string;

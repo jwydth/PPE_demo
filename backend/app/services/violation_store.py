@@ -55,6 +55,8 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS zone_violations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 zone_id INTEGER NOT NULL,
+                zone_name TEXT,
+                zone_type TEXT,
                 track_id INTEGER NOT NULL,
                 timestamp TEXT NOT NULL,
                 video_name TEXT NOT NULL,
@@ -64,6 +66,11 @@ def init_db() -> None:
             )
             """
         )
+        for col, col_type in [("zone_name", "TEXT"), ("zone_type", "TEXT")]:
+            try:
+                conn.execute(f"ALTER TABLE zone_violations ADD COLUMN {col} {col_type}")
+            except Exception:
+                pass
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS camera_calibrations (
@@ -364,12 +371,14 @@ def save_zone_violation(violation: ZoneViolation) -> ZoneViolation:
         cursor = conn.execute(
             """
             INSERT INTO zone_violations (
-                zone_id, track_id, timestamp, video_name, frame_index, snapshot_path
+                zone_id, zone_name, zone_type, track_id, timestamp, video_name, frame_index, snapshot_path
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 violation.zone_id,
+                violation.zone_name,
+                violation.zone_type,
                 violation.track_id,
                 violation.timestamp,
                 violation.video_name,
@@ -393,6 +402,8 @@ def list_zone_violations(limit: int = 100) -> list[ZoneViolation]:
             ZoneViolation(
                 id=row["id"],
                 zone_id=row["zone_id"],
+                zone_name=row["zone_name"],
+                zone_type=row["zone_type"],
                 track_id=row["track_id"],
                 timestamp=row["timestamp"],
                 video_name=row["video_name"],

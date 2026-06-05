@@ -12,6 +12,7 @@ type Tool = "select" | "draw" | "delete";
 export function ZoneDrawingCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const changeMediaInputRef = useRef<HTMLInputElement>(null);
   const [fabricCanvas, setFabricCanvas] = useState<fabric.Canvas | null>(null);
   const [tool, setTool] = useState<Tool>("select");
 
@@ -412,14 +413,17 @@ export function ZoneDrawingCanvas() {
           document.body.appendChild(svg);
 
           const pathOffset = pathObj.pathOffset || { x: 0, y: 0 };
+          const matrix = pathObj.calcTransformMatrix();
           const totalLength = svgPath.getTotalLength();
           const pathPoints: Point2D[] = [];
           for (let i = 0; i <= 50; i++) {
             const p = svgPath.getPointAtLength(totalLength * (i / 50));
-            pathPoints.push({
-              x: p.x - pathOffset.x + (pathObj.left || 0),
-              y: p.y - pathOffset.y + (pathObj.top || 0),
-            });
+            const localPoint = new fabric.Point(
+              p.x - pathOffset.x,
+              p.y - pathOffset.y,
+            );
+            const transformed = fabric.util.transformPoint(localPoint, matrix);
+            pathPoints.push({ x: transformed.x, y: transformed.y });
           }
 
           for (const newPoint of newPolygonPoints) {
@@ -441,11 +445,19 @@ export function ZoneDrawingCanvas() {
       } else if (obj instanceof fabric.Polygon) {
         const polygon = obj as fabric.Polygon;
         const existingPoints = polygon.points || [];
+        const matrix = polygon.calcTransformMatrix();
+        const transformedExistingPoints = existingPoints.map((p) => {
+          const tp = fabric.util.transformPoint(
+            new fabric.Point(p.x, p.y),
+            matrix,
+          );
+          return { x: tp.x, y: tp.y };
+        });
 
         for (const newPoint of newPolygonPoints) {
-          if (pointInPolygon(newPoint, existingPoints)) return true;
+          if (pointInPolygon(newPoint, transformedExistingPoints)) return true;
         }
-        for (const existingPoint of existingPoints) {
+        for (const existingPoint of transformedExistingPoints) {
           if (pointInPolygon(existingPoint, newPolygonPoints)) return true;
         }
       } else if (obj instanceof fabric.Circle) {
@@ -883,12 +895,27 @@ export function ZoneDrawingCanvas() {
               )}
 
               {!isMonitoring && (
-                <button
-                  onClick={() => setBgImage(null)}
-                  className="text-[10px] font-mono text-zinc-500 hover:text-zinc-300 underline uppercase"
-                >
-                  Change Media
-                </button>
+                <>
+                  <input
+                    ref={changeMediaInputRef}
+                    type="file"
+                    accept=".jpg,.jpeg,.png,.webp,.bmp,.mp4,.mpeg,.mpg,.mov,.avi,.mkv,.webm"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      setBgImage(file);
+                      setVideoName(file.name);
+                      e.target.value = "";
+                    }}
+                  />
+                  <button
+                    onClick={() => changeMediaInputRef.current?.click()}
+                    className="text-[10px] font-mono text-zinc-500 hover:text-zinc-300 underline uppercase"
+                  >
+                    Change Media
+                  </button>
+                </>
               )}
             </div>
 
