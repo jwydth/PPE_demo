@@ -1,5 +1,4 @@
 import unittest
-import numpy as np
 from app.services.spatial import compute_homography_matrix, transform_points, is_point_in_polygon
 
 class TestSpatialUtilities(unittest.TestCase):

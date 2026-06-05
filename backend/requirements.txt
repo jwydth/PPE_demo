@@ -4,6 +4,7 @@ uvicorn[standard]==0.29.0
 python-multipart==0.0.9
 pillow>=12.0.0
 ultralytics>=8.3.0
+lap>=0.5.12
 opencv-python-headless>=4.10.0
 pydantic-settings==2.2.1
 python-dotenv==1.0.1

@@ -1,20 +1,82 @@
-import json
 import io
+import json
+import logging
 from pathlib import Path
-from typing import List
+from typing import Annotated
 
-from fastapi import APIRouter, File, Form, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+    status,
+)
 from PIL import Image
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlmodel import Session
 
+from app.db.session import get_session
 from app.services.ppe_detector import PPEDetector
 from app.services.spatial import (
     compute_homography_matrix,
     is_point_in_polygon,
     transform_points,
 )
+from app.storage import StorageError
+from app.storage.evidence_storage import EvidenceStorage, get_evidence_storage
 
 router = APIRouter(tags=["testing"])
 _detector = PPEDetector()
+logger = logging.getLogger(__name__)
+
+
+@router.get("/health/db")
+def database_health(
+    session: Annotated[Session, Depends(get_session)],
+) -> dict[str, str]:
+    try:
+        session.execute(text("SELECT 1")).scalar_one()
+    except SQLAlchemyError as exc:
+        logger.exception("PostgreSQL health check failed.")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PostgreSQL connection failed.",
+        ) from exc
+
+    return {"database": "connected"}
+
+
+def _get_health_storage() -> EvidenceStorage:
+    try:
+        return get_evidence_storage()
+    except StorageError as exc:
+        logger.exception("MinIO storage configuration failed.")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get("/health/storage")
+def storage_health(
+    storage: Annotated[EvidenceStorage, Depends(_get_health_storage)],
+) -> dict[str, str]:
+    try:
+        bucket_name = storage.ensure_ready()
+    except StorageError as exc:
+        logger.exception("MinIO health check failed.")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+    return {
+        "storage": "connected",
+        "bucket": bucket_name,
+    }
 
 
 @router.post("/test-zone-image")

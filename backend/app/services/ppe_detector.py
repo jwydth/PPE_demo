@@ -1,3 +1,4 @@
+import logging
 import math
 import statistics
 import time
@@ -5,7 +6,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-import numpy as np
 from PIL import Image
 
 from app.core.config import BACKEND_DIR, settings
@@ -25,14 +25,16 @@ from app.schemas.violation import (
 )
 from app.services.violation_store import (
     SNAPSHOT_DIR,
-    save_violation,
 )
+from app.services.ppe_violation_service import open_ppe_violation_service
 from app.services.zone_service import (
     load_zones,
     get_person_foot_point,
     check_zone_incursion,
     record_zone_violation,
 )
+
+logger = logging.getLogger(__name__)
 
 COMPLIANT_COLOR = "#22c55e"
 VIOLATION_COLOR = "#ef4444"
@@ -127,7 +129,6 @@ def _select_inference_device(preferred_device: str) -> str:
     if device_index >= device_count:
         return "cpu"
 
-    device_name = torch.cuda.get_device_name(device_index)
     device = f"cuda:{device_index}"
     return device
 
@@ -413,7 +414,6 @@ def _update_worker_status(
     used_worker_ids: set[int],
 ) -> dict:
     worker = _find_or_create_worker(workers, person, frame_index, used_worker_ids)
-    reported_before_update = worker.reported
     _merge_worker_observation(worker, person, frame_index)
 
     present = _present_equipment(person)
@@ -757,42 +757,63 @@ def _record_violation_case(
     if worker.reported:
         return
 
-    # Force a new violation case on every confirmed incident. Do not group.
-    case, match_reason = None, "new"
-
+    case, match_reason = _find_existing_case_match(cases, person, frame_index)
     missing_set = set(missing)
     violation_type = _violation_type(missing)
     timestamp = datetime.now(timezone.utc).isoformat()
+    _log_confirmed_incident(
+        timestamp=timestamp,
+        video_name=video_name,
+        frame_index=frame_index,
+        person=person,
+        worker=worker,
+        case=case,
+        violation_type=violation_type,
+        action="create" if case is None else "match_existing_immutable",
+        match_reason=match_reason,
+    )
 
     if confirmed_aspect_ratios is not None:
         confirmed_aspect_ratios.append(_bbox_aspect_ratio(person.bbox))
 
-    snapshot_filename = _save_violation_snapshot(
-        frame=frame,
-        person=person,
-        missing=missing,
-        video_stem=Path(video_name).stem,
-        frame_index=frame_index,
-    )
-    report = save_violation(
-        timestamp=timestamp,
-        violation_type=violation_type,
-        details=_violation_details(person, missing, frame_index),
-        snapshot_filename=snapshot_filename,
-        video_name=video_name,
-        frame_index=frame_index,
-        track_id=person.track_id,
-    )
-    cases.append(
-        ViolationCase(
-            report=report,
-            missing=missing_set,
-            track_ids={person.track_id} if person.track_id is not None else set(),
-            last_bbox=person.bbox,
-            first_frame=frame_index,
-            last_frame=frame_index,
+    if case is None:
+        snapshot_filename = _save_violation_snapshot(
+            frame=frame,
+            person=person,
+            missing=missing,
+            video_stem=Path(video_name).stem,
+            frame_index=frame_index,
         )
-    )
+        report = save_violation(
+            timestamp=timestamp,
+            violation_type=violation_type,
+            details=_violation_details(person, missing, frame_index),
+            snapshot_filename=snapshot_filename,
+            video_name=video_name,
+            frame_index=frame_index,
+            track_id=person.track_id,
+            person_index=person.person_id,
+            missing_equipment=missing,
+            bounding_box=person.bbox.model_dump(),
+            confidence=person.confidence,
+        )
+        cases.append(
+            ViolationCase(
+                report=report,
+                missing=missing_set,
+                track_ids={
+                    person.track_id
+                } if person.track_id is not None else set(),
+                last_bbox=person.bbox,
+                first_frame=frame_index,
+                last_frame=frame_index,
+            )
+        )
+    else:
+        case.last_bbox = person.bbox
+        case.last_frame = frame_index
+        if person.track_id is not None:
+            case.track_ids.add(person.track_id)
     worker.reported = True
     worker.status = "violation"
 
@@ -873,6 +894,53 @@ def _bbox_height(box: BoundingBox) -> float:
 def _bbox_aspect_ratio(box: BoundingBox) -> float:
     width = max(_bbox_width(box), 1.0)
     return _bbox_height(box) / width
+
+
+def _format_track_ids(track_ids: set[int]) -> str:
+    if not track_ids:
+        return "-"
+    return ",".join(str(track_id) for track_id in sorted(track_ids))
+
+
+def _log_confirmed_incident(
+    *,
+    timestamp: str,
+    video_name: str,
+    frame_index: int,
+    person: PersonResult,
+    worker: WorkerState,
+    case: ViolationCase | None,
+    violation_type: str,
+    action: str,
+    match_reason: str,
+) -> None:
+    bbox = person.bbox
+    logger.info(
+        "ppe_incident_confirmed timestamp=%s video=%s frame_index=%s track_id=%s "
+        "worker_id=%s worker_reported_before_record=%s violation_type=%s action=%s "
+        "match_reason=%s case_track_ids=%s case_first_frame=%s case_last_frame=%s "
+        "bbox=(%.1f,%.1f,%.1f,%.1f) bbox_width=%.1f bbox_height=%.1f "
+        "aspect_ratio=%.3f",
+        timestamp,
+        video_name,
+        frame_index,
+        person.track_id,
+        id(worker),
+        worker.reported,
+        violation_type,
+        action,
+        match_reason,
+        _format_track_ids(case.track_ids if case is not None else set()),
+        case.first_frame if case is not None else None,
+        case.last_frame if case is not None else None,
+        bbox.x1,
+        bbox.y1,
+        bbox.x2,
+        bbox.y2,
+        _bbox_width(bbox),
+        _bbox_height(bbox),
+        _bbox_aspect_ratio(bbox),
+    )
 
 
 def _bbox_diagonal(box: BoundingBox) -> float:

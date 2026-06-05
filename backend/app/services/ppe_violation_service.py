@@ -211,6 +211,13 @@ class PPEViolationService:
             for subject in self.repository.get_subjects(normalized_id)
         ]
 
+    def delete_violation(self, violation_id: int) -> bool:
+        normalized_id = _require_positive_id(violation_id, "violation_id")
+        return self.repository.delete(normalized_id)
+
+    def delete_all_violations(self) -> int:
+        return self.repository.delete_all()
+
     def _snapshot_url(self, snapshot_path: str | None) -> str | None:
         if snapshot_path is None:
             return None
