@@ -87,6 +87,7 @@ def test_ppe_service_maps_tracker_id_to_track_id():
 def test_ppe_service_recent_validation_and_error_propagation():
     repository = Mock()
     repository.get_recent.return_value = [_violation()]
+    repository.get_subjects.return_value = []
     service = PPEViolationService(repository)
 
     assert service.get_recent_violations(25)[0].snapshot_url == (

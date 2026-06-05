@@ -34,9 +34,9 @@ from app.services.violation_store import (
     SNAPSHOT_DIR,
     get_calibration,
     list_zones,
-    save_violation,
     save_zone_violation,
 )
+from app.services.ppe_violation_service import open_ppe_violation_service
 
 logger = logging.getLogger(__name__)
 
@@ -896,6 +896,10 @@ def _record_violation_case(
             video_name=video_name,
             frame_index=frame_index,
             track_id=person.track_id,
+            person_index=person.person_id,
+            missing_equipment=missing,
+            bounding_box=person.bbox.model_dump(),
+            confidence=person.confidence,
         )
         cases.append(
             ViolationCase(
@@ -1457,6 +1461,37 @@ def _save_violation_snapshot(
     )
     cv2.imwrite(str(path), snapshot)
     return filename
+
+
+def save_violation(
+    *,
+    timestamp: str,
+    violation_type: str,
+    details: str,
+    snapshot_filename: str,
+    video_name: str | None,
+    frame_index: int | None,
+    track_id: int | None,
+    person_index: int | None,
+    missing_equipment: list[str],
+    bounding_box: dict[str, float] | None,
+    confidence: float | None,
+) -> ViolationReport:
+    local_snapshot_path = SNAPSHOT_DIR / snapshot_filename
+    with open_ppe_violation_service() as service:
+        return service.persist_violation(
+            timestamp=timestamp,
+            violation_type=violation_type,
+            details=details,
+            local_snapshot_path=str(local_snapshot_path),
+            video_name=video_name,
+            frame_index=frame_index,
+            track_id=track_id,
+            person_index=person_index,
+            missing_equipment=missing_equipment,
+            bounding_box=bounding_box,
+            confidence=confidence,
+        )
 
 
 def _video_metadata(video_path: Path) -> tuple[float, int]:

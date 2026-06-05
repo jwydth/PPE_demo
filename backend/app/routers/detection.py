@@ -1,14 +1,18 @@
 import io
 import tempfile
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from PIL import Image
 
 from app.schemas.detection import DetectionResponse, VideoProcessingResponse
 from app.schemas.violation import ViolationReport
 from app.services.ppe_detector import PPEDetector
-from app.services.violation_store import list_violations
+from app.services.ppe_violation_service import (
+    PPEViolationService,
+    get_ppe_violation_service,
+)
 
 router = APIRouter(tags=["detection"])
 
@@ -75,5 +79,11 @@ async def predict_video(file: UploadFile = File(...)) -> VideoProcessingResponse
 
 
 @router.get("/violations", response_model=list[ViolationReport])
-async def violations(limit: int = Query(default=100, ge=1, le=500)) -> list[ViolationReport]:
-    return list_violations(limit=limit)
+async def violations(
+    service: Annotated[
+        PPEViolationService,
+        Depends(get_ppe_violation_service),
+    ],
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[ViolationReport]:
+    return service.get_recent_violations(limit=limit)
