@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
-from app.models.schemas import CameraCalibration, Zone, ZoneViolation
+from app.schemas.violation import ZoneViolation
+from app.schemas.zone import CameraCalibration, Zone
 from app.services.violation_store import (
     delete_zone,
     delete_zones_by_video,

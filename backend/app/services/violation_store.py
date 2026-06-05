@@ -3,7 +3,8 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import BACKEND_DIR, settings
-from app.models.schemas import CameraCalibration, ViolationReport, Zone, ZoneViolation
+from app.schemas.violation import ViolationReport, ZoneViolation
+from app.schemas.zone import CameraCalibration, Zone
 
 
 def _resolve_backend_path(value: str) -> Path:

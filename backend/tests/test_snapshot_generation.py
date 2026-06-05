@@ -5,7 +5,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.models.schemas import BoundingBox, PersonResult
+from app.schemas.detection import BoundingBox, PersonResult
 from app.services import ppe_detector as ppe
 
 

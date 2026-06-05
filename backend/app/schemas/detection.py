@@ -2,6 +2,8 @@ from typing import List, Literal, Optional
 
 from pydantic import BaseModel
 
+from app.schemas.violation import ViolationReport, ZoneViolation
+
 
 class BoundingBox(BaseModel):
     x1: float
@@ -48,17 +50,6 @@ class DetectionResponse(BaseModel):
     summary: Summary
 
 
-class ViolationReport(BaseModel):
-    id: int
-    timestamp: str
-    violation_type: str
-    details: str
-    snapshot_url: Optional[str] = None
-    video_name: Optional[str] = None
-    frame_index: Optional[int] = None
-    track_id: Optional[int] = None
-
-
 class VideoSummary(BaseModel):
     video_name: str
     total_frames: int
@@ -70,33 +61,7 @@ class VideoSummary(BaseModel):
     inference_ms: float
 
 
-class ZoneViolation(BaseModel):
-    id: Optional[int] = None
-    zone_id: int
-    track_id: int
-    timestamp: str
-    video_name: str
-    frame_index: int
-    snapshot_path: Optional[str] = None
-
-
 class VideoProcessingResponse(BaseModel):
     summary: VideoSummary
     reports: List[ViolationReport]
     zone_violations: List[ZoneViolation] = []
-
-
-class Zone(BaseModel):
-    id: Optional[int] = None
-    video_name: str
-    zone_name: str
-    zone_type: Literal["RESTRICTED", "WALKWAY", "FORKLIFT_PATH"]
-    dwell_threshold_seconds: int = 0
-    is_active: bool = True
-    ui_shape_data: str  # JSON string
-    flattened_coordinates: str  # JSON string
-
-
-class CameraCalibration(BaseModel):
-    video_name: str
-    source_points: str  # JSON string of 4 normalized [x, y] points

@@ -5,7 +5,8 @@ from pathlib import Path
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from PIL import Image
 
-from app.models.schemas import DetectionResponse, VideoProcessingResponse, ViolationReport
+from app.schemas.detection import DetectionResponse, VideoProcessingResponse
+from app.schemas.violation import ViolationReport
 from app.services.ppe_detector import PPEDetector
 from app.services.violation_store import list_violations
 

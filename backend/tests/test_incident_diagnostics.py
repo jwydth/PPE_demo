@@ -4,7 +4,8 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.models.schemas import BoundingBox, EquipmentStatus, PersonResult, ViolationReport
+from app.schemas.detection import BoundingBox, EquipmentStatus, PersonResult
+from app.schemas.violation import ViolationReport
 from app.services import ppe_detector as ppe
 
 

@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image
 
 from app.core.config import BACKEND_DIR, settings
-from app.models.schemas import (
+from app.schemas.detection import (
     BoundingBox,
     Detection,
     DetectionResponse,
@@ -20,6 +20,8 @@ from app.models.schemas import (
     Summary,
     VideoProcessingResponse,
     VideoSummary,
+)
+from app.schemas.violation import (
     ViolationReport,
     ZoneViolation,
 )
