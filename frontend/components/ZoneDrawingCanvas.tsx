@@ -7,15 +7,14 @@ import { Point2D, ZoneConfiguration, ZoneType } from "@/types/zone";
 import { analyzeVideo, deleteZonesForVideo, API_URL } from "@/lib/api";
 import { VideoProcessingResponse, ViolationReport } from "@/types/detection";
 
-type Tool = "select" | "draw" | "delete" | "calibrate";
-type SegmentType = "line" | "curve";
+type Tool = "select" | "draw" | "delete";
 
 export function ZoneDrawingCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [fabricCanvas, setFabricCanvas] = useState<fabric.Canvas | null>(null);
   const [tool, setTool] = useState<Tool>("select");
-  const [segmentType, setSegmentType] = useState<SegmentType>("line");
+
   const [zoneType, setZoneType] = useState<ZoneType>("RESTRICTED");
   const [bgImage, setBgImage] = useState<File | null>(null);
   const [videoName, setVideoName] = useState<string>("");
@@ -37,17 +36,26 @@ export function ZoneDrawingCanvas() {
     "idle" | "saving" | "saved" | "failed"
   >("idle");
 
-  // Calibration state
-  const [calibrationPoints, setCalibrationPoints] = useState<Point2D[]>([]);
-  const [calibrationPolygon, setCalibrationPolygon] =
-    useState<fabric.Polygon | null>(null);
+  // (Calibration removed — BEV disabled)
 
   // Drawing state
-  const [isAdjustingCurve, setIsAdjustingCurve] = useState(false);
   const [points, setPoints] = useState<Point2D[]>([]);
   const [pathSegments, setPathSegments] = useState<string[]>([]);
   const [tempPath, setTempPath] = useState<fabric.Path | null>(null);
   const [activePoints, setActivePoints] = useState<fabric.Circle[]>([]);
+
+  const drawingActive = tool === "draw";
+
+  // Broadcast drawing activity to the rest of the app so global UI can lock.
+  useEffect(() => {
+    try {
+      window.dispatchEvent(
+        new CustomEvent("zone-drawing-active", { detail: drawingActive }),
+      );
+    } catch (e) {
+      // ignore in non-browser environments
+    }
+  }, [drawingActive]);
 
   // Manage Video URL lifecycle
   useEffect(() => {
@@ -189,58 +197,8 @@ export function ZoneDrawingCanvas() {
           setSaveStatus("saved");
         }
       }
-      loadCalibration(vName);
     } catch (err) {
       console.error("Failed to load zones", err);
-    }
-  };
-
-  const loadCalibration = async (vName: string) => {
-    try {
-      const res = await fetch(`${API_URL}/calibration/${vName}`);
-      if (!res.ok) return;
-      const data = await res.json();
-      const points: Point2D[] = JSON.parse(data.source_points);
-
-      if (fabricCanvas && points.length === 4) {
-        const canvasWidth = fabricCanvas.getWidth();
-        const canvasHeight = fabricCanvas.getHeight();
-        const absolutePoints = points.map((p) => ({
-          x: p.x * canvasWidth,
-          y: p.y * canvasHeight,
-        }));
-
-        setCalibrationPoints(absolutePoints);
-
-        const poly = new fabric.Polygon(absolutePoints, {
-          fill: "rgba(59, 130, 246, 0.2)",
-          stroke: "#3b82f6",
-          strokeWidth: 2,
-          strokeDashArray: [5, 5],
-          selectable: false,
-          evented: false,
-        });
-        fabricCanvas.add(poly);
-        setCalibrationPolygon(poly);
-
-        absolutePoints.forEach((p) => {
-          const circle = new fabric.Circle({
-            radius: 5,
-            fill: "#3b82f6",
-            left: p.x,
-            top: p.y,
-            selectable: false,
-            originX: "center",
-            originY: "center",
-            evented: false,
-          });
-          fabricCanvas.add(circle);
-          setActivePoints((prev) => [...prev, circle]);
-        });
-        fabricCanvas.renderAll();
-      }
-    } catch (err) {
-      console.error("Failed to load calibration", err);
     }
   };
 
@@ -358,17 +316,9 @@ export function ZoneDrawingCanvas() {
         setPathSegments([`M ${newPoint.x} ${newPoint.y}`]);
         setPoints([newPoint]);
       } else {
-        if (segmentType === "line") {
-          setPathSegments((prev) => [...prev, `L ${newPoint.x} ${newPoint.y}`]);
-          setPoints((prev) => [...prev, newPoint]);
-        } else {
-          setIsAdjustingCurve(true);
-          setPoints((prev) => [...prev, newPoint]);
-          setPathSegments((prev) => [
-            ...prev,
-            `Q ${newPoint.x} ${newPoint.y} ${newPoint.x} ${newPoint.y}`,
-          ]);
-        }
+        // Always add straight lines to form a polygon
+        setPathSegments((prev) => [...prev, `L ${newPoint.x} ${newPoint.y}`]);
+        setPoints((prev) => [...prev, newPoint]);
       }
 
       const circle = new fabric.Circle({
@@ -396,7 +346,9 @@ export function ZoneDrawingCanvas() {
           !!(hoveredObject as any).zoneType;
 
         if (canvasRef.current) {
-          canvasRef.current.style.cursor = isHoveringZone ? "move" : "crosshair";
+          canvasRef.current.style.cursor = isHoveringZone
+            ? "move"
+            : "crosshair";
         }
       }
 
@@ -405,24 +357,17 @@ export function ZoneDrawingCanvas() {
       const rawPointer = fabricCanvas.getPointer(opt.e);
       const pointer = clampPointer(rawPointer);
 
-      if (isAdjustingCurve) {
-        const endPoint = points[points.length - 1];
-        const newSegments = [...pathSegments];
-        newSegments[newSegments.length - 1] =
-          `Q ${pointer.x} ${pointer.y} ${endPoint.x} ${endPoint.y}`;
-        updateTempPath(newSegments);
-      } else {
-        const previewSegments = [
-          ...pathSegments,
-          `L ${pointer.x} ${pointer.y}`,
-        ];
-        updateTempPath(previewSegments);
-      }
+      const previewSegments = [...pathSegments, `L ${pointer.x} ${pointer.y}`];
+      updateTempPath(previewSegments);
     };
 
     const handleMouseUp = () => {
-      if (isAdjustingCurve) {
-        setIsAdjustingCurve(false);
+      // No-op for polygon drawing
+    };
+
+    const handleMouseLeave = () => {
+      if (canvasRef.current) {
+        canvasRef.current.style.cursor = "default";
       }
     };
 
@@ -463,8 +408,6 @@ export function ZoneDrawingCanvas() {
     points,
     pathSegments,
     tempPath,
-    segmentType,
-    isAdjustingCurve,
     zoneType,
     isMonitoring,
   ]);
@@ -610,27 +553,9 @@ export function ZoneDrawingCanvas() {
     fabricCanvas.renderAll();
   };
 
-  const clearDbZones = async () => {
-    if (!videoName) return;
-    if (
-      !confirm(
-        `Delete all saved zones for "${videoName}" from the database? Canvas objects are kept.`,
-      )
-    )
-      return;
-    try {
-      const result = await deleteZonesForVideo(videoName);
-      // Clear the zoneId stamp on canvas objects so they can be re-saved with correct coords
-      fabricCanvas?.getObjects().forEach((obj) => {
-        delete (obj as any).zoneId;
-      });
-      alert(
-        `Deleted ${result.deleted} zone(s) from DB. You can now re-save with corrected coordinates.`,
-      );
-    } catch (err) {
-      alert(`Failed to clear zones: ${err}`);
-    }
-  };
+  // Note: the explicit "Clear DB Zones" action was removed. Saving now
+  // replaces all previously persisted zones for the currently selected
+  // `videoName` by deleting existing DB rows and re-creating them.
 
   const saveConfiguration = async (silent = false) => {
     if (!fabricCanvas || !videoName) return;
@@ -642,137 +567,117 @@ export function ZoneDrawingCanvas() {
     const canvasWidth = fabricCanvas.getWidth();
     const canvasHeight = fabricCanvas.getHeight();
 
-    // 1. Save Calibration if 4 points exist
-    if (calibrationPoints.length === 4) {
-      const normalizedCalibration = calibrationPoints.map((p) => ({
-        x: p.x / canvasWidth,
-        y: p.y / canvasHeight,
-      }));
+    // Calibration disabled — no BEV saved
 
-      try {
-        await fetch(`${API_URL}/calibration`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            video_name: videoName,
-            source_points: JSON.stringify(normalizedCalibration),
-          }),
-        });
-      } catch (err) {
-        console.error("Failed to save calibration", err);
+    // 2. Replace existing DB zones for this video: delete all saved zones
+    // for `videoName` first, then save every zone currently in the canvas.
+    try {
+      await deleteZonesForVideo(videoName);
+    } catch (err) {
+      if (!silent) {
+        setSaveStatus("failed");
+        alert(`Failed to clear existing zones before saving: ${err}`);
       }
+      return;
     }
 
-    // 2. Save only NEW zones (no zoneId = not yet in DB); exclude calibration objects (no zoneType)
-    const zonesToSave: ZoneConfiguration[] = objects
-      .filter(
-        (obj) =>
-          (obj instanceof fabric.Path ||
-            obj instanceof fabric.Polygon ||
-            obj instanceof fabric.Circle) &&
-          !!(obj as any).zoneType &&
-          !(obj as any).zoneId,
-      )
-      .map((obj) => {
-        let flattened: Point2D[] = [];
-        const matrix = obj.calcTransformMatrix();
+    // Gather all zone objects from the canvas (include previously-saved ones too)
+    const zoneObjects = objects.filter(
+      (obj) =>
+        (obj instanceof fabric.Path ||
+          obj instanceof fabric.Polygon ||
+          obj instanceof fabric.Circle) &&
+        !!(obj as any).zoneType,
+    );
 
-        if (obj instanceof fabric.Path) {
-          const pathObj = obj as any;
-          const svgNS = "http://www.w3.org/2000/svg";
-          const svg = document.createElementNS(svgNS, "svg");
-          const svgPath = document.createElementNS(svgNS, "path");
-          const d = pathObj.path
-            .map((segment: any) => segment.join(" "))
-            .join(" ");
-          svgPath.setAttribute("d", d);
-          svg.appendChild(svgPath);
-          svg.style.position = "absolute";
-          svg.style.visibility = "hidden";
-          document.body.appendChild(svg);
+    const zonesToSave: ZoneConfiguration[] = zoneObjects.map((obj) => {
+      let flattened: Point2D[] = [];
+      const matrix = obj.calcTransformMatrix();
 
-          try {
-            const pathOffset = pathObj.pathOffset || { x: 0, y: 0 };
-            const totalLength = svgPath.getTotalLength();
-            for (let i = 0; i <= 100; i++) {
-              const p = svgPath.getPointAtLength(totalLength * (i / 100));
-              // SVG path data is in path-local space centered on pathOffset.
-              // Subtract pathOffset so the point is relative to the object's origin,
-              // then apply the transform matrix to get canvas coordinates.
-              const localPoint = new fabric.Point(
-                p.x - pathOffset.x,
-                p.y - pathOffset.y,
-              );
-              const transformed = fabric.util.transformPoint(
-                localPoint,
-                matrix,
-              );
-              flattened.push({
-                x: transformed.x / canvasWidth,
-                y: transformed.y / canvasHeight,
-              });
-            }
-          } catch (e) {
-            console.error("Failed to flatten path", e);
-          } finally {
-            if (svg.parentNode) {
-              svg.parentNode.removeChild(svg);
-            }
-          }
-        } else if (obj instanceof fabric.Polygon) {
-          flattened =
-            (obj as fabric.Polygon).points?.map((p) => {
-              const transformedPoint = fabric.util.transformPoint(
-                new fabric.Point(p.x, p.y),
-                matrix,
-              );
-              return {
-                x: transformedPoint.x / canvasWidth,
-                y: transformedPoint.y / canvasHeight,
-              };
-            }) || [];
-        } else if (obj instanceof fabric.Circle) {
-          const radius = (obj as fabric.Circle).radius || 0;
-          for (let i = 0; i < 64; i++) {
-            const angle = (i / 64) * 2 * Math.PI;
+      if (obj instanceof fabric.Path) {
+        const pathObj = obj as any;
+        const svgNS = "http://www.w3.org/2000/svg";
+        const svg = document.createElementNS(svgNS, "svg");
+        const svgPath = document.createElementNS(svgNS, "path");
+        const d = pathObj.path
+          .map((segment: any) => segment.join(" "))
+          .join(" ");
+        svgPath.setAttribute("d", d);
+        svg.appendChild(svgPath);
+        svg.style.position = "absolute";
+        svg.style.visibility = "hidden";
+        document.body.appendChild(svg);
+
+        try {
+          const pathOffset = pathObj.pathOffset || { x: 0, y: 0 };
+          const totalLength = svgPath.getTotalLength();
+          for (let i = 0; i <= 100; i++) {
+            const p = svgPath.getPointAtLength(totalLength * (i / 100));
+            // SVG path data is in path-local space centered on pathOffset.
+            // Subtract pathOffset so the point is relative to the object's origin,
+            // then apply the transform matrix to get canvas coordinates.
             const localPoint = new fabric.Point(
-              radius * Math.cos(angle),
-              radius * Math.sin(angle),
+              p.x - pathOffset.x,
+              p.y - pathOffset.y,
             );
-            const transformedPoint = fabric.util.transformPoint(
-              localPoint,
-              matrix,
-            );
+            const transformed = fabric.util.transformPoint(localPoint, matrix);
             flattened.push({
-              x: transformedPoint.x / canvasWidth,
-              y: transformedPoint.y / canvasHeight,
+              x: transformed.x / canvasWidth,
+              y: transformed.y / canvasHeight,
             });
           }
+        } catch (e) {
+          console.error("Failed to flatten path", e);
+        } finally {
+          if (svg.parentNode) {
+            svg.parentNode.removeChild(svg);
+          }
         }
+      } else if (obj instanceof fabric.Polygon) {
+        flattened =
+          (obj as fabric.Polygon).points?.map((p) => {
+            const transformedPoint = fabric.util.transformPoint(
+              new fabric.Point(p.x, p.y),
+              matrix,
+            );
+            return {
+              x: transformedPoint.x / canvasWidth,
+              y: transformedPoint.y / canvasHeight,
+            };
+          }) || [];
+      } else if (obj instanceof fabric.Circle) {
+        const radius = (obj as fabric.Circle).radius || 0;
+        for (let i = 0; i < 64; i++) {
+          const angle = (i / 64) * 2 * Math.PI;
+          const localPoint = new fabric.Point(
+            radius * Math.cos(angle),
+            radius * Math.sin(angle),
+          );
+          const transformedPoint = fabric.util.transformPoint(
+            localPoint,
+            matrix,
+          );
+          flattened.push({
+            x: transformedPoint.x / canvasWidth,
+            y: transformedPoint.y / canvasHeight,
+          });
+        }
+      }
 
-        return {
-          video_name: videoName,
-          zone_name:
-            (obj as any).zoneName || `Zone ${Math.floor(Math.random() * 1000)}`,
-          zone_type: (obj as any).zoneType || zoneType,
-          dwell_threshold_seconds: 0,
-          is_active: true,
-          ui_shape_data: JSON.stringify(
-            obj.toObject(["zoneType", "zoneName", "zoneId"]),
-          ),
-          flattened_coordinates: JSON.stringify(flattened),
-        };
-      });
-
+      return {
+        video_name: videoName,
+        zone_name:
+          (obj as any).zoneName || `Zone ${Math.floor(Math.random() * 1000)}`,
+        zone_type: (obj as any).zoneType || zoneType,
+        dwell_threshold_seconds: 0,
+        is_active: true,
+        // Don't include the old `zoneId` when sending the POST payload;
+        // the server will create new rows and return new ids.
+        ui_shape_data: JSON.stringify(obj.toObject(["zoneType", "zoneName"])),
+        flattened_coordinates: JSON.stringify(flattened),
+      };
+    });
     try {
-      const zoneObjects = objects.filter(
-        (obj) =>
-          (obj instanceof fabric.Path ||
-            obj instanceof fabric.Polygon ||
-            obj instanceof fabric.Circle) &&
-          !!(obj as any).zoneType &&
-          !(obj as any).zoneId,
-      );
       for (let i = 0; i < zonesToSave.length; i++) {
         const res = await fetch(`${API_URL}/zones`, {
           method: "POST",
@@ -781,7 +686,7 @@ export function ZoneDrawingCanvas() {
         });
         if (res.ok) {
           const saved = await res.json();
-          // Stamp the DB id back so this object won't be re-saved next time
+          // Stamp the DB id back onto the canvas object so the UI reflects persistence
           (zoneObjects[i] as any).zoneId = saved.id;
         }
       }
@@ -905,7 +810,7 @@ export function ZoneDrawingCanvas() {
           <ToolButton
             active={tool === "select"}
             onClick={() => setTool("select")}
-            disabled={isMonitoring}
+            disabled={isMonitoring || drawingActive}
           >
             Select
           </ToolButton>
@@ -916,33 +821,12 @@ export function ZoneDrawingCanvas() {
           >
             Draw
           </ToolButton>
-          <ToolButton
-            active={tool === "calibrate"}
-            onClick={() => setTool("calibrate")}
-            disabled={isMonitoring}
-          >
-            Calibrate
-          </ToolButton>
-          <div className="w-px h-6 bg-zinc-800 mx-1" />
-          <ToolButton
-            active={segmentType === "line"}
-            onClick={() => setSegmentType("line")}
-            disabled={tool !== "draw" || isMonitoring}
-          >
-            Line
-          </ToolButton>
-          <ToolButton
-            active={segmentType === "curve"}
-            onClick={() => setSegmentType("curve")}
-            disabled={tool !== "draw" || isMonitoring}
-          >
-            Curve
-          </ToolButton>
+          {/* Calibrate removed - BEV disabled */}
           <div className="w-px h-6 bg-zinc-800 mx-1" />
           <ToolButton
             active={false}
             onClick={deleteSelected}
-            disabled={isMonitoring}
+            disabled={isMonitoring || drawingActive}
             className="border-red-900/50 text-red-500 hover:bg-red-500/10"
           >
             Delete
@@ -958,6 +842,7 @@ export function ZoneDrawingCanvas() {
               <select
                 value={zoneType}
                 onChange={(e) => setZoneType(e.target.value as ZoneType)}
+                disabled={drawingActive}
                 className="bg-zinc-950 border border-zinc-800 text-xs font-mono px-2 py-1 rounded text-zinc-300 focus:outline-none focus:border-orange-500/50"
               >
                 <option value="RESTRICTED">RESTRICTED</option>
@@ -971,7 +856,7 @@ export function ZoneDrawingCanvas() {
             <ToolButton
               active={false}
               onClick={() => saveConfiguration(false)}
-              disabled={isMonitoring || !bgImage}
+              disabled={isMonitoring || !bgImage || drawingActive}
               className={`border-none px-4 ${saveStatus === "saved" ? "bg-emerald-700 hover:bg-emerald-600" : "bg-zinc-800 hover:bg-zinc-700"}`}
             >
               {saveStatus === "saving"
@@ -979,15 +864,6 @@ export function ZoneDrawingCanvas() {
                 : saveStatus === "saved"
                   ? "Saved ✓"
                   : "Save Zones"}
-            </ToolButton>
-
-            <ToolButton
-              active={false}
-              onClick={clearDbZones}
-              disabled={isMonitoring || !videoName}
-              className="bg-red-900 hover:bg-red-800 text-zinc-100 border-none px-4"
-            >
-              Clear DB Zones
             </ToolButton>
 
             <button
@@ -998,7 +874,8 @@ export function ZoneDrawingCanvas() {
                 isAnalyzing ||
                 !bgImage ||
                 !bgImage.type.startsWith("video/") ||
-                !hasSavedConfiguration
+                !hasSavedConfiguration ||
+                drawingActive
               }
               title={
                 !hasSavedConfiguration
@@ -1120,10 +997,9 @@ export function ZoneDrawingCanvas() {
             {!isMonitoring ? (
               <div className="text-[10px] font-mono text-zinc-500 space-y-4">
                 <p>1. Draw restricted zones using the DRAW tool.</p>
-                <p>2. Set ground plane using CALIBRATE (4 points).</p>
-                <p>3. Click SAVE ALL.</p>
+                <p>2. Click SAVE ALL.</p>
                 <p>
-                  4. Click START MONITORING to run analysis and preview
+                  3. Click START MONITORING to run analysis and preview
                   incursions.
                 </p>
               </div>
