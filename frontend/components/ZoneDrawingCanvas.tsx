@@ -297,7 +297,7 @@ export function ZoneDrawingCanvas() {
         return;
       }
 
-      if (tool !== "draw" || isAdjustingCurve) return;
+      if (tool !== "draw") return;
 
       const rawPointer = fabricCanvas.getPointer(opt.e);
       const pointer = clampPointer(rawPointer);
@@ -363,12 +363,6 @@ export function ZoneDrawingCanvas() {
 
     const handleMouseUp = () => {
       // No-op for polygon drawing
-    };
-
-    const handleMouseLeave = () => {
-      if (canvasRef.current) {
-        canvasRef.current.style.cursor = "default";
-      }
     };
 
     const handleMouseLeave = () => {
