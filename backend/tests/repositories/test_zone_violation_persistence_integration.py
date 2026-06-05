@@ -140,6 +140,48 @@ def test_zone_violation_get_and_delete_endpoints_preserve_shape(session):
     assert client.delete(f"/zone-violations/{created.id}").status_code == 404
 
 
+def test_zone_violation_endpoint_returns_null_after_zone_deleted(session):
+    zone = _persisted_zone(session)
+    assert zone.id is not None
+    storage = _storage()
+    service = ZoneViolationService(
+        ZoneViolationRepository(session),
+        storage,
+        ZoneRepository(session),
+    )
+    created = service.persist_zone_violation(
+        zone_id=zone.id,
+        zone_name=zone.name,
+        zone_type=zone.zone_type,
+        video_name="factory.mp4",
+        track_id=7,
+        timestamp="2026-06-05T12:00:00+00:00",
+        frame_index=30,
+        local_snapshot_path="ignored-by-mock.jpg",
+    )
+    ZoneRepository(session).delete(zone.id)
+
+    app = FastAPI()
+    app.include_router(zones.router)
+    app.dependency_overrides[get_zone_violation_service] = lambda: service
+    response = TestClient(app).get("/zone-violations")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "id": created.id,
+            "zone_id": None,
+            "zone_name": "Restricted Area",
+            "zone_type": None,
+            "track_id": 7,
+            "timestamp": "2026-06-05T12:00:00+00:00",
+            "video_name": "factory.mp4",
+            "frame_index": 30,
+            "snapshot_path": "http://minio/read-url",
+        }
+    ]
+
+
 def test_predict_video_returns_zone_violation_response(monkeypatch, tmp_path):
     response = VideoProcessingResponse(
         summary=VideoSummary(

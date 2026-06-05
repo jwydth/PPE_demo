@@ -107,6 +107,32 @@ def test_zone_violation_service_read_recent_validation_and_errors():
         service.get_recent_zone_violations(10)
 
 
+def test_zone_violation_service_returns_detached_zone_with_null_id():
+    repository = Mock()
+    repository.get_recent.return_value = [
+        _violation().model_copy(update={"zone_id": None})
+    ]
+    storage = Mock()
+    storage.get_object_url.return_value = "http://minio/read-url"
+    zone_repository = Mock()
+    service = ZoneViolationService(
+        repository,
+        storage,
+        zone_repository,
+    )
+
+    result = service.get_recent_zone_violations()[0]
+
+    assert result.zone_id is None
+    assert result.zone_name == "Restricted Area"
+    assert result.zone_type is None
+    assert result.video_name == "factory.mp4"
+    assert result.timestamp == "2026-06-05T12:00:00+00:00"
+    assert result.frame_index == 20
+    assert result.snapshot_path == "http://minio/read-url"
+    zone_repository.get_by_id.assert_not_called()
+
+
 def test_zone_violation_service_deletes_records():
     repository = Mock()
     repository.delete.return_value = True
