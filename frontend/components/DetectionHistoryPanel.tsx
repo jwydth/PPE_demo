@@ -2,13 +2,23 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { getSafetyEvents } from "@/lib/api";
+import {
+  getSafetyEvents,
+  deleteAllIncidents,
+  deleteViolation,
+  deleteZoneViolation,
+} from "@/lib/api";
 import { ViolationReport } from "@/types/detection";
 import { ZoneViolation } from "@/types/zone";
 
 import { GroupedIncidentCard, GroupedIncident } from "./GroupedIncidentCard";
 
-type ViolationFilter = "all" | "missing_helmet" | "missing_vest" | "missing_helmet_and_vest" | "zone_incursion";
+type ViolationFilter =
+  | "all"
+  | "missing_helmet"
+  | "missing_vest"
+  | "missing_helmet_and_vest"
+  | "zone_incursion";
 
 const FILTERS: Array<{ label: string; value: ViolationFilter }> = [
   { label: "All", value: "all" },
@@ -19,9 +29,12 @@ const FILTERS: Array<{ label: string; value: ViolationFilter }> = [
 ];
 
 export function DetectionHistoryPanel() {
-  const [reports, setReports] = useState<(ViolationReport | ZoneViolation)[]>([]);
+  const [reports, setReports] = useState<(ViolationReport | ZoneViolation)[]>(
+    [],
+  );
   const [activeFilter, setActiveFilter] = useState<ViolationFilter>("all");
   const [isLoading, setIsLoading] = useState(true);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
   const incidents = useMemo(() => groupReportsByIncident(reports), [reports]);
@@ -29,7 +42,8 @@ export function DetectionHistoryPanel() {
     if (activeFilter === "all") return incidents;
     return incidents.filter((incident) =>
       incident.records.some((record) => {
-        if ("violation_type" in record) return record.violation_type === activeFilter;
+        if ("violation_type" in record)
+          return record.violation_type === activeFilter;
         return activeFilter === "zone_incursion";
       }),
     );
@@ -42,11 +56,69 @@ export function DetectionHistoryPanel() {
     try {
       setReports(await getSafetyEvents());
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : "Could not load detection history");
+      setErrorMsg(
+        err instanceof Error ? err.message : "Could not load detection history",
+      );
     } finally {
       setIsLoading(false);
     }
   }, []);
+
+  const handleDeleteAll = useCallback(async () => {
+    if (
+      !confirm(
+        "Are you sure you want to delete all incidents? This cannot be undone.",
+      )
+    ) {
+      return;
+    }
+
+    setIsDeleting(true);
+    setErrorMsg("");
+
+    try {
+      const result = await deleteAllIncidents();
+      setReports([]);
+      alert(`Deleted ${result.total_deleted} incident(s).`);
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : "Could not delete incidents",
+      );
+    } finally {
+      setIsDeleting(false);
+    }
+  }, []);
+
+  const handleDeleteIncident = useCallback(
+    async (incidentId: string, recordIds: (number | undefined)[]) => {
+      if (!confirm("Delete this incident? This cannot be undone.")) {
+        return;
+      }
+
+      try {
+        // Delete each record from the backend
+        for (const recordId of recordIds.filter((id) => id !== undefined)) {
+          // Determine if it's a PPE violation or zone violation
+          const record = reports.find((r) => r.id === recordId);
+          if (record) {
+            if ("violation_type" in record) {
+              await deleteViolation(recordId!);
+            } else {
+              await deleteZoneViolation(recordId!);
+            }
+          }
+        }
+
+        // Remove from local state
+        setReports((prev) => prev.filter((r) => !recordIds.includes(r.id)));
+      } catch (err) {
+        setErrorMsg(
+          err instanceof Error ? err.message : "Could not delete incident",
+        );
+      }
+    },
+    [reports],
+  );
 
   useEffect(() => {
     void loadHistory();
@@ -66,17 +138,30 @@ export function DetectionHistoryPanel() {
             History shows confirmed incidents from video/CCTV analysis.
           </p>
         </div>
-        <button
-          onClick={() => void loadHistory()}
-          disabled={isLoading}
-          className="
-            font-mono text-xs text-zinc-300 hover:text-orange-400 transition-colors
-            border border-zinc-800 hover:border-orange-500/30 rounded px-4 py-2
-            disabled:opacity-50 disabled:cursor-not-allowed
-          "
-        >
-          {isLoading ? "REFRESHING..." : "REFRESH"}
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={() => void loadHistory()}
+            disabled={isLoading || isDeleting}
+            className="
+              font-mono text-xs text-zinc-300 hover:text-orange-400 transition-colors
+              border border-zinc-800 hover:border-orange-500/30 rounded px-4 py-2
+              disabled:opacity-50 disabled:cursor-not-allowed
+            "
+          >
+            {isLoading ? "REFRESHING..." : "REFRESH"}
+          </button>
+          <button
+            onClick={() => void handleDeleteAll()}
+            disabled={isLoading || isDeleting || reports.length === 0}
+            className="
+              font-mono text-xs text-red-400 hover:text-red-300 transition-colors
+              border border-red-900 hover:border-red-500/30 rounded px-4 py-2
+              disabled:opacity-50 disabled:cursor-not-allowed
+            "
+          >
+            {isDeleting ? "DELETING..." : "DELETE ALL"}
+          </button>
+        </div>
       </div>
 
       <div className="bg-zinc-950 border border-zinc-800 rounded-lg p-3">
@@ -84,9 +169,15 @@ export function DetectionHistoryPanel() {
           HISTORY SUMMARY
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-          <SummaryMetric label="TOTAL INCIDENTS" value={filteredIncidents.length} />
+          <SummaryMetric
+            label="TOTAL INCIDENTS"
+            value={filteredIncidents.length}
+          />
           <SummaryMetric label="VIOLATION RECORDS" value={reports.length} />
-          <SummaryMetric label="ACTIVE FILTER" value={filterLabel(activeFilter)} />
+          <SummaryMetric
+            label="ACTIVE FILTER"
+            value={filterLabel(activeFilter)}
+          />
         </div>
       </div>
 
@@ -124,7 +215,16 @@ export function DetectionHistoryPanel() {
       ) : !errorMsg ? (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
           {filteredIncidents.map((incident) => (
-            <GroupedIncidentCard key={incident.id} incident={incident} />
+            <GroupedIncidentCard
+              key={incident.id}
+              incident={incident}
+              onDelete={() =>
+                handleDeleteIncident(
+                  incident.id,
+                  incident.records.map((r) => r.id),
+                )
+              }
+            />
           ))}
         </div>
       ) : null}
@@ -132,7 +232,9 @@ export function DetectionHistoryPanel() {
   );
 }
 
-function groupReportsByIncident(reports: (ViolationReport | ZoneViolation)[]): GroupedIncident[] {
+function groupReportsByIncident(
+  reports: (ViolationReport | ZoneViolation)[],
+): GroupedIncident[] {
   const grouped = new Map<string, (ViolationReport | ZoneViolation)[]>();
 
   for (const report of reports) {
@@ -143,15 +245,19 @@ function groupReportsByIncident(reports: (ViolationReport | ZoneViolation)[]): G
   return [...grouped.entries()]
     .map(([id, records]) => {
       const sortedByTimestamp = [...records].sort(
-        (a, b) => timestampValue(a.timestamp) - timestampValue(b.timestamp) || (a.id ?? 0) - (b.id ?? 0),
+        (a, b) =>
+          timestampValue(a.timestamp) - timestampValue(b.timestamp) ||
+          (a.id ?? 0) - (b.id ?? 0),
       );
       const firstRecord = sortedByTimestamp[0];
       const firstSnapshot = records.find((r) => {
         if ("snapshot_url" in r) return r.snapshot_url;
         return r.snapshot_path;
       });
-      const snapshotUrl = firstSnapshot 
-        ? ("snapshot_url" in firstSnapshot ? firstSnapshot.snapshot_url : firstSnapshot.snapshot_path)
+      const snapshotUrl = firstSnapshot
+        ? "snapshot_url" in firstSnapshot
+          ? firstSnapshot.snapshot_url
+          : firstSnapshot.snapshot_path
         : undefined;
 
       return {
@@ -166,11 +272,21 @@ function groupReportsByIncident(reports: (ViolationReport | ZoneViolation)[]): G
     .sort((a, b) => timestampValue(b.timestamp) - timestampValue(a.timestamp));
 }
 
-function SummaryMetric({ label, value }: { label: string; value: string | number }) {
+function SummaryMetric({
+  label,
+  value,
+}: {
+  label: string;
+  value: string | number;
+}) {
   return (
     <div className="bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 min-w-0">
-      <p className="text-zinc-500 font-mono text-[10px] tracking-widest truncate">{label}</p>
-      <p className="font-mono text-sm font-bold text-orange-400 truncate">{value}</p>
+      <p className="text-zinc-500 font-mono text-[10px] tracking-widest truncate">
+        {label}
+      </p>
+      <p className="font-mono text-sm font-bold text-orange-400 truncate">
+        {value}
+      </p>
     </div>
   );
 }

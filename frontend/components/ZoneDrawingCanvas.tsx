@@ -182,6 +182,12 @@ export function ZoneDrawingCanvas() {
           }
         });
         fabricCanvas.renderAll();
+
+        // If zones were loaded, mark as saved so monitoring can start
+        if (data.length > 0) {
+          setHasSavedConfiguration(true);
+          setSaveStatus("saved");
+        }
       }
       loadCalibration(vName);
     } catch (err) {
@@ -271,6 +277,11 @@ export function ZoneDrawingCanvas() {
     if (!fabricCanvas || isMonitoring) return;
 
     const handleMouseDown = (opt: fabric.IEvent) => {
+      // Check if clicking on an existing zone when in draw mode
+      if (tool === "draw" && fabricCanvas.getActiveObject()) {
+        return; // Let fabric.js handle selection/dragging
+      }
+
       if (tool === "calibrate") {
         const rawPointer = fabricCanvas.getPointer(opt.e);
         const pointer = clampPointer(rawPointer);
@@ -375,6 +386,20 @@ export function ZoneDrawingCanvas() {
     };
 
     const handleMouseMove = (opt: fabric.IEvent) => {
+      if (tool === "draw") {
+        const hoveredObject = fabricCanvas.findTarget(opt.e as MouseEvent);
+        const isHoveringZone =
+          hoveredObject &&
+          (hoveredObject instanceof fabric.Path ||
+            hoveredObject instanceof fabric.Polygon ||
+            hoveredObject instanceof fabric.Circle) &&
+          !!(hoveredObject as any).zoneType;
+
+        if (canvasRef.current) {
+          canvasRef.current.style.cursor = isHoveringZone ? "move" : "crosshair";
+        }
+      }
+
       if (tool !== "draw" || points.length === 0) return;
 
       const rawPointer = fabricCanvas.getPointer(opt.e);
@@ -401,6 +426,12 @@ export function ZoneDrawingCanvas() {
       }
     };
 
+    const handleMouseLeave = () => {
+      if (canvasRef.current) {
+        canvasRef.current.style.cursor = "default";
+      }
+    };
+
     const updateTempPath = (segments: string[]) => {
       if (tempPath) fabricCanvas.remove(tempPath);
       const styles = getZoneStyles(zoneType);
@@ -418,11 +449,13 @@ export function ZoneDrawingCanvas() {
     fabricCanvas.on("mouse:down", handleMouseDown);
     fabricCanvas.on("mouse:move", handleMouseMove);
     fabricCanvas.on("mouse:up", handleMouseUp);
+    canvasRef.current?.addEventListener("mouseleave", handleMouseLeave);
 
     return () => {
       fabricCanvas.off("mouse:down", handleMouseDown);
       fabricCanvas.off("mouse:move", handleMouseMove);
       fabricCanvas.off("mouse:up", handleMouseUp);
+      canvasRef.current?.removeEventListener("mouseleave", handleMouseLeave);
     };
   }, [
     fabricCanvas,
@@ -436,8 +469,124 @@ export function ZoneDrawingCanvas() {
     isMonitoring,
   ]);
 
+  const pointInPolygon = (point: Point2D, polygon: Point2D[]): boolean => {
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const xi = polygon[i].x,
+        yi = polygon[i].y;
+      const xj = polygon[j].x,
+        yj = polygon[j].y;
+
+      const intersect =
+        yi > point.y !== yj > point.y &&
+        point.x < ((xj - xi) * (point.y - yi)) / (yj - yi) + xi;
+      if (intersect) inside = !inside;
+    }
+    return inside;
+  };
+
+  const checkPolygonOverlap = (): boolean => {
+    if (!fabricCanvas || points.length < 3) return false;
+
+    const existingObjects = fabricCanvas.getObjects().filter((obj) => {
+      const isZone =
+        (obj instanceof fabric.Path ||
+          obj instanceof fabric.Polygon ||
+          obj instanceof fabric.Circle) &&
+        !!(obj as any).zoneType &&
+        obj !== tempPath;
+      return isZone;
+    });
+
+    const newPolygonPoints = points;
+
+    for (const obj of existingObjects) {
+      if (obj instanceof fabric.Path) {
+        const pathObj = obj as any;
+        try {
+          const svgNS = "http://www.w3.org/2000/svg";
+          const svg = document.createElementNS(svgNS, "svg");
+          const svgPath = document.createElementNS(svgNS, "path");
+          const d = pathObj.path
+            .map((segment: any) => segment.join(" "))
+            .join(" ");
+          svgPath.setAttribute("d", d);
+          svg.appendChild(svgPath);
+          svg.style.position = "absolute";
+          svg.style.visibility = "hidden";
+          document.body.appendChild(svg);
+
+          const pathOffset = pathObj.pathOffset || { x: 0, y: 0 };
+          const totalLength = svgPath.getTotalLength();
+          const pathPoints: Point2D[] = [];
+          for (let i = 0; i <= 50; i++) {
+            const p = svgPath.getPointAtLength(totalLength * (i / 50));
+            pathPoints.push({
+              x: p.x - pathOffset.x + (pathObj.left || 0),
+              y: p.y - pathOffset.y + (pathObj.top || 0),
+            });
+          }
+
+          for (const newPoint of newPolygonPoints) {
+            if (pointInPolygon(newPoint, pathPoints)) {
+              if (svg.parentNode) svg.parentNode.removeChild(svg);
+              return true;
+            }
+          }
+          for (const pathPoint of pathPoints) {
+            if (pointInPolygon(pathPoint, newPolygonPoints)) {
+              if (svg.parentNode) svg.parentNode.removeChild(svg);
+              return true;
+            }
+          }
+          if (svg.parentNode) svg.parentNode.removeChild(svg);
+        } catch (e) {
+          console.error("Error checking path overlap", e);
+        }
+      } else if (obj instanceof fabric.Polygon) {
+        const polygon = obj as fabric.Polygon;
+        const existingPoints = polygon.points || [];
+
+        for (const newPoint of newPolygonPoints) {
+          if (pointInPolygon(newPoint, existingPoints)) return true;
+        }
+        for (const existingPoint of existingPoints) {
+          if (pointInPolygon(existingPoint, newPolygonPoints)) return true;
+        }
+      } else if (obj instanceof fabric.Circle) {
+        const circle = obj as fabric.Circle;
+        const centerX = circle.left || 0;
+        const centerY = circle.top || 0;
+        const radius = circle.radius || 0;
+
+        for (const newPoint of newPolygonPoints) {
+          const dist = Math.sqrt(
+            Math.pow(newPoint.x - centerX, 2) +
+              Math.pow(newPoint.y - centerY, 2),
+          );
+          if (dist < radius) return true;
+        }
+      }
+    }
+
+    return false;
+  };
+
   const completePath = () => {
     if (!fabricCanvas || points.length < 3) return;
+
+    if (checkPolygonOverlap()) {
+      alert("Cannot draw polygon: it overlaps with an existing zone!");
+      activePoints.forEach((p) => fabricCanvas.remove(p));
+      if (tempPath) fabricCanvas.remove(tempPath);
+
+      setPoints([]);
+      setPathSegments([]);
+      setActivePoints([]);
+      setTempPath(null);
+      fabricCanvas.renderAll();
+      return;
+    }
 
     const finalPathString = [...pathSegments, "z"].join(" ");
     const styles = getZoneStyles(zoneType);
@@ -648,6 +797,17 @@ export function ZoneDrawingCanvas() {
       }
     }
   };
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Delete" && !isMonitoring && fabricCanvas) {
+        deleteSelected();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [fabricCanvas, isMonitoring]);
 
   const deleteSelected = () => {
     if (!fabricCanvas) return;
