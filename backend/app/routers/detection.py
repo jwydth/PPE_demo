@@ -13,9 +13,9 @@ from app.services.ppe_violation_service import (
     PPEViolationService,
     get_ppe_violation_service,
 )
-from app.services.violation_store import (
-    delete_all_zone_violations,
-    delete_zone_violation,
+from app.services.zone_violation_service import (
+    ZoneViolationService,
+    get_zone_violation_service,
 )
 
 router = APIRouter(tags=["detection"])
@@ -100,10 +100,14 @@ async def delete_all_incidents(
         PPEViolationService,
         Depends(get_ppe_violation_service),
     ],
+    zone_service: Annotated[
+        ZoneViolationService,
+        Depends(get_zone_violation_service),
+    ],
 ) -> dict[str, int]:
     """Delete all PPE and zone violations from the database."""
     ppe_count = service.delete_all_violations()
-    zone_count = delete_all_zone_violations()
+    zone_count = zone_service.delete_all_zone_violations()
     return {
         "ppe_violations_deleted": ppe_count,
         "zone_violations_deleted": zone_count,
@@ -127,9 +131,15 @@ async def delete_single_violation(
 
 
 @router.delete("/zone-violations/{zone_violation_id}")
-async def delete_single_zone_violation(zone_violation_id: int) -> dict[str, bool]:
+async def delete_single_zone_violation(
+    zone_violation_id: int,
+    service: Annotated[
+        ZoneViolationService,
+        Depends(get_zone_violation_service),
+    ],
+) -> dict[str, bool]:
     """Delete a single zone violation by ID."""
-    success = delete_zone_violation(zone_violation_id)
+    success = service.delete_zone_violation(zone_violation_id)
     if not success:
         raise HTTPException(status_code=404, detail="Zone violation not found")
     return {"success": success}

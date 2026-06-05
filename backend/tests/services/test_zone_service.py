@@ -1,4 +1,5 @@
 import json
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from unittest.mock import Mock
 
@@ -9,6 +10,7 @@ from app.models.camera import Camera
 from app.models.zone import Zone as ZoneModel
 from app.repositories import RepositoryError
 from app.schemas.detection import BoundingBox, PersonResult
+from app.schemas.violation import ZoneViolation
 from app.schemas.zone import Zone
 from app.services import ServiceNotFoundError, ServiceValidationError
 from app.services.zone_service import (
@@ -135,17 +137,32 @@ def test_zone_service_validation_and_error_propagation():
         service.get_zones_by_source_key("factory.mp4")
 
 
-def test_record_zone_violation_passes_zone_name_to_storage(monkeypatch):
-    saved_violations = []
+def test_record_zone_violation_passes_zone_name_to_storage(
+    monkeypatch,
+    tmp_path,
+):
+    violation_service = Mock()
+    violation_service.persist_zone_violation.return_value = ZoneViolation(
+        id=5,
+        zone_id=3,
+        zone_name="Restricted Area",
+        zone_type="RESTRICTED",
+        track_id=42,
+        timestamp="2026-06-05T12:00:00+00:00",
+        video_name="factory.mp4",
+        frame_index=15,
+        snapshot_path="http://minio/zone.jpg",
+    )
 
-    def save_violation(violation):
-        saved_violations.append(violation)
-        return violation
+    @contextmanager
+    def open_service():
+        yield violation_service
 
     monkeypatch.setattr(
-        "app.services.zone_service.save_zone_violation",
-        save_violation,
+        "app.services.zone_service.open_zone_violation_service",
+        open_service,
     )
+    monkeypatch.setattr("app.services.zone_service.SNAPSHOT_DIR", tmp_path)
     worker_state = Mock(reported_zones=set())
     zone = ZoneViolationRecord(
         zone_id=3,
@@ -163,6 +180,12 @@ def test_record_zone_violation_passes_zone_name_to_storage(monkeypatch):
         compliant=True,
     )
 
+    snapshot_path = tmp_path / "zone.jpg"
+
+    def save_snapshot(**_kwargs):
+        snapshot_path.write_bytes(b"image-data")
+        return snapshot_path.name
+
     result = record_zone_violation(
         worker_state=worker_state,
         zone=zone,
@@ -170,11 +193,19 @@ def test_record_zone_violation_passes_zone_name_to_storage(monkeypatch):
         person=person,
         video_name="factory.mp4",
         frame_index=15,
-        save_snapshot_fn=Mock(return_value="zone.jpg"),
+        save_snapshot_fn=save_snapshot,
     )
 
-    assert saved_violations == [result]
+    violation_service.persist_zone_violation.assert_called_once()
+    persisted = violation_service.persist_zone_violation.call_args.kwargs
+    assert persisted["zone_name"] == "Restricted Area"
+    assert persisted["zone_type"] == "RESTRICTED"
+    assert persisted["video_name"] == "factory.mp4"
+    assert persisted["track_id"] == 42
+    assert persisted["frame_index"] == 15
+    assert persisted["local_snapshot_path"].endswith("zone.jpg")
     assert result.zone_name == "Restricted Area"
     assert result.zone_type == "RESTRICTED"
     assert result.track_id == 42
     assert worker_state.reported_zones == {3}
+    assert not snapshot_path.exists()

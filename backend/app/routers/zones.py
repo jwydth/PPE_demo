@@ -7,8 +7,9 @@ from app.schemas.zone import CameraCalibration, Zone
 from app.services import ServiceNotFoundError, ServiceValidationError
 from app.services.camera_service import CameraService, get_camera_service
 from app.services.zone_service import ZoneService, get_zone_service
-from app.services.violation_store import (
-    list_zone_violations,
+from app.services.zone_violation_service import (
+    ZoneViolationService,
+    get_zone_violation_service,
 )
 
 router = APIRouter(tags=["zones"])
@@ -91,5 +92,11 @@ async def update_calibration(
 
 
 @router.get("/zone-violations", response_model=list[ZoneViolation])
-async def get_zone_violations(limit: int = 100) -> list[ZoneViolation]:
-    return list_zone_violations(limit=limit)
+async def get_zone_violations(
+    service: Annotated[
+        ZoneViolationService,
+        Depends(get_zone_violation_service),
+    ],
+    limit: int = 100,
+) -> list[ZoneViolation]:
+    return service.get_recent_zone_violations(limit=limit)

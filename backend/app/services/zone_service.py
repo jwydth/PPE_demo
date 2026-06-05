@@ -17,7 +17,8 @@ from app.schemas.violation import ZoneViolation
 from app.schemas.zone import Zone
 from app.services import ServiceNotFoundError, ServiceValidationError
 from app.services.spatial import is_point_in_polygon
-from app.services.violation_store import save_zone_violation
+from app.services.violation_store import SNAPSHOT_DIR
+from app.services.zone_violation_service import open_zone_violation_service
 
 COORD_SCALE = 1000
 
@@ -244,18 +245,19 @@ def record_zone_violation(
         frame_index=frame_index,
     )
 
-    violation = ZoneViolation(
-        zone_id=zone.zone_id,
-        zone_name=zone.zone_name,
-        zone_type=zone.zone_type,
-        track_id=person.track_id or 0,
-        timestamp=timestamp,
-        video_name=video_name,
-        frame_index=frame_index,
-        snapshot_path=snapshot_filename,
-    )
-
-    saved = save_zone_violation(violation)
+    local_snapshot_path = SNAPSHOT_DIR / snapshot_filename
+    with open_zone_violation_service() as service:
+        saved = service.persist_zone_violation(
+            zone_id=zone.zone_id,
+            zone_name=zone.zone_name,
+            zone_type=zone.zone_type,
+            track_id=person.track_id or 0,
+            timestamp=timestamp,
+            video_name=video_name,
+            frame_index=frame_index,
+            local_snapshot_path=str(local_snapshot_path),
+        )
+    local_snapshot_path.unlink(missing_ok=True)
     worker_state.reported_zones.add(zone.zone_id)
     return saved
 

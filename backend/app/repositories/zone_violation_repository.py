@@ -1,6 +1,7 @@
 from typing import Annotated
 
 from fastapi import Depends
+from sqlalchemy import delete
 from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session, select
 
@@ -52,6 +53,27 @@ class ZoneViolationRepository:
         except SQLAlchemyError as exc:
             self.session.rollback()
             raise RepositoryError("Could not list recent zone violations.") from exc
+
+    def delete(self, violation_id: int) -> bool:
+        violation = self.get_by_id(violation_id)
+        if violation is None:
+            return False
+        try:
+            self.session.delete(violation)
+            self.session.commit()
+            return True
+        except SQLAlchemyError as exc:
+            self.session.rollback()
+            raise RepositoryError("Could not delete zone violation.") from exc
+
+    def delete_all(self) -> int:
+        try:
+            result = self.session.exec(delete(ZoneViolation))
+            self.session.commit()
+            return result.rowcount or 0
+        except SQLAlchemyError as exc:
+            self.session.rollback()
+            raise RepositoryError("Could not delete zone violations.") from exc
 
     def _commit_and_refresh(self, violation: ZoneViolation) -> ZoneViolation:
         try:

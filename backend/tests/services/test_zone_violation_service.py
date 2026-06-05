@@ -7,6 +7,7 @@ from app.models.zone_violation import ZoneViolation as ZoneViolationModel
 from app.repositories import RepositoryError
 from app.services import ServiceNotFoundError, ServiceValidationError
 from app.services.zone_violation_service import ZoneViolationService
+from app.storage.evidence_storage import StorageObject
 
 
 NOW = datetime(2026, 6, 5, 12, 0, tzinfo=timezone.utc)
@@ -50,6 +51,38 @@ def test_zone_violation_service_maps_api_and_database_fields():
     assert not isinstance(result, ZoneViolationModel)
 
 
+def test_zone_violation_service_uploads_snapshot_and_stores_object_key():
+    repository = Mock()
+    repository.create.side_effect = lambda violation: _persist(violation)
+    storage = Mock()
+    storage.upload_zone_snapshot.return_value = StorageObject(
+        object_key="zone-violations/2026/06/05/evidence.jpg",
+        object_url="http://minio/zone-evidence",
+        bucket_name="safety-monitoring-evidence",
+    )
+    service = ZoneViolationService(repository, storage)
+
+    result = service.persist_zone_violation(
+        zone_id=3,
+        zone_name="Restricted Area",
+        zone_type="RESTRICTED",
+        video_name="factory.mp4",
+        track_id=42,
+        timestamp=NOW,
+        frame_index=20,
+        local_snapshot_path="local-zone.jpg",
+    )
+
+    created = repository.create.call_args.args[0]
+    assert created.snapshot_path == (
+        "zone-violations/2026/06/05/evidence.jpg"
+    )
+    assert result.snapshot_path == "http://minio/zone-evidence"
+    assert result.zone_name == "Restricted Area"
+    assert result.zone_type == "RESTRICTED"
+    storage.upload_zone_snapshot.assert_called_once_with("local-zone.jpg")
+
+
 def test_zone_violation_service_read_recent_validation_and_errors():
     repository = Mock()
     repository.get_by_id.return_value = _violation()
@@ -72,6 +105,18 @@ def test_zone_violation_service_read_recent_validation_and_errors():
     repository.get_recent.side_effect = RepositoryError("database failed")
     with pytest.raises(RepositoryError, match="database failed"):
         service.get_recent_zone_violations(10)
+
+
+def test_zone_violation_service_deletes_records():
+    repository = Mock()
+    repository.delete.return_value = True
+    repository.delete_all.return_value = 3
+    service = ZoneViolationService(repository)
+
+    assert service.delete_zone_violation(5) is True
+    assert service.delete_all_zone_violations() == 3
+    repository.delete.assert_called_once_with(5)
+    repository.delete_all.assert_called_once_with()
 
 
 def _persist(violation: ZoneViolationModel) -> ZoneViolationModel:

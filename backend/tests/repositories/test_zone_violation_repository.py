@@ -27,3 +27,9 @@ def test_zone_violation_repository_create_read_and_recent(session):
     assert repository.get_by_id(999_999) is None
     assert repository.list_all() == [newest, middle, oldest]
     assert repository.get_recent(2) == [newest, middle]
+
+    assert repository.delete(middle.id) is True
+    assert repository.get_by_id(middle.id) is None
+    assert repository.delete(middle.id) is False
+    assert repository.delete_all() == 2
+    assert repository.list_all() == []
