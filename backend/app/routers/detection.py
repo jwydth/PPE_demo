@@ -1,4 +1,5 @@
 import io
+import logging
 import tempfile
 from pathlib import Path
 from typing import Annotated
@@ -19,6 +20,7 @@ from app.services.zone_violation_service import (
 )
 
 router = APIRouter(tags=["detection"])
+logger = logging.getLogger(__name__)
 
 _detector = PPEDetector()
 
@@ -80,8 +82,19 @@ async def predict_video(file: UploadFile = File(...)) -> VideoProcessingResponse
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     finally:
-        if tmp_path is not None and tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
+        _cleanup_temp_video(tmp_path)
+
+
+def _cleanup_temp_video(tmp_path: Path | None) -> None:
+    if tmp_path is None:
+        return
+    try:
+        tmp_path.unlink(missing_ok=True)
+    except PermissionError:
+        logger.warning(
+            "Could not delete temporary video file because it is still in use: %s",
+            tmp_path,
+        )
 
 
 @router.get("/violations", response_model=list[ViolationReport])

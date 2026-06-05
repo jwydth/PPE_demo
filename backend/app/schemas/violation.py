@@ -19,7 +19,7 @@ class ZoneViolation(BaseModel):
     zone_id: Optional[int] = None
     zone_name: Optional[str] = None
     zone_type: Optional[str] = None
-    track_id: int
+    track_id: Optional[int] = None
     timestamp: str
     video_name: str
     frame_index: int

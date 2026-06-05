@@ -3,6 +3,7 @@ from unittest.mock import Mock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+import pytest
 from sqlmodel import select
 
 from app.models.ppe_violation import PPEViolation, PPEViolationSubject
@@ -72,6 +73,36 @@ def test_ppe_persistence_uploads_snapshot_and_creates_records(
         "track_id": 42,
     }
     storage.upload_ppe_snapshot.assert_called_once_with(str(snapshot))
+    assert not snapshot.exists()
+
+
+def test_ppe_persistence_keeps_snapshot_when_upload_fails(session, tmp_path):
+    snapshot = tmp_path / "incident.jpg"
+    snapshot.write_bytes(b"image-data")
+    storage = Mock()
+    storage.upload_ppe_snapshot.side_effect = RuntimeError("upload failed")
+    service = PPEViolationService(
+        PPEViolationRepository(session),
+        storage,
+    )
+
+    with pytest.raises(RuntimeError, match="upload failed"):
+        service.persist_violation(
+            timestamp=datetime(2026, 6, 5, 12, 0, tzinfo=timezone.utc),
+            violation_type="missing_helmet",
+            details="track 42 missing Helmet at frame 20",
+            local_snapshot_path=str(snapshot),
+            video_name="factory.mp4",
+            frame_index=20,
+            track_id=42,
+            person_index=1,
+            missing_equipment=["Helmet"],
+            bounding_box=None,
+            confidence=0.95,
+        )
+
+    assert snapshot.exists()
+    assert session.exec(select(PPEViolation)).all() == []
 
 
 def test_violations_endpoint_preserves_response_shape(session):

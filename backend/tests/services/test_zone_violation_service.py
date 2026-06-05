@@ -133,6 +133,18 @@ def test_zone_violation_service_returns_detached_zone_with_null_id():
     zone_repository.get_by_id.assert_not_called()
 
 
+def test_zone_violation_service_returns_null_track_id():
+    repository = Mock()
+    repository.get_recent.return_value = [
+        _violation().model_copy(update={"tracker_id": None})
+    ]
+    service = ZoneViolationService(repository)
+
+    result = service.get_recent_zone_violations()[0]
+
+    assert result.track_id is None
+
+
 def test_zone_violation_service_deletes_records():
     repository = Mock()
     repository.delete.return_value = True

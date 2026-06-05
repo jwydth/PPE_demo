@@ -145,10 +145,6 @@ def _to_schema(
     snapshot_url: str | None = None,
     zone_type: str | None = None,
 ) -> ZoneViolation:
-    if violation.tracker_id is None:
-        raise ServiceValidationError(
-            "Current API responses require track_id for zone violations."
-        )
     return ZoneViolation(
         id=violation.id,
         zone_id=violation.zone_id,

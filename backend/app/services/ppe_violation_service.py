@@ -1,6 +1,8 @@
-from dataclasses import dataclass
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
+import logging
+from pathlib import Path
 from typing import Annotated, Iterator
 from urllib.parse import urlparse
 
@@ -13,6 +15,8 @@ from app.repositories.ppe_violation_repository import PPEViolationRepository
 from app.schemas.violation import ViolationReport
 from app.services import ServiceNotFoundError, ServiceValidationError
 from app.storage.evidence_storage import EvidenceStorage, get_evidence_storage
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -87,11 +91,13 @@ class PPEViolationService:
             bounding_box=bounding_box,
             confidence=confidence,
         )
-        return _to_report(
+        report = _to_report(
             violation,
             track_id=track_id,
             snapshot_url=stored_object.object_url,
         )
+        _cleanup_local_snapshot(Path(local_snapshot_path))
+        return report
 
     def create_violation(
         self,
@@ -255,6 +261,16 @@ def _to_report(
         frame_index=violation.frame_index,
         track_id=track_id,
     )
+
+
+def _cleanup_local_snapshot(snapshot_path: Path) -> None:
+    try:
+        snapshot_path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning(
+            "Could not delete uploaded local PPE snapshot: %s",
+            snapshot_path,
+        )
 
 
 def _to_subject_dto(subject: PPEViolationSubject) -> PPEViolationSubjectDTO:
