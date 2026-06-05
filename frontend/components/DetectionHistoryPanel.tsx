@@ -10,8 +10,8 @@ import {
 } from "@/lib/api";
 import { ViolationReport } from "@/types/detection";
 import { ZoneViolation } from "@/types/zone";
-
-import { GroupedIncidentCard, GroupedIncident } from "./GroupedIncidentCard";
+import { ViolationReportCard } from "./ViolationReportCard";
+import { ZoneViolationCard } from "./ZoneViolationCard";
 
 type ViolationFilter =
   | "all"
@@ -29,25 +29,26 @@ const FILTERS: Array<{ label: string; value: ViolationFilter }> = [
 ];
 
 export function DetectionHistoryPanel() {
-  const [reports, setReports] = useState<(ViolationReport | ZoneViolation)[]>(
-    [],
-  );
+  const [reports, setReports] = useState<(ViolationReport | ZoneViolation)[]>([]);
   const [activeFilter, setActiveFilter] = useState<ViolationFilter>("all");
   const [isLoading, setIsLoading] = useState(true);
   const [isDeleting, setIsDeleting] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
-  const incidents = useMemo(() => groupReportsByIncident(reports), [reports]);
-  const filteredIncidents = useMemo(() => {
-    if (activeFilter === "all") return incidents;
-    return incidents.filter((incident) =>
-      incident.records.some((record) => {
-        if ("violation_type" in record)
-          return record.violation_type === activeFilter;
-        return activeFilter === "zone_incursion";
-      }),
+  const filteredReports = useMemo(() => {
+    if (activeFilter === "all") {
+      return reports;
+    }
+    if (activeFilter === "zone_incursion") {
+      return reports.filter((r): r is ZoneViolation => !("violation_type" in r));
+    }
+    const ppeReports = reports.filter(
+      (r): r is ViolationReport => "violation_type" in r
     );
-  }, [activeFilter, incidents]);
+    return ppeReports.filter(
+      (report) => report.violation_type === activeFilter
+    );
+  }, [activeFilter, reports]);
 
   const loadHistory = useCallback(async () => {
     setIsLoading(true);
@@ -57,7 +58,7 @@ export function DetectionHistoryPanel() {
       setReports(await getSafetyEvents());
     } catch (err) {
       setErrorMsg(
-        err instanceof Error ? err.message : "Could not load detection history",
+        err instanceof Error ? err.message : "Could not load detection history"
       );
     } finally {
       setIsLoading(false);
@@ -67,7 +68,7 @@ export function DetectionHistoryPanel() {
   const handleDeleteAll = useCallback(async () => {
     if (
       !confirm(
-        "Are you sure you want to delete all incidents? This cannot be undone.",
+        "Are you sure you want to delete all incidents? This cannot be undone."
       )
     ) {
       return;
@@ -82,43 +83,32 @@ export function DetectionHistoryPanel() {
       alert(`Deleted ${result.total_deleted} incident(s).`);
     } catch (err) {
       setErrorMsg(
-        err instanceof Error ? err.message : "Could not delete incidents",
+        err instanceof Error ? err.message : "Could not delete incidents"
       );
     } finally {
       setIsDeleting(false);
     }
   }, []);
 
-  const handleDeleteIncident = useCallback(
-    async (incidentId: string, recordIds: (number | undefined)[]) => {
-      if (!confirm("Delete this incident? This cannot be undone.")) {
-        return;
-      }
+  const handleDeleteIncident = useCallback(async (report: ViolationReport | ZoneViolation) => {
+    if (!confirm("Delete this incident? This cannot be undone.")) {
+      return;
+    }
+    if (!report.id) return;
 
-      try {
-        // Delete each record from the backend
-        for (const recordId of recordIds.filter((id) => id !== undefined)) {
-          // Determine if it's a PPE violation or zone violation
-          const record = reports.find((r) => r.id === recordId);
-          if (record) {
-            if ("violation_type" in record) {
-              await deleteViolation(recordId!);
-            } else {
-              await deleteZoneViolation(recordId!);
-            }
-          }
-        }
-
-        // Remove from local state
-        setReports((prev) => prev.filter((r) => !recordIds.includes(r.id)));
-      } catch (err) {
-        setErrorMsg(
-          err instanceof Error ? err.message : "Could not delete incident",
-        );
+    try {
+      if ("violation_type" in report) {
+        await deleteViolation(report.id);
+      } else {
+        await deleteZoneViolation(report.id);
       }
-    },
-    [reports],
-  );
+      setReports((prev) => prev.filter((r) => r.id !== report.id));
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : "Could not delete incident"
+      );
+    }
+  }, []);
 
   useEffect(() => {
     void loadHistory();
@@ -168,12 +158,11 @@ export function DetectionHistoryPanel() {
         <p className="font-mono text-[10px] text-zinc-600 tracking-widest mb-3">
           HISTORY SUMMARY
         </p>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           <SummaryMetric
             label="TOTAL INCIDENTS"
-            value={filteredIncidents.length}
+            value={filteredReports.length}
           />
-          <SummaryMetric label="VIOLATION RECORDS" value={reports.length} />
           <SummaryMetric
             label="ACTIVE FILTER"
             value={filterLabel(activeFilter)}
@@ -208,68 +197,37 @@ export function DetectionHistoryPanel() {
         <div className="border border-orange-500/30 bg-orange-500/10 rounded-lg p-4 font-mono text-sm text-orange-300">
           Loading detection history...
         </div>
-      ) : !errorMsg && filteredIncidents.length === 0 ? (
+      ) : !errorMsg && filteredReports.length === 0 ? (
         <div className="border border-zinc-800 bg-zinc-950 rounded-lg p-4 font-mono text-sm text-zinc-400">
           No incidents found for the selected filter.
         </div>
       ) : !errorMsg ? (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-          {filteredIncidents.map((incident) => (
-            <GroupedIncidentCard
-              key={incident.id}
-              incident={incident}
-              onDelete={() =>
-                handleDeleteIncident(
-                  incident.id,
-                  incident.records.map((r) => r.id),
-                )
-              }
-            />
+          {filteredReports.map((report) => (
+            <div key={report.id} className="relative group">
+                { "violation_type" in report ? (
+                    <ViolationReportCard report={report} showMetadata />
+                ) : (
+                    <ZoneViolationCard report={report} />
+                )}
+              <button
+                onClick={() => handleDeleteIncident(report)}
+                className="
+                  absolute top-2 right-2 z-10
+                  font-mono text-xs text-red-400 hover:text-red-300 transition-all
+                  border border-red-900 hover:border-red-500/30 rounded px-2 py-1
+                  bg-zinc-950/50 backdrop-blur-sm
+                  opacity-0 group-hover:opacity-100
+                "
+              >
+                DELETE
+              </button>
+            </div>
           ))}
         </div>
       ) : null}
     </section>
   );
-}
-
-function groupReportsByIncident(
-  reports: (ViolationReport | ZoneViolation)[],
-): GroupedIncident[] {
-  const grouped = new Map<string, (ViolationReport | ZoneViolation)[]>();
-
-  for (const report of reports) {
-    const key = `${report.video_name ?? "unknown"}:${report.frame_index ?? "unknown"}`;
-    grouped.set(key, [...(grouped.get(key) ?? []), report]);
-  }
-
-  return [...grouped.entries()]
-    .map(([id, records]) => {
-      const sortedByTimestamp = [...records].sort(
-        (a, b) =>
-          timestampValue(a.timestamp) - timestampValue(b.timestamp) ||
-          (a.id ?? 0) - (b.id ?? 0),
-      );
-      const firstRecord = sortedByTimestamp[0];
-      const firstSnapshot = records.find((r) => {
-        if ("snapshot_url" in r) return r.snapshot_url;
-        return r.snapshot_path;
-      });
-      const snapshotUrl = firstSnapshot
-        ? "snapshot_url" in firstSnapshot
-          ? firstSnapshot.snapshot_url
-          : firstSnapshot.snapshot_path
-        : undefined;
-
-      return {
-        id,
-        timestamp: firstRecord?.timestamp ?? "",
-        snapshotUrl,
-        videoName: firstRecord?.video_name,
-        frameIndex: firstRecord?.frame_index,
-        records,
-      };
-    })
-    .sort((a, b) => timestampValue(b.timestamp) - timestampValue(a.timestamp));
 }
 
 function SummaryMetric({
@@ -293,9 +251,4 @@ function SummaryMetric({
 
 function filterLabel(filter: ViolationFilter): string {
   return FILTERS.find((item) => item.value === filter)?.label ?? "All";
-}
-
-function timestampValue(timestamp: string): number {
-  const value = new Date(timestamp).getTime();
-  return Number.isNaN(value) ? 0 : value;
 }

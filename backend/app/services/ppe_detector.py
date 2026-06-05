@@ -716,48 +716,42 @@ def _record_violation_case(
     if worker.reported:
         return
 
-    case, match_reason = _find_existing_case_match(cases, person, frame_index)
+    # Force a new violation case on every confirmed incident. Do not group.
+    case, match_reason = None, "new"
+
     missing_set = set(missing)
     violation_type = _violation_type(missing)
     timestamp = datetime.now(timezone.utc).isoformat()
+
     if confirmed_aspect_ratios is not None:
         confirmed_aspect_ratios.append(_bbox_aspect_ratio(person.bbox))
 
-    if case is None:
-        snapshot_filename = _save_violation_snapshot(
-            frame=frame,
-            person=person,
-            missing=missing,
-            video_stem=Path(video_name).stem,
-            frame_index=frame_index,
+    snapshot_filename = _save_violation_snapshot(
+        frame=frame,
+        person=person,
+        missing=missing,
+        video_stem=Path(video_name).stem,
+        frame_index=frame_index,
+    )
+    report = save_violation(
+        timestamp=timestamp,
+        violation_type=violation_type,
+        details=_violation_details(person, missing, frame_index),
+        snapshot_filename=snapshot_filename,
+        video_name=video_name,
+        frame_index=frame_index,
+        track_id=person.track_id,
+    )
+    cases.append(
+        ViolationCase(
+            report=report,
+            missing=missing_set,
+            track_ids={person.track_id} if person.track_id is not None else set(),
+            last_bbox=person.bbox,
+            first_frame=frame_index,
+            last_frame=frame_index,
         )
-        report = save_violation(
-            timestamp=timestamp,
-            violation_type=violation_type,
-            details=_violation_details(person, missing, frame_index),
-            snapshot_filename=snapshot_filename,
-            video_name=video_name,
-            frame_index=frame_index,
-            track_id=person.track_id,
-        )
-        cases.append(
-            ViolationCase(
-                report=report,
-                missing=missing_set,
-                track_ids={person.track_id} if person.track_id is not None else set(),
-                last_bbox=person.bbox,
-                first_frame=frame_index,
-                last_frame=frame_index,
-            )
-        )
-        worker.reported = True
-        worker.status = "violation"
-        return
-
-    case.last_bbox = person.bbox
-    case.last_frame = frame_index
-    if person.track_id is not None:
-        case.track_ids.add(person.track_id)
+    )
     worker.reported = True
     worker.status = "violation"
 
