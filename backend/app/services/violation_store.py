@@ -5,6 +5,7 @@ from typing import Any
 from app.core.config import BACKEND_DIR, settings
 from app.schemas.violation import ViolationReport, ZoneViolation
 from app.schemas.zone import CameraCalibration, Zone
+from app.storage.local_paths import ensure_snapshot_dir
 
 
 def _resolve_backend_path(value: str) -> Path:
@@ -15,12 +16,9 @@ def _resolve_backend_path(value: str) -> Path:
 
 
 DB_PATH = _resolve_backend_path(settings.VIOLATION_DB_PATH)
-SNAPSHOT_DIR = _resolve_backend_path(settings.SNAPSHOT_DIR)
-
-
 def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_snapshot_dir()
 
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(

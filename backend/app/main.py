@@ -6,7 +6,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
 from app.routers import detection, testing, zones
-from app.services.violation_store import SNAPSHOT_DIR, init_db
+from app.storage.local_paths import SNAPSHOT_DIR, ensure_snapshot_dir
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,13 +32,13 @@ app.add_middleware(
 app.include_router(detection.router)
 app.include_router(zones.router)
 app.include_router(testing.router)
-SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+ensure_snapshot_dir()
 app.mount("/snapshots", StaticFiles(directory=SNAPSHOT_DIR), name="snapshots")
 
 
 @app.on_event("startup")
 async def startup() -> None:
-    init_db()
+    ensure_snapshot_dir()
 
 
 @app.get("/health", tags=["meta"])

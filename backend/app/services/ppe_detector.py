@@ -23,9 +23,6 @@ from app.schemas.violation import (
     ViolationReport,
     ZoneViolation,
 )
-from app.services.violation_store import (
-    SNAPSHOT_DIR,
-)
 from app.services.ppe_violation_service import open_ppe_violation_service
 from app.services.zone_service import (
     load_zones,
@@ -33,6 +30,7 @@ from app.services.zone_service import (
     check_zone_incursion,
     record_zone_violation,
 )
+from app.storage.local_paths import SNAPSHOT_DIR
 
 logger = logging.getLogger(__name__)
 

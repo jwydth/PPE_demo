@@ -17,8 +17,8 @@ from app.schemas.violation import ZoneViolation
 from app.schemas.zone import Zone
 from app.services import ServiceNotFoundError, ServiceValidationError
 from app.services.spatial import is_point_in_polygon
-from app.services.violation_store import SNAPSHOT_DIR
 from app.services.zone_violation_service import open_zone_violation_service
+from app.storage.local_paths import SNAPSHOT_DIR
 
 COORD_SCALE = 1000
 
