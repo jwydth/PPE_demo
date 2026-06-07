@@ -255,7 +255,7 @@ currently deleted.
 Zone API field names remain compatible with the frontend. Internally,
 `video_name` maps to `cameras.source_key`, and JSON strings are stored as JSONB.
 
-Zone types are `RESTRICTED`, `WALKWAY`, and `FORKLIFT_PATH`.
+Zone types are `RESTRICTED` and `WALKWAY`.
 
 ### Create a zone
 
@@ -367,46 +367,6 @@ Response:
 }
 ```
 
-## Calibration
-
-### Save calibration
-
-- Method: `POST`
-- Path: `/calibration`
-- Purpose: Stores camera source points. A camera is created automatically when
-  needed.
-- Storage used: PostgreSQL JSONB
-
-Request and response:
-
-```json
-{
-  "video_name": "factory.mp4",
-  "source_points": "[[0.1,0.2],[0.8,0.2],[0.8,0.9],[0.1,0.9]]"
-}
-```
-
-`source_points` is a JSON string at the API boundary and JSONB in PostgreSQL.
-
-### Get calibration
-
-- Method: `GET`
-- Path: `/calibration/{video_name}`
-- Purpose: Returns calibration for the source.
-- Request body: None
-- Storage used: PostgreSQL
-
-Response:
-
-```json
-{
-  "video_name": "factory.mp4",
-  "source_points": "[[0.1,0.2],[0.8,0.2],[0.8,0.9],[0.1,0.9]]"
-}
-```
-
-Returns HTTP `404` when no calibration exists.
-
 ## Zone Violations
 
 ### List zone violations
@@ -455,35 +415,6 @@ Response:
 
 Returns HTTP `404` when the record does not exist. The MinIO object is not
 currently deleted.
-
-## Zone Image Test
-
-### Test zones against an image
-
-- Method: `POST`
-- Path: `/test-zone-image`
-- Purpose: Runs image detection and produces a text diagnostic report for
-  calibration and zone geometry. It does not save zones or violations.
-- Request: `multipart/form-data`
-- Storage used: Local `output.txt` only
-
-Form fields:
-
-| Field | Type | Description |
-|---|---|---|
-| `file` | File | Source image |
-| `calibration` | String | JSON array of normalized calibration points |
-| `zones` | String | JSON array of zone objects |
-
-Example response:
-
-```json
-{
-  "status": "success",
-  "file": "C:\\project\\backend\\output.txt",
-  "humans_count": 2
-}
-```
 
 ## Compatibility Static Route
 

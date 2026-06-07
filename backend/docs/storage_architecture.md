@@ -7,7 +7,6 @@ The backend separates structured records from evidence files.
 PostgreSQL is the source of truth for structured metadata:
 
 - Cameras and source identifiers
-- Camera calibration
 - Zone definitions and normalized coordinates
 - PPE violation records
 - People associated with PPE violations

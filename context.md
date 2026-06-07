@@ -1,52 +1,72 @@
 # Project Context: De Heus PPE Safety Monitor
 
-## 1. Project Overview
-The **De Heus PPE Safety Monitor** is an industrial safety system designed to monitor factory floor compliance with Personal Protective Equipment (PPE) standards using computer vision (YOLOv8). It identifies workers and their equipment (helmets, vests, etc.) and analyzes spatial violations based on configurable safety zones.
+## Overview
 
-## 2. Technical Stack
-### Backend (FastAPI)
-- **Framework:** FastAPI (Python)
-- **Inference Engine:** YOLOv8 (Ultralytics), supports CUDA acceleration and a "Mock Mode" for development.
-- **Database:** SQLite (via SQLModel/SQLAlchemy) for storing zone configurations and violations.
-- **Spatial Analysis:** OpenCV (cv2) for homography transformations and point-in-polygon tests.
-- **Static Assets:** Serves snapshots of violations.
+The application detects PPE compliance and monitors configurable safety zones
+in uploaded images and videos.
 
-### Frontend (Next.js)
-- **Framework:** Next.js 14 (App Router, TypeScript)
-- **Styling:** Tailwind CSS
-- **Canvas Interaction:** Fabric.js (v5) for drawing and managing safety zones.
-- **Components:** React Dropzone for uploads, custom canvas overlays for bounding boxes.
+## Architecture
 
-## 3. Core Features
-- **PPE Detection:** Real-time (or near real-time) detection of people and PPE items.
-- **Compliance Monitoring:** Categorizes detections as "compliant" or "violation".
-- **Manual Zone Configuration:** UI to draw restricted areas, walkways, and forklift paths.
-- **Spatial Violation Detection:** Detects when persons enter restricted zones based on a Bird-Eye View (BEV) transformation.
-- **Incident History:** Dashboard to review past violations with snapshots.
+### Backend
 
-## 4. Key Files & Structure
-### Backend (`/backend`)
-- `app/main.py`: Entry point, middleware, and router inclusion.
-- `app/routers/detection.py`: Handles image upload and PPE inference.
-- `app/routers/zones.py`: CRUD for safety zones and calibrations.
-- `app/services/ppe_detector.py`: Core logic for YOLOv8 inference and mock data.
-- `app/services/spatial.py`: Homography and BEV logic.
-- PostgreSQL repositories and services persist zones and violations; MinIO stores evidence.
-- `app/models/schemas.py`: Pydantic models for API requests/responses.
+- FastAPI provides detection, zone CRUD, violation history, and health routes.
+- YOLOv8 performs person, helmet, and vest detection and video tracking.
+- PostgreSQL stores cameras, zones, PPE violations, and zone violations through
+  SQLModel repositories and services.
+- MinIO stores PPE and zone evidence snapshots.
+- OpenCV performs point-in-polygon checks and draws evidence overlays.
 
-### Frontend (`/frontend`)
-- `app/page.tsx`: Main dashboard and tab navigation (Detections / Zones / History).
-- `components/ZoneDrawingCanvas.tsx`: Fabric.js-based zone editor.
-- `components/BoundingBoxCanvas.tsx`: Renders detection boxes over images/video.
-- `components/UploadZone.tsx`: Handles file selection and upload trigger.
-- `lib/api.ts`: Centralized API client using `fetch`.
-- `types/`: TypeScript definitions mirroring backend schemas (`detection.ts`, `zone.ts`).
+SQLite and the legacy `violation_store.py` are not part of the runtime
+architecture.
 
-## 5. Development Workflows
-- **Mock Mode:** Enable via environment variables to develop UI without a local GPU or trained model.
-- **Zone Drawing:** Shapes drawn in the UI are normalized (0.0 - 1.0) and "flattened" into points before being sent to the backend.
-- **BEV Calibration:** 4-point ground calibration maps perspective views to a 1000x1000 coordinate system for accurate spatial logic.
+### Frontend
 
-## 6. Commands
-- **Backend:** `uvicorn app.main:app --app-dir backend --reload --port 8000`
-- **Frontend:** `npm run dev` (running on port 3000)
+- Next.js and TypeScript provide the dashboard and history views.
+- Fabric.js provides zone drawing and editing.
+- Zone API response fields remain compatible with the frontend.
+
+## Zone Monitoring
+
+Zone coordinates are stored as normalized points and scaled to a 1000 by 1000
+logical grid for point-in-polygon checks. BEV calibration and homography are
+not used.
+
+Supported zone types:
+
+- `RESTRICTED`: a violation occurs when a worker foot point remains inside the
+  zone beyond its dwell threshold.
+- `WALKWAY`: a violation occurs when a worker foot point remains outside the
+  zone beyond its dwell threshold.
+
+`FORKLIFT_PATH` is no longer supported.
+
+Zone violation evidence draws a semi-transparent zone polygon and solid
+boundary on the snapshot before the image is uploaded to MinIO. Restricted
+zones use red; walkways use green.
+
+## Persistence
+
+- PPE violations are persisted through `PPEViolationService`.
+- Zone violations are persisted through `ZoneViolationService`.
+- Zone CRUD is persisted through `ZoneService` and PostgreSQL repositories.
+- Evidence files are uploaded through `EvidenceStorage`.
+- Local temporary snapshots are removed after successful persistence.
+
+## Key Backend Files
+
+- `backend/app/routers/detection.py`: detection and violation-history routes.
+- `backend/app/routers/testing.py`: PostgreSQL and MinIO health routes.
+- `backend/app/routers/zones.py`: PostgreSQL-backed zone CRUD and history.
+- `backend/app/services/ppe_detector.py`: inference and evidence rendering.
+- `backend/app/services/zone_service.py`: zone loading, incursion logic, and
+  zone violation persistence.
+- `backend/app/services/spatial.py`: point-in-polygon utility.
+- `backend/app/storage/evidence_storage.py`: MinIO evidence handling.
+
+## Commands
+
+```text
+uvicorn app.main:app --app-dir backend --reload --port 8000
+python -m pytest
+python -m ruff check app tests
+```

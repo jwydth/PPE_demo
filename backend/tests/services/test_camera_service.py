@@ -5,7 +5,6 @@ import pytest
 
 from app.models.camera import Camera
 from app.repositories import RepositoryError
-from app.schemas.zone import CameraCalibration
 from app.services import ServiceNotFoundError, ServiceValidationError
 from app.services.camera_service import CameraService
 
@@ -68,42 +67,6 @@ def test_camera_service_propagates_repository_errors():
 
     with pytest.raises(RepositoryError, match="database failed"):
         CameraService(repository).get_camera(1)
-
-
-def test_camera_service_saves_and_reads_calibration():
-    repository = Mock()
-    repository.get_by_source_key.side_effect = [None, _camera().model_copy(
-        update={
-            "calibration_source_points": [
-                [0.1, 0.2],
-                [0.8, 0.2],
-                [0.8, 0.9],
-                [0.1, 0.9],
-            ]
-        }
-    )]
-    repository.create.side_effect = lambda camera: _persist_camera(camera)
-    service = CameraService(repository)
-    calibration = CameraCalibration(
-        video_name="warehouse.mp4",
-        source_points="[[0.1,0.2],[0.8,0.2],[0.8,0.9],[0.1,0.9]]",
-    )
-
-    saved = service.save_calibration(calibration)
-    loaded = service.get_calibration("warehouse.mp4")
-
-    created = repository.create.call_args.args[0]
-    assert created.source_key == "warehouse.mp4"
-    assert created.calibration_source_points == [
-        [0.1, 0.2],
-        [0.8, 0.2],
-        [0.8, 0.9],
-        [0.1, 0.9],
-    ]
-    assert saved == calibration
-    assert loaded == calibration
-
-
 def _persist_camera(camera: Camera) -> Camera:
     camera.id = 1
     return camera

@@ -37,8 +37,6 @@ export function ZoneDrawingCanvas() {
     "idle" | "saving" | "saved" | "failed"
   >("idle");
 
-  // (Calibration removed — BEV disabled)
-
   // Drawing state
   const [points, setPoints] = useState<Point2D[]>([]);
   const [pathSegments, setPathSegments] = useState<string[]>([]);
@@ -88,8 +86,6 @@ export function ZoneDrawingCanvas() {
       canvas.dispose();
       setFabricCanvas(null);
     };
-    // bgImage controls whether the canvas element is in the DOM; re-run when it changes
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bgImage]);
 
   // Update canvas dimensions when they change
@@ -192,7 +188,6 @@ export function ZoneDrawingCanvas() {
         });
         fabricCanvas.renderAll();
 
-        // If zones were loaded, mark as saved so monitoring can start
         if (data.length > 0) {
           setHasSavedConfiguration(true);
           setSaveStatus("saved");
@@ -209,8 +204,6 @@ export function ZoneDrawingCanvas() {
         return { fill: "rgba(239, 68, 68, 0.3)", stroke: "#ef4444" };
       case "WALKWAY":
         return { fill: "rgba(34, 197, 94, 0.3)", stroke: "#22c55e" };
-      case "FORKLIFT_PATH":
-        return { fill: "rgba(234, 179, 8, 0.3)", stroke: "#eab308" };
       default:
         return { fill: "rgba(161, 161, 170, 0.3)", stroke: "#a1a1aa" };
     }
@@ -236,9 +229,8 @@ export function ZoneDrawingCanvas() {
     if (!fabricCanvas || isMonitoring) return;
 
     const handleMouseDown = (opt: fabric.IEvent) => {
-      // Check if clicking on an existing zone when in draw mode
       if (tool === "draw" && fabricCanvas.getActiveObject()) {
-        return; // Let fabric.js handle selection/dragging
+        return;
       }
 
       if (tool !== "draw") return;
@@ -260,7 +252,6 @@ export function ZoneDrawingCanvas() {
         setPathSegments([`M ${newPoint.x} ${newPoint.y}`]);
         setPoints([newPoint]);
       } else {
-        // Always add straight lines to form a polygon
         setPathSegments((prev) => [...prev, `L ${newPoint.x} ${newPoint.y}`]);
         setPoints((prev) => [...prev, newPoint]);
       }
@@ -281,7 +272,10 @@ export function ZoneDrawingCanvas() {
 
     const handleMouseMove = (opt: fabric.IEvent) => {
       if (tool === "draw") {
-        const hoveredObject = fabricCanvas.findTarget(opt.e as MouseEvent);
+        const hoveredObject = fabricCanvas.findTarget(
+          opt.e as MouseEvent,
+          false,
+        );
         const isHoveringZone =
           hoveredObject &&
           (hoveredObject instanceof fabric.Path ||
@@ -303,10 +297,6 @@ export function ZoneDrawingCanvas() {
 
       const previewSegments = [...pathSegments, `L ${pointer.x} ${pointer.y}`];
       updateTempPath(previewSegments);
-    };
-
-    const handleMouseUp = () => {
-      // No-op for polygon drawing
     };
 
     const handleMouseLeave = () => {
@@ -331,13 +321,11 @@ export function ZoneDrawingCanvas() {
 
     fabricCanvas.on("mouse:down", handleMouseDown);
     fabricCanvas.on("mouse:move", handleMouseMove);
-    fabricCanvas.on("mouse:up", handleMouseUp);
     canvasRef.current?.addEventListener("mouseleave", handleMouseLeave);
 
     return () => {
       fabricCanvas.off("mouse:down", handleMouseDown);
       fabricCanvas.off("mouse:move", handleMouseMove);
-      fabricCanvas.off("mouse:up", handleMouseUp);
       canvasRef.current?.removeEventListener("mouseleave", handleMouseLeave);
     };
   }, [
@@ -350,14 +338,9 @@ export function ZoneDrawingCanvas() {
     isMonitoring,
   ]);
 
-  // Prevent existing zones from being interactive while a new one is being drawn
   useEffect(() => {
     if (!fabricCanvas) return;
-
     const isActivelyDrawing = tool === "draw" && points.length > 0;
-
-    // Disable selection on all objects while drawing a new polygon
-    // to prevent mouse events from being captured by existing shapes.
     fabricCanvas.selection = !isActivelyDrawing;
     fabricCanvas.forEachObject((obj) => {
       obj.selectable = !isActivelyDrawing;
@@ -517,10 +500,6 @@ export function ZoneDrawingCanvas() {
     fabricCanvas.renderAll();
   };
 
-  // Note: the explicit "Clear DB Zones" action was removed. Saving now
-  // replaces all previously persisted zones for the currently selected
-  // `videoName` by deleting existing DB rows and re-creating them.
-
   const saveConfiguration = async (silent = false) => {
     if (!fabricCanvas || !videoName) return;
     if (!silent) {
@@ -531,10 +510,6 @@ export function ZoneDrawingCanvas() {
     const canvasWidth = fabricCanvas.getWidth();
     const canvasHeight = fabricCanvas.getHeight();
 
-    // Calibration disabled — no BEV saved
-
-    // 2. Replace existing DB zones for this video: delete all saved zones
-    // for `videoName` first, then save every zone currently in the canvas.
     try {
       await deleteZonesForVideo(videoName);
     } catch (err) {
@@ -545,7 +520,6 @@ export function ZoneDrawingCanvas() {
       return;
     }
 
-    // Gather all zone objects from the canvas (include previously-saved ones too)
     const zoneObjects = objects.filter(
       (obj) =>
         (obj instanceof fabric.Path ||
@@ -577,9 +551,6 @@ export function ZoneDrawingCanvas() {
           const totalLength = svgPath.getTotalLength();
           for (let i = 0; i <= 100; i++) {
             const p = svgPath.getPointAtLength(totalLength * (i / 100));
-            // SVG path data is in path-local space centered on pathOffset.
-            // Subtract pathOffset so the point is relative to the object's origin,
-            // then apply the transform matrix to get canvas coordinates.
             const localPoint = new fabric.Point(
               p.x - pathOffset.x,
               p.y - pathOffset.y,
@@ -635,12 +606,11 @@ export function ZoneDrawingCanvas() {
         zone_type: (obj as any).zoneType || zoneType,
         dwell_threshold_seconds: 0,
         is_active: true,
-        // Don't include the old `zoneId` when sending the POST payload;
-        // the server will create new rows and return new ids.
         ui_shape_data: JSON.stringify(obj.toObject(["zoneType", "zoneName"])),
         flattened_coordinates: JSON.stringify(flattened),
       };
     });
+
     try {
       for (let i = 0; i < zonesToSave.length; i++) {
         const res = await fetch(`${API_URL}/zones`, {
@@ -650,7 +620,6 @@ export function ZoneDrawingCanvas() {
         });
         if (res.ok) {
           const saved = await res.json();
-          // Stamp the DB id back onto the canvas object so the UI reflects persistence
           (zoneObjects[i] as any).zoneId = saved.id;
         }
       }
@@ -673,7 +642,6 @@ export function ZoneDrawingCanvas() {
         deleteSelected();
       }
     };
-
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [fabricCanvas, isMonitoring]);
@@ -694,14 +662,11 @@ export function ZoneDrawingCanvas() {
     setActiveZoneBreaches(false);
 
     try {
-      // Ensure zones are persisted to DB before analysis runs
       await saveConfiguration(true);
-
       const result = await analyzeVideo(bgImage);
       setAnalysisResult(result);
       setIsMonitoring(true);
 
-      // Lock zones for monitoring
       fabricCanvas.getObjects().forEach((obj) => {
         obj.set({ selectable: false, evented: false });
       });
@@ -719,7 +684,7 @@ export function ZoneDrawingCanvas() {
 
   useEffect(() => {
     if (videoRef.current) {
-      videoRef.current.style.opacity = isMonitoring ? "1" : "0.8"; // Subtle hint that it's in config mode
+      videoRef.current.style.opacity = isMonitoring ? "1" : "0.8";
     }
   }, [isMonitoring]);
 
@@ -728,16 +693,16 @@ export function ZoneDrawingCanvas() {
 
     const fps = analysisResult.summary.fps || 30;
     const currentFrame = Math.floor(playbackTime * fps);
-    const window = fps / 1.5;
+    const windowSize = fps / 1.5;
 
     const activeThisFrame = analysisResult.reports.filter(
       (r) =>
         r.frame_index != null &&
-        Math.abs(r.frame_index - currentFrame) < window,
+        Math.abs(r.frame_index - currentFrame) < windowSize,
     );
 
     const activeZoneViolations = (analysisResult.zone_violations ?? []).filter(
-      (zv) => Math.abs(zv.frame_index - currentFrame) < window,
+      (zv) => Math.abs(zv.frame_index - currentFrame) < windowSize,
     );
 
     setCurrentViolations(activeThisFrame);
@@ -786,7 +751,6 @@ export function ZoneDrawingCanvas() {
             >
               Draw
             </ToolButton>
-            {/* Calibrate removed - BEV disabled */}
             <div className="w-px h-6 bg-zinc-800 mx-1" />
             <ToolButton
               active={false}
@@ -812,7 +776,6 @@ export function ZoneDrawingCanvas() {
                 >
                   <option value="RESTRICTED">RESTRICTED</option>
                   <option value="WALKWAY">WALKWAY</option>
-                  <option value="FORKLIFT_PATH">FORKLIFT_PATH</option>
                 </select>
               </div>
             )}
@@ -841,11 +804,6 @@ export function ZoneDrawingCanvas() {
                   !bgImage.type.startsWith("video/") ||
                   !hasSavedConfiguration ||
                   drawingActive
-                }
-                title={
-                  !hasSavedConfiguration
-                    ? "Save zones before starting monitoring"
-                    : undefined
                 }
                 className={`
                 px-6 py-1 rounded text-xs font-mono font-bold transition-all
@@ -884,7 +842,6 @@ export function ZoneDrawingCanvas() {
                 {isMonitoring ? "LIVE MONITORING" : "CONFIGURATION"}:{" "}
                 {videoName}
               </span>
-
               {isMonitoring && (
                 <div className="flex items-center gap-2">
                   <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
@@ -893,7 +850,6 @@ export function ZoneDrawingCanvas() {
                   </span>
                 </div>
               )}
-
               {!isMonitoring && (
                 <>
                   <input
@@ -955,12 +911,9 @@ export function ZoneDrawingCanvas() {
                     className="absolute inset-0 w-full h-full z-0"
                   />
                 ))}
-
-              {/* Isolated container for Fabric.js to avoid React reconciliation conflicts */}
               <div key="fabric-host" className="absolute inset-0 z-10">
                 <canvas ref={canvasRef} />
               </div>
-
               {isMonitoring && activeZoneBreaches && (
                 <div className="absolute top-4 left-4 z-20 animate-bounce">
                   <div className="bg-red-600 text-white text-[10px] font-bold px-3 py-1 rounded shadow-lg border border-red-400 uppercase tracking-widest">
@@ -979,10 +932,7 @@ export function ZoneDrawingCanvas() {
               <div className="text-[10px] font-mono text-zinc-500 space-y-4">
                 <p>1. Draw restricted zones using the DRAW tool.</p>
                 <p>2. Click SAVE ALL.</p>
-                <p>
-                  3. Click START MONITORING to run analysis and preview
-                  incursions.
-                </p>
+                <p>3. Click START MONITORING to run analysis.</p>
               </div>
             ) : (
               <div className="flex-1 overflow-y-auto space-y-2">
@@ -1039,7 +989,7 @@ function ToolButton({
     <button
       onClick={onClick}
       disabled={disabled}
-      className={`px-3 py-1 rounded text-xs font-mono border transition-colors ${
+      className={`px-3 py-1 rounded text-xs font-mono uppercase border transition-colors ${
         disabled ? "opacity-30 cursor-not-allowed" : ""
       } ${
         active
@@ -1047,7 +997,7 @@ function ToolButton({
           : "bg-zinc-950 border-zinc-800 text-zinc-400 hover:text-zinc-200"
       } ${className}`}
     >
-      {children.toString().toUpperCase()}
+      {children}
     </button>
   );
 }

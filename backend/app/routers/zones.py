@@ -3,9 +3,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.schemas.violation import ZoneViolation
-from app.schemas.zone import CameraCalibration, Zone
+from app.schemas.zone import Zone
 from app.services import ServiceNotFoundError, ServiceValidationError
-from app.services.camera_service import CameraService, get_camera_service
 from app.services.zone_service import ZoneService, get_zone_service
 from app.services.zone_violation_service import (
     ZoneViolationService,
@@ -67,28 +66,6 @@ async def remove_zone(
     except ServiceNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"status": "success"}
-
-
-@router.get("/calibration/{video_name}", response_model=CameraCalibration)
-async def fetch_calibration(
-    video_name: str,
-    service: Annotated[CameraService, Depends(get_camera_service)],
-) -> CameraCalibration:
-    try:
-        return service.get_calibration(video_name)
-    except ServiceNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@router.post("/calibration", response_model=CameraCalibration)
-async def update_calibration(
-    calibration: CameraCalibration,
-    service: Annotated[CameraService, Depends(get_camera_service)],
-) -> CameraCalibration:
-    try:
-        return service.save_calibration(calibration)
-    except ServiceValidationError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/zone-violations", response_model=list[ZoneViolation])

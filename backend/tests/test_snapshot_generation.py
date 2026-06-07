@@ -50,3 +50,26 @@ def test_save_violation_snapshot_does_not_mutate_source_frame(monkeypatch, tmp_p
     assert np.count_nonzero(first_image[:, :70]) > 0
     assert np.count_nonzero(second_image[:, :70]) == 0
     assert np.count_nonzero(second_image[:, 80:]) > 0
+
+
+def test_save_zone_snapshot_draws_polygon_boundary(monkeypatch, tmp_path):
+    import cv2
+
+    monkeypatch.setattr(ppe, "SNAPSHOT_DIR", tmp_path)
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+
+    filename = ppe._save_violation_snapshot(
+        frame=frame,
+        person=_person(1, BoundingBox(x1=40, y1=40, x2=60, y2=80)),
+        missing=["Entered Zone: Restricted Area"],
+        video_stem="factory",
+        frame_index=10,
+        polygon=[(100, 100), (900, 100), (900, 900), (100, 900)],
+        zone_type="RESTRICTED",
+    )
+
+    snapshot = cv2.imread(str(tmp_path / filename))
+    assert snapshot is not None
+    assert np.count_nonzero(frame) == 0
+    assert snapshot[10, 10, 2] > 0
+    assert snapshot[50, 20, 2] > 0

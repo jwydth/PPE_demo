@@ -181,8 +181,10 @@ def test_record_zone_violation_passes_zone_name_to_storage(
     )
 
     snapshot_path = tmp_path / "zone.jpg"
+    snapshot_kwargs = {}
 
-    def save_snapshot(**_kwargs):
+    def save_snapshot(**kwargs):
+        snapshot_kwargs.update(kwargs)
         snapshot_path.write_bytes(b"image-data")
         return snapshot_path.name
 
@@ -198,6 +200,8 @@ def test_record_zone_violation_passes_zone_name_to_storage(
 
     violation_service.persist_zone_violation.assert_called_once()
     persisted = violation_service.persist_zone_violation.call_args.kwargs
+    assert snapshot_kwargs["polygon"] == zone.poly
+    assert snapshot_kwargs["zone_type"] == "RESTRICTED"
     assert persisted["zone_name"] == "Restricted Area"
     assert persisted["zone_type"] == "RESTRICTED"
     assert persisted["video_name"] == "factory.mp4"

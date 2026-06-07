@@ -21,7 +21,6 @@ function formatDetectedTime(timestamp: string): string {
 const ZONE_TYPE_CONFIG: Record<ZoneType, { label: string; title: string; color: string; border: string }> = {
   RESTRICTED:    { label: "RESTRICTED ZONE",  title: "Restricted Zone Incursion", color: "text-red-300",    border: "border-red-500/30" },
   WALKWAY:       { label: "WALKWAY VIOLATION", title: "Left Walkway Boundary",     color: "text-blue-300",   border: "border-blue-500/30" },
-  FORKLIFT_PATH: { label: "FORKLIFT PATH",     title: "Forklift Path Incursion",   color: "text-yellow-300", border: "border-yellow-500/30" },
 };
 
 const DEFAULT_CONFIG = { label: "ZONE VIOLATION", title: "Zone Violation", color: "text-yellow-300", border: "border-yellow-500/30" };

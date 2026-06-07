@@ -18,7 +18,7 @@ class Zone(SQLModel, table=True):
     __tablename__ = "zones"
     __table_args__ = (
         CheckConstraint(
-            "zone_type IN ('RESTRICTED', 'WALKWAY', 'FORKLIFT_PATH')",
+            "zone_type IN ('RESTRICTED', 'WALKWAY')",
             name="ck_zones_zone_type",
         ),
         CheckConstraint(

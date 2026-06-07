@@ -4,7 +4,6 @@ from fastapi.testclient import TestClient
 from app.repositories.camera_repository import CameraRepository
 from app.repositories.zone_repository import ZoneRepository
 from app.routers import zones
-from app.services.camera_service import CameraService, get_camera_service
 from app.services.zone_service import ZoneService, get_zone_service
 
 
@@ -14,9 +13,6 @@ def _client(session) -> TestClient:
     app.dependency_overrides[get_zone_service] = lambda: ZoneService(
         ZoneRepository(session),
         CameraRepository(session),
-    )
-    app.dependency_overrides[get_camera_service] = lambda: CameraService(
-        CameraRepository(session)
     )
     return TestClient(app)
 
@@ -81,29 +77,3 @@ def test_delete_single_zone_preserves_response_and_404(session):
     assert client.delete(f"/zones/{zone_id}").json() == {"status": "success"}
     missing = client.delete(f"/zones/{zone_id}")
     assert missing.status_code == 404
-
-
-def test_calibration_uses_camera_and_preserves_api_shape(session):
-    client = _client(session)
-    payload = {
-        "video_name": "calibration.mp4",
-        "source_points": "[[0.1,0.2],[0.8,0.2],[0.8,0.9],[0.1,0.9]]",
-    }
-
-    saved = client.post("/calibration", json=payload)
-    assert saved.status_code == 200
-    assert saved.json() == payload
-
-    camera = CameraRepository(session).get_by_source_key("calibration.mp4")
-    assert camera is not None
-    assert camera.calibration_source_points == [
-        [0.1, 0.2],
-        [0.8, 0.2],
-        [0.8, 0.9],
-        [0.1, 0.9],
-    ]
-
-    loaded = client.get("/calibration/calibration.mp4")
-    assert loaded.status_code == 200
-    assert loaded.json() == payload
-    assert client.get("/calibration/missing.mp4").status_code == 404
