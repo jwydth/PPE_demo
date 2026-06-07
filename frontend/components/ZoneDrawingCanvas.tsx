@@ -7,6 +7,113 @@ import { Point2D, ZoneConfiguration, ZoneType } from "@/types/zone";
 import { analyzeVideo, deleteZonesForVideo, API_URL } from "@/lib/api";
 import { VideoProcessingResponse, ViolationReport } from "@/types/detection";
 
+// --- Fabric.js Polygon Editing Helpers ---
+const polygonPositionHandler = function (this: any, dim: any, finalMatrix: any, fabricObject: any) {
+  const x = fabricObject.points[this.pointIndex].x - fabricObject.pathOffset.x;
+  const y = fabricObject.points[this.pointIndex].y - fabricObject.pathOffset.y;
+  return fabric.util.transformPoint(
+    { x, y },
+    fabric.util.multiplyTransformMatrices(
+      fabricObject.canvas.viewportTransform,
+      fabricObject.calcTransformMatrix()
+    )
+  );
+};
+
+const actionHandler = function (
+  eventData: any,
+  transform: any,
+  x: number,
+  y: number,
+) {
+  const polygon = transform.target;
+  const canvas = polygon.canvas;
+
+  if (!canvas) return false;
+
+  // Use the pointer coordinates directly as they are in the canvas space
+  // and clamp them to ensure the mouse proposed position is within bounds.
+  const clampedX = Math.max(0, Math.min(x, canvas.getWidth()));
+  const clampedY = Math.max(0, Math.min(y, canvas.getHeight()));
+
+  const currentControl = polygon.controls[polygon.__corner];
+  const mouseLocalPosition = polygon.toLocalPoint(
+    new fabric.Point(clampedX, clampedY),
+    "center",
+    "center",
+  );
+  const polygonBaseSize = polygon._getNonTransformedDimensions();
+  const size = polygon._getTransformedDimensions(0, 0);
+  const finalPointPosition = {
+    x:
+      (mouseLocalPosition.x * polygonBaseSize.x) / size.x + polygon.pathOffset.x,
+    y:
+      (mouseLocalPosition.y * polygonBaseSize.y) / size.y + polygon.pathOffset.y,
+  };
+  polygon.points[currentControl.pointIndex] = finalPointPosition;
+  return true;
+};
+
+const anchorWrapper = function (anchorIndex: number, fn: any) {
+  return function (eventData: any, transform: any, x: number, y: number) {
+    const fabObj = transform.target;
+    const absolutePoint = fabric.util.transformPoint(
+      {
+        x: fabObj.points[anchorIndex].x - fabObj.pathOffset.x,
+        y: fabObj.points[anchorIndex].y - fabObj.pathOffset.y,
+      },
+      fabObj.calcTransformMatrix(),
+    );
+    const actionPerformed = fn(eventData, transform, x, y);
+    // @ts-ignore
+    fabObj._setPositionDimensions({});
+    const polygonBaseSize = fabObj._getNonTransformedDimensions();
+    const newX =
+      (fabObj.points[anchorIndex].x - fabObj.pathOffset.x) / polygonBaseSize.x;
+    const newY =
+      (fabObj.points[anchorIndex].y - fabObj.pathOffset.y) / polygonBaseSize.y;
+    fabObj.setPositionByOrigin(absolutePoint, newX + 0.5, newY + 0.5);
+
+    return actionPerformed;
+  };
+};
+
+const enablePolygonEditing = (poly: fabric.Polygon) => {
+  const points = poly.points || [];
+  const lastControl = points.length - 1;
+  poly.cornerStyle = 'circle';
+  poly.cornerColor = 'rgba(249, 115, 22, 0.8)';
+  poly.cornerStrokeColor = '#f97316';
+  poly.cornerSize = 8;
+  poly.transparentCorners = false;
+  poly.objectCaching = false;
+
+  poly.controls = points.reduce((acc: any, point: any, index: number) => {
+    // @ts-ignore
+    acc['p' + index] = new fabric.Control({
+      positionHandler: polygonPositionHandler,
+      actionHandler: anchorWrapper(index > 0 ? index - 1 : lastControl, actionHandler),
+      actionName: 'modifyPolygon',
+      // @ts-ignore
+      pointIndex: index,
+    });
+    return acc;
+  }, {});
+
+  (poly as any).isEditing = true;
+  poly.hasBorders = false;
+};
+
+const disablePolygonEditing = (poly: fabric.Polygon) => {
+  poly.controls = fabric.Object.prototype.controls;
+  poly.cornerStyle = 'rect';
+  poly.cornerColor = 'rgb(178,204,255)';
+  poly.hasBorders = true;
+  poly.objectCaching = true;
+  (poly as any).isEditing = false;
+};
+// ------------------------------------------
+
 type Tool = "select" | "draw" | "delete";
 
 export function ZoneDrawingCanvas() {
@@ -15,6 +122,10 @@ export function ZoneDrawingCanvas() {
   const changeMediaInputRef = useRef<HTMLInputElement>(null);
   const [fabricCanvas, setFabricCanvas] = useState<fabric.Canvas | null>(null);
   const [tool, setTool] = useState<Tool>("select");
+  const [selectedPolygon, setSelectedPolygon] = useState<fabric.Polygon | null>(
+    null,
+  );
+  const [isAddPointMode, setIsAddPointMode] = useState(false);
 
   const [zoneType, setZoneType] = useState<ZoneType>("RESTRICTED");
   const [bgImage, setBgImage] = useState<File | null>(null);
@@ -33,6 +144,7 @@ export function ZoneDrawingCanvas() {
   const [activeZoneBreaches, setActiveZoneBreaches] = useState(false);
   const [playbackTime, setPlaybackTime] = useState(0);
   const [hasSavedConfiguration, setHasSavedConfiguration] = useState(false);
+  const [isDirty, setIsDirty] = useState(false);
   const [saveStatus, setSaveStatus] = useState<
     "idle" | "saving" | "saved" | "failed"
   >("idle");
@@ -43,6 +155,7 @@ export function ZoneDrawingCanvas() {
   const [tempPath, setTempPath] = useState<fabric.Path | null>(null);
   const [activePoints, setActivePoints] = useState<fabric.Circle[]>([]);
 
+  const isLoadingZonesRef = useRef(false);
   const drawingActive = tool === "draw";
 
   // Broadcast drawing activity to the rest of the app so global UI can lock.
@@ -115,28 +228,69 @@ export function ZoneDrawingCanvas() {
 
   useEffect(() => {
     if (!bgImage || !fabricCanvas) return;
-    fabricCanvas.clear();
+    // @ts-ignore - check if internal context is still valid before clearing
+    if (fabricCanvas.getContext()) {
+      fabricCanvas.clear();
+    }
     zonesLoadedRef.current = null;
     setHasSavedConfiguration(false);
     setSaveStatus("idle");
+    setIsDirty(false);
   }, [bgImage, fabricCanvas]);
 
   useEffect(() => {
     if (!fabricCanvas) return;
 
     const markUnsaved = () => {
+      if (isLoadingZonesRef.current) return;
       setHasSavedConfiguration(false);
       setSaveStatus("idle");
+      setIsDirty(true);
     };
 
     fabricCanvas.on("object:added", markUnsaved);
     fabricCanvas.on("object:removed", markUnsaved);
     fabricCanvas.on("object:modified", markUnsaved);
 
+    const clampObject = (obj: fabric.Object) => {
+      if (!obj || !fabricCanvas) return;
+
+      obj.setCoords();
+      const br = obj.getBoundingRect();
+      const canvasWidth = fabricCanvas.getWidth();
+      const canvasHeight = fabricCanvas.getHeight();
+
+      let offsetX = 0;
+      let offsetY = 0;
+
+      if (br.left < 0) {
+        offsetX = -br.left;
+      } else if (br.left + br.width > canvasWidth) {
+        offsetX = canvasWidth - (br.left + br.width);
+      }
+
+      if (br.top < 0) {
+        offsetY = -br.top;
+      } else if (br.top + br.height > canvasHeight) {
+        offsetY = canvasHeight - (br.top + br.height);
+      }
+
+      if (offsetX !== 0 || offsetY !== 0) {
+        obj.left! += offsetX;
+        obj.top! += offsetY;
+        obj.setCoords();
+      }
+    };
+
+    fabricCanvas.on("object:moving", (e) => e.target && clampObject(e.target));
+    fabricCanvas.on("object:scaling", (e) => e.target && clampObject(e.target));
+
     return () => {
       fabricCanvas.off("object:added", markUnsaved);
       fabricCanvas.off("object:removed", markUnsaved);
       fabricCanvas.off("object:modified", markUnsaved);
+      fabricCanvas.off("object:moving");
+      fabricCanvas.off("object:scaling");
     };
   }, [fabricCanvas]);
 
@@ -155,9 +309,15 @@ export function ZoneDrawingCanvas() {
   };
 
   const loadZones = async (vName: string) => {
+    isLoadingZonesRef.current = true;
     try {
       const res = await fetch(`${API_URL}/zones/${vName}`);
-      if (!res.ok) return;
+      if (!res.ok) {
+        setHasSavedConfiguration(false);
+        setSaveStatus("idle");
+        setIsDirty(false);
+        return;
+      }
       const data: ZoneConfiguration[] = await res.json();
 
       if (fabricCanvas) {
@@ -191,10 +351,19 @@ export function ZoneDrawingCanvas() {
         if (data.length > 0) {
           setHasSavedConfiguration(true);
           setSaveStatus("saved");
+        } else {
+          setHasSavedConfiguration(false);
+          setSaveStatus("idle");
         }
+        setIsDirty(false);
       }
     } catch (err) {
       console.error("Failed to load zones", err);
+      setHasSavedConfiguration(false);
+      setSaveStatus("idle");
+      setIsDirty(false);
+    } finally {
+      isLoadingZonesRef.current = false;
     }
   };
 
@@ -341,12 +510,158 @@ export function ZoneDrawingCanvas() {
   useEffect(() => {
     if (!fabricCanvas) return;
     const isActivelyDrawing = tool === "draw" && points.length > 0;
-    fabricCanvas.selection = !isActivelyDrawing;
+    const lockObjects = isActivelyDrawing || isAddPointMode;
+
+    fabricCanvas.selection = !lockObjects;
     fabricCanvas.forEachObject((obj) => {
-      obj.selectable = !isActivelyDrawing;
-      obj.evented = !isActivelyDrawing;
+      obj.selectable = !lockObjects;
+      obj.evented = !lockObjects;
     });
-  }, [fabricCanvas, tool, points.length]);
+
+    if (isAddPointMode) {
+      fabricCanvas.defaultCursor = "crosshair";
+      fabricCanvas.hoverCursor = "crosshair";
+    } else {
+      fabricCanvas.defaultCursor = "default";
+      fabricCanvas.hoverCursor = "move";
+    }
+
+    fabricCanvas.requestRenderAll();
+  }, [fabricCanvas, tool, points.length, isAddPointMode]);
+
+  // Handle polygon vertex editing toggle on selection
+  useEffect(() => {
+    if (!fabricCanvas) return;
+
+    const handleSelection = (opt: fabric.IEvent) => {
+      const selected = opt.selected;
+
+      // Clean up previous editing states
+      fabricCanvas.getObjects().forEach((obj) => {
+        if (obj instanceof fabric.Polygon && (obj as any).isEditing) {
+          disablePolygonEditing(obj);
+        }
+      });
+
+      if (selected?.length === 1 && selected[0] instanceof fabric.Polygon) {
+        setSelectedPolygon(selected[0] as fabric.Polygon);
+        enablePolygonEditing(selected[0] as fabric.Polygon);
+      } else {
+        setSelectedPolygon(null);
+        setIsAddPointMode(false);
+      }
+      fabricCanvas.requestRenderAll();
+    };
+
+    fabricCanvas.on("selection:created", handleSelection);
+    fabricCanvas.on("selection:updated", handleSelection);
+    fabricCanvas.on("selection:cleared", () => {
+      fabricCanvas.getObjects().forEach((obj) => {
+        if (obj instanceof fabric.Polygon && (obj as any).isEditing) {
+          disablePolygonEditing(obj);
+        }
+      });
+      setSelectedPolygon(null);
+      setIsAddPointMode(false);
+      fabricCanvas.requestRenderAll();
+    });
+
+    return () => {
+      fabricCanvas.off("selection:created", handleSelection);
+      fabricCanvas.off("selection:updated", handleSelection);
+      fabricCanvas.off("selection:cleared");
+    };
+  }, [fabricCanvas]);
+
+  // Add Point Mode interaction logic
+  useEffect(() => {
+    if (!fabricCanvas || !isAddPointMode || !selectedPolygon) return;
+
+    const handleAddPointMouseDown = (opt: fabric.IEvent) => {
+      const pointer = fabricCanvas.getPointer(opt.e);
+      const mousePt = new fabric.Point(pointer.x, pointer.y);
+
+      const points = selectedPolygon.points || [];
+      const matrix = selectedPolygon.calcTransformMatrix();
+
+      // Transform all points to absolute coordinates for reliable distance checking
+      const absolutePoints = points.map((p) =>
+        fabric.util.transformPoint(
+          new fabric.Point(p.x - (selectedPolygon.pathOffset?.x || 0), p.y - (selectedPolygon.pathOffset?.y || 0)),
+          matrix,
+        ),
+      );
+
+      let bestIndex = -1;
+      let minDistance = Infinity;
+
+      // Find the closest edge in absolute space
+      for (let i = 0; i < absolutePoints.length; i++) {
+        const p1 = absolutePoints[i];
+        const p2 = absolutePoints[(i + 1) % absolutePoints.length];
+
+        const dist = distToSegment(mousePt, p1, p2);
+        if (dist < minDistance) {
+          minDistance = dist;
+          bestIndex = i + 1;
+        }
+      }
+
+      // 30px threshold in absolute space is very generous
+      if (bestIndex !== -1 && minDistance < 30) {
+        // Convert the absolute mouse click back to polygon's local coordinate system
+        const localMatrix = selectedPolygon.calcTransformMatrix();
+        const invertedMatrix = fabric.util.invertTransform(localMatrix);
+        const localMousePt = fabric.util.transformPoint(mousePt, invertedMatrix);
+
+        // Adjust for pathOffset which Fabric uses internally for points
+        const finalLocalPoint = {
+          x: localMousePt.x + (selectedPolygon.pathOffset?.x || 0),
+          y: localMousePt.y + (selectedPolygon.pathOffset?.y || 0),
+        };
+
+        const newPoints = [...points];
+        newPoints.splice(bestIndex, 0, finalLocalPoint);
+
+        selectedPolygon.set({ points: newPoints });
+        // @ts-ignore
+        selectedPolygon._setPositionDimensions({});
+        selectedPolygon.setCoords();
+
+        // Refresh editing controls
+        disablePolygonEditing(selectedPolygon);
+        enablePolygonEditing(selectedPolygon);
+
+        setIsDirty(true);
+        setIsAddPointMode(false);
+        fabricCanvas.requestRenderAll();
+      }
+    };
+
+    fabricCanvas.on("mouse:down", handleAddPointMouseDown);
+    fabricCanvas.defaultCursor = "crosshair";
+
+    return () => {
+      fabricCanvas.off("mouse:down", handleAddPointMouseDown);
+      fabricCanvas.defaultCursor = "default";
+    };
+  }, [fabricCanvas, isAddPointMode, selectedPolygon]);
+
+  // Distance from point to line segment helper
+  const distToSegment = (
+    p: fabric.Point,
+    v: Point2D,
+    w: Point2D,
+  ): number => {
+    const l2 = Math.pow(v.x - w.x, 2) + Math.pow(v.y - w.y, 2);
+    if (l2 === 0) return Math.sqrt(Math.pow(p.x - v.x, 2) + Math.pow(p.y - v.y, 2));
+    let t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
+    t = Math.max(0, Math.min(1, t));
+    return Math.sqrt(
+      Math.pow(p.x - (v.x + t * (w.x - v.x)), 2) +
+        Math.pow(p.y - (v.y + t * (w.y - v.y)), 2),
+    );
+  };
 
   const pointInPolygon = (point: Point2D, polygon: Point2D[]): boolean => {
     let inside = false;
@@ -478,16 +793,16 @@ export function ZoneDrawingCanvas() {
       return;
     }
 
-    const finalPathString = [...pathSegments, "z"].join(" ");
     const styles = getZoneStyles(zoneType);
-    const finalPath = new fabric.Path(finalPathString, {
+    const finalPolygon = new fabric.Polygon(points, {
       ...styles,
       strokeWidth: 2,
       selectable: true,
+      objectCaching: false,
     });
-    (finalPath as any).zoneType = zoneType;
+    (finalPolygon as any).zoneType = zoneType;
 
-    fabricCanvas.add(finalPath);
+    fabricCanvas.add(finalPolygon);
 
     activePoints.forEach((p) => fabricCanvas.remove(p));
     if (tempPath) fabricCanvas.remove(tempPath);
@@ -569,10 +884,12 @@ export function ZoneDrawingCanvas() {
           }
         }
       } else if (obj instanceof fabric.Polygon) {
+        const polygon = obj as fabric.Polygon;
+        const offset = polygon.pathOffset || { x: 0, y: 0 };
         flattened =
-          (obj as fabric.Polygon).points?.map((p) => {
+          polygon.points?.map((p) => {
             const transformedPoint = fabric.util.transformPoint(
-              new fabric.Point(p.x, p.y),
+              new fabric.Point(p.x - offset.x, p.y - offset.y),
               matrix,
             );
             return {
@@ -623,9 +940,10 @@ export function ZoneDrawingCanvas() {
           (zoneObjects[i] as any).zoneId = saved.id;
         }
       }
+      setHasSavedConfiguration(zonesToSave.length > 0);
+      setSaveStatus("saved");
+      setIsDirty(false);
       if (!silent) {
-        setHasSavedConfiguration(true);
-        setSaveStatus("saved");
         alert(`Saved ${zonesToSave.length} zones!`);
       }
     } catch (err) {
@@ -651,6 +969,19 @@ export function ZoneDrawingCanvas() {
     const activeObjects = fabricCanvas.getActiveObjects();
     fabricCanvas.discardActiveObject();
     activeObjects.forEach((obj) => fabricCanvas.remove(obj));
+  };
+
+  const discardChanges = async () => {
+    if (!fabricCanvas || !bgImage) return;
+
+    if (
+      window.confirm(
+        "Are you sure you want to discard all changes? This will revert to the latest saved version.",
+      )
+    ) {
+      fabricCanvas.clear();
+      await loadZones(bgImage.name);
+    }
   };
 
   const startMonitoring = async () => {
@@ -751,6 +1082,21 @@ export function ZoneDrawingCanvas() {
             >
               Draw
             </ToolButton>
+
+            {!isMonitoring && (
+              <div className="flex items-center ml-1">
+                <select
+                  value={zoneType}
+                  onChange={(e) => setZoneType(e.target.value as ZoneType)}
+                  disabled={drawingActive}
+                  className="bg-zinc-950 border border-zinc-800 text-[10px] font-mono px-2 py-1 rounded text-zinc-300 focus:outline-none focus:border-orange-500/50 h-[26px]"
+                >
+                  <option value="RESTRICTED">RESTRICTED</option>
+                  <option value="WALKWAY">WALKWAY</option>
+                </select>
+              </div>
+            )}
+
             <div className="w-px h-6 bg-zinc-800 mx-1" />
             <ToolButton
               active={false}
@@ -760,27 +1106,30 @@ export function ZoneDrawingCanvas() {
             >
               Delete
             </ToolButton>
+
+            {!isMonitoring && selectedPolygon && (
+              <ToolButton
+                active={isAddPointMode}
+                onClick={() => setIsAddPointMode(!isAddPointMode)}
+                className="border-orange-500/50 text-orange-400 hover:bg-orange-500/10 ml-2"
+              >
+                {isAddPointMode ? "Click on Edge" : "Add Point"}
+              </ToolButton>
+            )}
           </div>
 
           <div className="flex gap-4 items-center">
-            {!isMonitoring && (
-              <div className="flex gap-2 items-center">
-                <span className="text-[10px] font-mono text-zinc-500 uppercase">
-                  Zone Type:
-                </span>
-                <select
-                  value={zoneType}
-                  onChange={(e) => setZoneType(e.target.value as ZoneType)}
-                  disabled={drawingActive}
-                  className="bg-zinc-950 border border-zinc-800 text-xs font-mono px-2 py-1 rounded text-zinc-300 focus:outline-none focus:border-orange-500/50"
-                >
-                  <option value="RESTRICTED">RESTRICTED</option>
-                  <option value="WALKWAY">WALKWAY</option>
-                </select>
-              </div>
-            )}
-
             <div className="flex gap-2">
+              {isDirty && !isMonitoring && (
+                <ToolButton
+                  active={false}
+                  onClick={discardChanges}
+                  className="border-none bg-zinc-800 hover:bg-red-900/40 text-zinc-400 hover:text-red-400 px-4"
+                >
+                  Discard Changes
+                </ToolButton>
+              )}
+
               <ToolButton
                 active={false}
                 onClick={() => saveConfiguration(false)}
@@ -791,7 +1140,7 @@ export function ZoneDrawingCanvas() {
                   ? "Saving..."
                   : saveStatus === "saved"
                     ? "Saved ✓"
-                    : "Save Zones"}
+                    : "Save Changes"}
               </ToolButton>
 
               <button
