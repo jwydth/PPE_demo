@@ -17,6 +17,8 @@ from app.schemas.detection import (
     EquipmentStatus,
     PersonResult,
     Summary,
+    TrackingOverlay,
+    TrackingOverlayFrame,
     VideoProcessingResponse,
     VideoSummary,
 )
@@ -202,6 +204,9 @@ class PPEDetector:
         confirmed_aspect_ratios: list[float] = []
         candidate_violations = 0
         processed_frames = 0
+        frame_width: int | None = None
+        frame_height: int | None = None
+        tracking_frames: list[TrackingOverlayFrame] = []
 
         # Load zones
         zones = load_zones(video_name)
@@ -225,6 +230,7 @@ class PPEDetector:
             frame = result.orig_img.copy()
             frame_height, frame_width = frame.shape[:2]
             used_worker_ids: set[int] = set()
+            overlay_person_ids: set[tuple[str, int]] = set()
 
             for person in response.persons:
                 decision = _update_worker_status(
@@ -238,6 +244,14 @@ class PPEDetector:
                 )
                 worker = decision["worker"]
                 candidate_violations += int(decision["candidate"])
+                _append_tracking_overlay_frame(
+                    tracking_frames=tracking_frames,
+                    seen_person_ids=overlay_person_ids,
+                    person=person,
+                    decision=decision,
+                    frame_index=frame_index,
+                    fps=fps,
+                )
 
                 # Check Zone Incursions
                 if zones:
@@ -328,6 +342,13 @@ class PPEDetector:
             ),
             reports=reports,
             zone_violations=zone_violations_list,
+            tracking_overlay=TrackingOverlay(
+                fps=round(fps, 2),
+                stride=stride,
+                frame_width=frame_width,
+                frame_height=frame_height,
+                frames=tracking_frames,
+            ),
         )
 
     def _mock_predict(self, image: Image.Image) -> DetectionResponse:
@@ -368,6 +389,9 @@ class PPEDetector:
         workers: list[WorkerState] = []
         confirmed_aspect_ratios: list[float] = []
         candidate_violations = 0
+        frame_width: int | None = None
+        frame_height: int | None = None
+        tracking_frames: list[TrackingOverlayFrame] = []
 
         while True:
             ok, frame = cap.read()
@@ -382,6 +406,7 @@ class PPEDetector:
             response = self._mock_predict(Image.fromarray(rgb))
             frame_height, frame_width = frame.shape[:2]
             used_worker_ids: set[int] = set()
+            overlay_person_ids: set[tuple[str, int]] = set()
 
             for person in response.persons:
                 track_id = person.person_id
@@ -396,6 +421,14 @@ class PPEDetector:
                     used_worker_ids=used_worker_ids,
                 )
                 candidate_violations += int(decision["candidate"])
+                _append_tracking_overlay_frame(
+                    tracking_frames=tracking_frames,
+                    seen_person_ids=overlay_person_ids,
+                    person=person,
+                    decision=decision,
+                    frame_index=frame_index,
+                    fps=fps,
+                )
                 missing_to_report = decision["missing_to_report"]
                 if not missing_to_report:
                     continue
@@ -430,7 +463,63 @@ class PPEDetector:
                 inference_ms=round(elapsed_ms, 2),
             ),
             reports=reports,
+            tracking_overlay=TrackingOverlay(
+                fps=round(fps, 2),
+                stride=stride,
+                frame_width=frame_width,
+                frame_height=frame_height,
+                frames=tracking_frames,
+            ),
         )
+
+
+def _append_tracking_overlay_frame(
+    *,
+    tracking_frames: list[TrackingOverlayFrame],
+    seen_person_ids: set[tuple[str, int]],
+    person: PersonResult,
+    decision: dict,
+    frame_index: int,
+    fps: float,
+) -> None:
+    person_key = (
+        ("track", person.track_id)
+        if person.track_id is not None
+        else ("person", person.person_id)
+    )
+    if person_key in seen_person_ids:
+        return
+    seen_person_ids.add(person_key)
+
+    missing_equipment = [
+        equipment.label
+        for equipment in person.equipment
+        if equipment.status == "violation"
+    ]
+    worker = decision.get("worker")
+    worker_status = getattr(worker, "status", "unknown")
+    if decision.get("unknown") or worker_status == "unknown":
+        status = "unknown"
+    elif missing_equipment:
+        status = "violation"
+    elif person.compliant:
+        status = "compliant"
+    else:
+        status = "unknown"
+
+    tracking_frames.append(
+        TrackingOverlayFrame(
+            frame_index=frame_index,
+            time_seconds=frame_index / fps if fps > 0 else 0.0,
+            track_id=person.track_id,
+            person_id=person.person_id,
+            bbox=person.bbox,
+            confidence=person.confidence,
+            compliant=person.compliant,
+            missing_equipment=missing_equipment,
+            status=status,
+        )
+    )
 
 
 def _update_worker_status(

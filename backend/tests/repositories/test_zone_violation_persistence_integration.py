@@ -12,7 +12,13 @@ from app.repositories.camera_repository import CameraRepository
 from app.repositories.zone_repository import ZoneRepository
 from app.repositories.zone_violation_repository import ZoneViolationRepository
 from app.routers import detection, zones
-from app.schemas.detection import VideoProcessingResponse, VideoSummary
+from app.schemas.detection import (
+    BoundingBox,
+    TrackingOverlay,
+    TrackingOverlayFrame,
+    VideoProcessingResponse,
+    VideoSummary,
+)
 from app.schemas.violation import ZoneViolation
 from app.services.zone_violation_service import (
     ZoneViolationService,
@@ -207,6 +213,25 @@ def test_predict_video_returns_zone_violation_response(monkeypatch, tmp_path):
                 snapshot_path="http://minio/zone-evidence",
             )
         ],
+        tracking_overlay=TrackingOverlay(
+            fps=25,
+            stride=1,
+            frame_width=1920,
+            frame_height=1080,
+            frames=[
+                TrackingOverlayFrame(
+                    frame_index=20,
+                    time_seconds=0.8,
+                    track_id=7,
+                    person_id=1,
+                    bbox=BoundingBox(x1=10, y1=20, x2=110, y2=220),
+                    confidence=0.95,
+                    compliant=False,
+                    missing_equipment=["Vest"],
+                    status="violation",
+                )
+            ],
+        ),
     )
     monkeypatch.setattr(
         detection._detector,
@@ -225,6 +250,19 @@ def test_predict_video_returns_zone_violation_response(monkeypatch, tmp_path):
         )
 
     assert result.status_code == 200
-    assert result.json()["zone_violations"][0]["zone_name"] == (
+    body = result.json()
+    assert {"summary", "reports", "zone_violations", "tracking_overlay"} <= body.keys()
+    assert body["zone_violations"][0]["zone_name"] == (
         "Restricted Area"
     )
+    overlay_frame = body["tracking_overlay"]["frames"][0]
+    assert overlay_frame["frame_index"] == 20
+    assert overlay_frame["time_seconds"] == 0.8
+    assert overlay_frame["track_id"] == 7
+    assert overlay_frame["person_id"] == 1
+    assert overlay_frame["bbox"] == {
+        "x1": 10.0,
+        "y1": 20.0,
+        "x2": 110.0,
+        "y2": 220.0,
+    }

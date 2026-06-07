@@ -61,7 +61,28 @@ class VideoSummary(BaseModel):
     inference_ms: float
 
 
+class TrackingOverlayFrame(BaseModel):
+    frame_index: int
+    time_seconds: float
+    track_id: int | None
+    person_id: int | None
+    bbox: BoundingBox
+    confidence: float
+    compliant: bool
+    missing_equipment: list[str]
+    status: Literal["compliant", "violation", "unknown"]
+
+
+class TrackingOverlay(BaseModel):
+    fps: float
+    stride: int
+    frame_width: int | None
+    frame_height: int | None
+    frames: list[TrackingOverlayFrame]
+
+
 class VideoProcessingResponse(BaseModel):
     summary: VideoSummary
     reports: List[ViolationReport]
     zone_violations: List[ZoneViolation] = []
+    tracking_overlay: TrackingOverlay | None = None
