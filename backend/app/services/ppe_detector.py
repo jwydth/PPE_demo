@@ -26,6 +26,7 @@ from app.services.violation_store import (
     save_violation,
 )
 from app.services.zone_service import (
+    COORD_SCALE,
     load_zones,
     get_person_foot_point,
     check_zone_incursion,
@@ -197,7 +198,7 @@ class PPEDetector:
         processed_frames = 0
 
         # Load zones
-        bev_zones = load_zones(video_name)
+        zones = load_zones(video_name)
 
         results = self.model.track(
             source=str(video_path),
@@ -233,12 +234,12 @@ class PPEDetector:
                 candidate_violations += int(decision["candidate"])
 
                 # Check Zone Incursions
-                if bev_zones:
+                if zones:
                     test_point = get_person_foot_point(person, frame_width, frame_height)
-                    incursion_zones = check_zone_incursion(bev_zones, test_point)
+                    incursion_zones = check_zone_incursion(zones, test_point)
                     incursion_zone_ids = {z.zone_id for z in incursion_zones}
 
-                    for zone in bev_zones:
+                    for zone in zones:
                         in_zone = zone.zone_id in incursion_zone_ids
 
                         if zone.zone_type == "WALKWAY":
@@ -261,7 +262,7 @@ class PPEDetector:
                                     if zv:
                                         zone_violations_list.append(zv)
                         else:
-                            # RESTRICTED / FORKLIFT_PATH: violation when person is inside
+                            # RESTRICTED: violation when person is inside
                             if in_zone:
                                 worker.zone_dwell[zone.zone_id] = worker.zone_dwell.get(zone.zone_id, 0) + (stride / fps)
                                 if worker.zone_dwell[zone.zone_id] > zone.threshold and zone.zone_id not in worker.reported_zones:
@@ -1090,6 +1091,8 @@ def _save_violation_snapshot(
     missing: list[str],
     video_stem: str,
     frame_index: int,
+    polygon: list[tuple[float, float]] | None = None,
+    zone_type: str | None = None,
 ) -> str:
     import cv2
 
@@ -1099,11 +1102,38 @@ def _save_violation_snapshot(
     filename = f"{safe_stem}_frame_{frame_index}_track_{track_label}_{int(time.time() * 1000)}.jpg"
     path = SNAPSHOT_DIR / filename
 
+    snapshot = frame.copy()
+    frame_height, frame_width = snapshot.shape[:2]
+
+    # Draw Zone Polygon if provided
+    if polygon:
+        # Determine color based on zone type (BGR format for OpenCV)
+        # Walkway: Green (0, 255, 0), Restricted: Red (0, 0, 255)
+        color = (34, 197, 94) if zone_type == "WALKWAY" else (0, 0, 255)
+        
+        # Polygon points are scaled to COORD_SCALE (1000)
+        pts = np.array(
+            [
+                [int(p[0] * frame_width / COORD_SCALE), int(p[1] * frame_height / COORD_SCALE)]
+                for p in polygon
+            ],
+            np.int32,
+        )
+        pts = pts.reshape((-1, 1, 2))
+
+        # Draw semi-transparent fill
+        overlay = snapshot.copy()
+        cv2.fillPoly(overlay, [pts], color=color)
+        alpha = 0.3  # Transparency factor
+        cv2.addWeighted(overlay, alpha, snapshot, 1 - alpha, 0, snapshot)
+
+        # Draw solid border
+        cv2.polylines(snapshot, [pts], isClosed=True, color=color, thickness=2)
+
     x1 = int(max(0, person.bbox.x1))
     y1 = int(max(0, person.bbox.y1))
     x2 = int(max(0, person.bbox.x2))
     y2 = int(max(0, person.bbox.y2))
-    snapshot = frame.copy()
     cv2.rectangle(snapshot, (x1, y1), (x2, y2), (0, 0, 255), 3)
     cv2.putText(
         snapshot,

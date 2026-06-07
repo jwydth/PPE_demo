@@ -8,13 +8,13 @@ You are an expert full-stack engineer. We are building the "Manual Zone Configur
 - `id`: INTEGER PRIMARY KEY AUTOINCREMENT
 - `video_name`: TEXT (Used as camera_id, Indexed)
 - `zone_name`: TEXT
-- `zone_type`: TEXT (Enum: 'RESTRICTED', 'WALKWAY', 'FORKLIFT_PATH')
+- `zone_type`: TEXT (Enum: 'RESTRICTED', 'WALKWAY')
 - `dwell_threshold_seconds`: INTEGER (default=0)
 - `is_active`: BOOLEAN (default=1)
 - `ui_shape_data`: TEXT (JSON string storing Fabric.js vector metadata: center, radii, path commands)
 - `flattened_coordinates`: TEXT (JSON string storing normalized 2D array [[x1, y1], [x2, y2], ...] from 0.0 to 1.0)
 
-### `zone_violations` table (New):
+### `zone_violations` table:
 - `id`: INTEGER PRIMARY KEY AUTOINCREMENT
 - `zone_id`: INTEGER (FK to zones.id)
 - `track_id`: INTEGER
@@ -26,7 +26,7 @@ You are an expert full-stack engineer. We are building the "Manual Zone Configur
 ## 2. TYPESCRIPT / NEXT.JS INTERFACES
 Define matching TypeScript types in `frontend/types/zone.ts`:
 - `ShapeType`: ('polygon' | 'circle' | 'ellipse' | 'freeform')
-- `ZoneType`: ('RESTRICTED' | 'WALKWAY' | 'FORKLIFT_PATH')
+- `ZoneType`: ('RESTRICTED' | 'WALKWAY')
 - `Point2D`: { x: number; y: number }
 - `ZoneConfiguration`: (matching the `zones` table schema)
 
@@ -52,7 +52,6 @@ Implement `ZoneDrawingCanvas.tsx` using `fabric` (v5+).
 ## 3. VISUAL RULES
 - **RESTRICTED:** Semi-transparent Red fill, solid Red border.
 - **WALKWAY:** Semi-transparent Green fill, solid Green border.
-- **FORKLIFT_PATH:** Semi-transparent Yellow fill, solid Yellow border.
 - **INACTIVE:** No fill, Grey dashed border.
 
 ---
@@ -73,33 +72,21 @@ Implement `/api/zones` router in `backend/app/routers/zones.py`.
 
 ---
 
-# Part 4: Incursion Engine & Bird-Eye View (BEV) (Updated)
+# Part 4: Incursion Engine (Updated)
 
-## 1. BEV CALIBRATION SYSTEM
-- **Database Schema**: Add `camera_calibrations` table.
-    - `video_name`: TEXT PRIMARY KEY
-    - `source_points`: TEXT (JSON string of 4 normalized `[x, y]` image points)
-- **Frontend Integration**:
-    - Add "Calibration" mode to `ZoneDrawingCanvas.tsx`.
-    - User selects 4 ground points representing a known rectangle.
-    - Persist via `POST /api/calibration`.
+## 1. SPATIAL ANALYSIS UTILITIES
+- `backend/app/services/spatial.py`:
+    - `is_point_in_polygon(point, polygon)`: Uses `cv2.pointPolygonTest`.
 
-## 2. SPATIAL TRANSFORMATION UTILITIES
-- Create `backend/app/services/spatial.py`:
-    - `compute_homography(source_points)`: Returns matrix mapping to a 1000x1000 BEV square.
-    - `transform_point(matrix, x, y)`: Uses `cv2.perspectiveTransform`.
-    - `transform_zone(matrix, flattened_coords)`: Transforms zone boundaries to BEV space.
-
-## 3. INCURSION ENGINE (`PPEDetector`)
+## 2. INCURSION ENGINE (`PPEDetector`)
 - **Worker State Extension**:
     - `zone_dwell: dict[int, float]` (track_id -> zone_id -> dwell_time).
 - **Inference Loop Logic**:
-    1. Calculate "Foot Point" (bottom-center of person bbox).
-    2. Transform Foot Point to BEV using homography matrix.
-    3. Test if BEV Foot Point is inside BEV Zone Polygon (`cv2.pointPolygonTest`).
-    4. Accumulate dwell time and trigger `ZoneViolation` when `dwell > threshold`.
+    1. Calculate "Foot Point" (bottom-center of person bbox) and normalize to 1000x1000.
+    2. Test if Foot Point is inside Zone Polygon (`cv2.pointPolygonTest`).
+    3. Accumulate dwell time and trigger `ZoneViolation` when `dwell > threshold`.
 
-## 4. REPORTING & VISUALIZATION
+## 3. REPORTING & VISUALIZATION
 - Implement `save_zone_violation` in `violation_store.py`.
-- Update Frontend to display Zone Violations in the unified history panel.
-
+- Update Frontend to display Zone Violations in the history panel.
+- **Evidence Snapshots**: Draw the breached zone polygon on the violation snapshot for visual proof.

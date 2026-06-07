@@ -1,12 +1,10 @@
 from fastapi import APIRouter, HTTPException
-from app.models.schemas import CameraCalibration, Zone, ZoneViolation
+from app.models.schemas import Zone, ZoneViolation
 from app.services.violation_store import (
     delete_zone,
     delete_zones_by_video,
-    get_calibration,
     list_zone_violations,
     list_zones,
-    save_calibration,
     save_zone,
     update_zone,
 )
@@ -45,19 +43,6 @@ async def remove_zone(zone_id: int):
     if not success:
         raise HTTPException(status_code=404, detail=f"Zone {zone_id} not found")
     return {"status": "success"}
-
-
-@router.get("/calibration/{video_name}", response_model=CameraCalibration)
-async def fetch_calibration(video_name: str) -> CameraCalibration:
-    calib = get_calibration(video_name)
-    if not calib:
-        raise HTTPException(status_code=404, detail="Calibration not found")
-    return calib
-
-
-@router.post("/calibration", response_model=CameraCalibration)
-async def update_calibration(calibration: CameraCalibration) -> CameraCalibration:
-    return save_calibration(calibration)
 
 
 @router.get("/zone-violations", response_model=list[ZoneViolation])

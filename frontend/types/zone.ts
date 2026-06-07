@@ -1,5 +1,5 @@
 export type ShapeType = 'polygon' | 'circle' | 'ellipse' | 'freeform';
-export type ZoneType = 'RESTRICTED' | 'WALKWAY' | 'FORKLIFT_PATH';
+export type ZoneType = 'RESTRICTED' | 'WALKWAY';
 
 export interface Point2D {
   x: number;
@@ -27,9 +27,4 @@ export interface ZoneViolation {
   video_name: string;
   frame_index: number;
   snapshot_path?: string;
-}
-
-export interface CameraCalibration {
-  video_name: string;
-  source_points: string; // JSON string of 4 points
 }

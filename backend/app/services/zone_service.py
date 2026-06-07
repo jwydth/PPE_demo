@@ -93,6 +93,8 @@ def record_zone_violation(
         missing=[label],
         video_stem=Path(video_name).stem,
         frame_index=frame_index,
+        polygon=zone.poly,
+        zone_type=zone.zone_type,
     )
 
     violation = ZoneViolation(

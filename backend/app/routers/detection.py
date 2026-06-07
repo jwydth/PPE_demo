@@ -70,7 +70,11 @@ async def predict_video(file: UploadFile = File(...)) -> VideoProcessingResponse
         raise HTTPException(status_code=400, detail=str(exc))
     finally:
         if tmp_path is not None and tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except PermissionError:
+                # On Windows, file might still be locked by inference engine if an error occurred.
+                pass
 
 
 @router.get("/violations", response_model=list[ViolationReport])

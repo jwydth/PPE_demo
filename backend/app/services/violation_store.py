@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import BACKEND_DIR, settings
-from app.models.schemas import CameraCalibration, ViolationReport, Zone, ZoneViolation
+from app.models.schemas import ViolationReport, Zone, ZoneViolation
 
 
 def _resolve_backend_path(value: str) -> Path:
@@ -71,14 +71,6 @@ def init_db() -> None:
                 conn.execute(f"ALTER TABLE zone_violations ADD COLUMN {col} {col_type}")
             except Exception:
                 pass
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS camera_calibrations (
-                video_name TEXT PRIMARY KEY,
-                source_points TEXT NOT NULL
-            )
-            """
-        )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_violations_timestamp ON violations(timestamp)"
         )
@@ -334,35 +326,6 @@ def _snapshot_url(snapshot_filename: str | None) -> str | None:
     if not snapshot_filename:
         return None
     return f"/snapshots/{snapshot_filename}"
-
-
-def save_calibration(calibration: CameraCalibration) -> CameraCalibration:
-    init_db()
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            """
-            INSERT INTO camera_calibrations (video_name, source_points)
-            VALUES (?, ?)
-            ON CONFLICT(video_name) DO UPDATE SET source_points = excluded.source_points
-            """,
-            (calibration.video_name, calibration.source_points),
-        )
-        conn.commit()
-    return calibration
-
-
-def get_calibration(video_name: str) -> CameraCalibration | None:
-    init_db()
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT * FROM camera_calibrations WHERE video_name = ?", (video_name,)
-        ).fetchone()
-        if row:
-            return CameraCalibration(
-                video_name=row["video_name"], source_points=row["source_points"]
-            )
-    return None
 
 
 def save_zone_violation(violation: ZoneViolation) -> ZoneViolation:
