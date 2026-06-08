@@ -1,244 +1,160 @@
-# De Heus PPE Safety Monitor
+# Smart Factory Safety Monitoring System
 
-A smart-factory computer-vision system that scans factory floor images for Personal Protective Equipment (PPE) compliance. The backend is a FastAPI service that wraps a YOLOv8 inference engine; the frontend is a Next.js 14 App Router application with a drag-and-drop upload interface, real-time bounding-box overlay drawn on an HTML canvas, per-detection confidence bars, and a summary dashboard. The system ships fully functional in **mock mode** — it returns realistic simulated detections so the entire UI can be developed and tested before the trained model exists. Swapping in the real model requires dropping one `.pt` file into a folder and setting one environment variable.
+FastAPI + SQLModel backend and Next.js frontend for PPE compliance and zone
+incursion monitoring.
 
----
+The current local development stack uses:
 
-## Repository structure
+- PostgreSQL for structured data
+- MinIO for evidence snapshots
+- FastAPI for detection, zone configuration, health checks, and incident APIs
+- Next.js for image/video upload, zone drawing, tracking overlays, and history
 
-```
-de-heus-ppe-monitor/
-├── backend/
-│   ├── app/
-│   │   ├── main.py                  FastAPI entry point, CORS, router mount
-│   │   ├── routers/
-│   │   │   └── detection.py         POST /predict — accepts multipart image
-│   │   ├── services/
-│   │   │   └── ppe_detector.py      PPEDetector class (real + mock inference)
-│   │   ├── models/
-│   │   │   └── schemas.py           Pydantic request/response schemas
-│   │   └── core/
-│   │       └── config.py            pydantic-settings: MODEL_PATH, thresholds
-│   ├── weights/
-│   │   ├── .gitkeep
-│   │   └── ppe_v1.pt                YOLOv8 trained weights
-│   ├── requirements.txt
-│   ├── .env.example
-│   └── Dockerfile
-├── frontend/
-│   ├── app/
-│   │   ├── page.tsx                 Main page — upload → inference → results
-│   │   ├── layout.tsx               IBM Plex fonts, metadata
-│   │   └── globals.css              Tailwind base + scrollbar styles
-│   ├── components/
-│   │   ├── UploadZone.tsx           Drag-and-drop + click file selector
-│   │   ├── BoundingBoxCanvas.tsx    Canvas overlay: corner-accent boxes + labels
-│   │   ├── ResultsPanel.tsx         Summary stats + scrollable detection list
-│   │   └── StatusBadge.tsx          COMPLIANT / VIOLATION DETECTED pill
-│   ├── lib/
-│   │   └── api.ts                   analyzeImage() — typed fetch to /predict
-│   ├── types/
-│   │   └── detection.ts             TypeScript interfaces (mirrors Pydantic)
-│   ├── next.config.ts
-│   ├── tailwind.config.ts
-│   ├── postcss.config.js
-│   ├── tsconfig.json
-│   ├── package.json
-│   └── .env.local.example
-├── .gitignore
-└── README.md
+## Quick Start
+
+Run these commands from PowerShell.
+
+### 1. Start PostgreSQL and MinIO
+
+```powershell
+cd C:\path\to\PPE_demo
+docker compose up -d
+docker compose ps
 ```
 
----
+Wait until `postgres` shows `healthy`.
 
-## Backend setup
+### 2. Start the backend
 
-```bash
+```powershell
 cd backend
-
-# 1. Create and activate a virtual environment
 python -m venv .venv
-# On Windows:
-.venv\Scripts\activate
-# On macOS/Linux:
-source .venv/bin/activate
-
-# 2. Install dependencies
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 pip install -r requirements.txt
-
-# 3. Copy and configure environment
-cp .env.example .env
-
-# 4. Start the server
-uvicorn app.main:app --reload --port 8000
+Copy-Item .env.example .env
+python -m app.db.init_db
+python -m uvicorn app.main:app --reload --port 8000
 ```
 
-You can also start the backend from the repository root without import-path issues:
+Backend URLs:
 
-```bash
-uvicorn app.main:app --app-dir backend --reload --port 8000
-```
+- API: `http://localhost:8000`
+- Swagger docs: `http://localhost:8000/docs`
+- Health: `http://localhost:8000/health`
+- PostgreSQL health: `http://localhost:8000/health/db`
+- MinIO health: `http://localhost:8000/health/storage`
 
-The API will be live at `http://localhost:8000`.  
-Interactive docs: `http://localhost:8000/docs`
+### 3. Start the frontend
 
-### NVIDIA CUDA setup
+Open another PowerShell terminal:
 
-The backend defaults to `INFERENCE_DEVICE=auto`. In auto mode it uses the first
-CUDA GPU when PyTorch can access one; otherwise it falls back to CPU. To force a
-device, set one of these values in `backend/.env`:
-
-```env
-INFERENCE_DEVICE=auto
-INFERENCE_DEVICE=cpu
-INFERENCE_DEVICE=cuda
-INFERENCE_DEVICE=cuda:0
-INFERENCE_DEVICE=0
-```
-
-For a CUDA-enabled local install, install the CUDA PyTorch wheel before the
-normal backend requirements:
-
-```bash
-cd backend
-.venv\Scripts\activate  # Windows PowerShell/cmd
-
-pip install --upgrade pip
-pip install -r requirements-cuda-cu132.txt
-pip install -r requirements.txt
-```
-
-If your GPU or driver needs a different PyTorch CUDA build, generate the exact
-command from the official selector: https://pytorch.org/get-started/locally/
-
-Verify that PyTorch can see the GPU:
-
-```bash
-python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU only')"
-```
-
-When `torch.cuda.is_available()` prints `True`, image and video inference will
-run on CUDA with `INFERENCE_DEVICE=auto`.
-
----
-
-## Frontend setup
-
-```bash
-cd frontend
-
-# 1. Install dependencies
+```powershell
+cd C:\path\to\PPE_demo\frontend
 npm install
-
-# 2. Copy and configure environment
-cp .env.local.example .env.local
-
-# 3. Start the dev server
+Copy-Item .env.local.example .env.local
 npm run dev
 ```
 
-The UI will be live at `http://localhost:3000`.
+Frontend URL:
 
----
+- `http://localhost:3000`
 
-## API contract
+## First Data Flow
 
-`POST /predict`  
-Content-Type: `multipart/form-data`  
-Field: `file` (JPEG / PNG / WEBP / BMP)
+No manual database seed is required for normal local use.
 
-**Response — `200 OK`**
+The first time you save zones from the frontend, the backend automatically
+creates:
 
-```json
-{
-  "detections": [
-    {
-      "id": 0,
-      "label": "Person 1",
-      "category": "compliant",
-      "confidence": 0.96,
-      "bbox": {
-        "x1": 36.0,
-        "y1": 14.4,
-        "x2": 288.0,
-        "y2": 705.6
-      },
-      "color": "#f97316"
-    }
-  ],
-  "persons": [
-    {
-      "person_id": 1,
-      "bbox": {
-        "x1": 36.0,
-        "y1": 14.4,
-        "x2": 288.0,
-        "y2": 705.6
-      },
-      "confidence": 0.96,
-      "equipment": [
-        {
-          "label": "Helmet",
-          "status": "compliant",
-          "confidence": 0.94,
-          "bbox": {
-            "x1": 72.0,
-            "y1": 21.6,
-            "x2": 252.0,
-            "y2": 144.0
-          }
-        }
-      ],
-      "compliant": true
-    }
-  ],
-  "summary": {
-    "total_persons": 2,
-    "compliant": 1,
-    "violations": 1,
-    "inference_ms": 63.4
-  }
-}
-```
+- default factory
+- camera row for the uploaded video/source name
+- physical zone rows
+- camera-zone-view rows
 
-**Notes:**
-- `bbox` coordinates are **absolute pixels** relative to the uploaded image dimensions.
-- `color` is a hex string: `#22c55e` (compliant / green) or `#ef4444` (violation / red).
-- `confidence` is a float in `[0, 1]`.
-- `inference_ms` includes PIL decode + model forward pass.
-- Errors return standard FastAPI JSON: `{ "detail": "..." }`.
+The first time video detection finds incidents, the backend automatically
+creates:
 
-**Health check**
+- PPE violation rows
+- PPE violation subject rows
+- zone violation rows
+- MinIO evidence objects
 
-```
-GET /health  →  { "status": "ok" }
-```
+Expected zone behavior:
 
----
+- One drawn polygon represents one physical zone.
+- Two restricted polygons in the same video create two `physical_zones`.
+- `zone_type = RESTRICTED` is a category, not a shared zone identity.
+- API `zone_id` is kept for frontend compatibility and maps to
+  `camera_zone_view_id`.
 
-## Docker (optional)
+## Local Reset
 
-```bash
+For local development only, this deletes local PostgreSQL and MinIO data but
+does not delete source code:
+
+```powershell
+cd C:\path\to\PPE_demo
+docker compose down -v
+docker compose up -d
+docker compose ps
+
 cd backend
-docker build -t de-heus-ppe-backend .
-docker run -p 8000:8000 \
-  -v "$(pwd)/weights:/app/weights" \
-  -e MODEL_PATH=weights/ppe_v1.pt \
-  -e INFERENCE_DEVICE=auto \
-  de-heus-ppe-backend
+python -m app.db.init_db
 ```
 
-For a CUDA-ready Docker image, install the NVIDIA Container Toolkit on the host,
-then build with the CUDA dependency layer and run with GPU access:
+Wait until PostgreSQL is healthy before running `python -m app.db.init_db`.
 
-```bash
-cd backend
-docker build --build-arg INSTALL_CUDA=true -t de-heus-ppe-backend:cuda .
-docker run --gpus all -p 8000:8000 \
-  -v "$(pwd)/weights:/app/weights" \
-  -e MODEL_PATH=weights/ppe_v1.pt \
-  -e INFERENCE_DEVICE=auto \
-  de-heus-ppe-backend:cuda
+## Backend Configuration
+
+Backend config is loaded from `backend/.env`.
+
+Default local settings:
+
+```dotenv
+DATABASE_URL=postgresql+psycopg://safety_user:safety_password@localhost:5432/safety_monitoring
+MINIO_ENDPOINT=localhost:9000
+MINIO_ACCESS_KEY=minioadmin
+MINIO_SECRET_KEY=minioadmin
+MINIO_BUCKET_NAME=safety-monitoring-evidence
+MINIO_SECURE=false
+MODEL_PATH=weights/ppe_v4.pt
+INFERENCE_DEVICE=auto
 ```
 
-Mount the `weights/` volume so you can swap the model later (e.g. `ppe_v2.pt`) without rebuilding the image.
+If model weights are missing or unavailable, the detector can run in mock mode
+for development.
+
+## Useful Backend Commands
+
+Run from `backend` with `.venv` activated:
+
+```powershell
+python -m app.db.init_db
+python -m pytest
+python -m ruff check app tests
+```
+
+## Main Backend APIs
+
+- `GET /health`
+- `GET /health/db`
+- `GET /health/storage`
+- `POST /predict`
+- `POST /predict-video`
+- `POST /zones`
+- `GET /zones/{video_name}`
+- `PUT /zones/{zone_id}`
+- `DELETE /zones/{zone_id}`
+- `DELETE /zones/video/{video_name}`
+- `GET /violations`
+- `GET /zone-violations`
+
+## Documentation
+
+- Backend setup: `backend/docs/backend_setup.md`
+- Internal deployment notes: `backend/docs/internal_deployment.md`
+- API details: `backend/docs/api_routes.md`
+- Storage architecture: `backend/docs/storage_architecture.md`
+- Approved database schema: `backend/docs/database_schema.dbml`

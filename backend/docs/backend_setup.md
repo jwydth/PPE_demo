@@ -34,7 +34,9 @@ docker compose up -d
 docker compose ps
 ```
 
-Wait until the `postgres` service reports that it is healthy. The services are
+Wait until the `postgres` service reports that it is healthy before running
+database initialization. If it still says `health: starting`, wait a few
+seconds and run `docker compose ps` again. The services are
 available at:
 
 - PostgreSQL: `localhost:5432`
@@ -129,6 +131,27 @@ Expected storage response:
 ```
 
 The API documentation is available at `http://localhost:8000/docs`.
+
+## First Data Flow
+
+No manual seed data is required for normal local development.
+
+When zones are saved from the frontend or through `POST /zones`, the backend
+creates the required setup rows automatically:
+
+- A single default factory when one does not exist
+- A camera row for the submitted `video_name`
+- One `physical_zones` row per drawn real zone
+- One `camera_zone_views` row per camera-specific polygon
+
+When video processing finds incidents, the backend creates PPE and zone
+violation rows automatically and uploads evidence snapshots to MinIO.
+
+Expected zone behavior:
+
+- Two restricted polygons in the same video are two physical zones.
+- `RESTRICTED` is a zone type, not a shared physical-zone identity.
+- API `zone_id` is a backward-compatible alias for `camera_zone_view_id`.
 
 ## Starting the Project Again
 
