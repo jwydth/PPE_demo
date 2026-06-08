@@ -125,29 +125,21 @@ function drawDetections(
 
     // Label
     const label = det.label;
-    const fontSize = Math.max(10, Math.min(14, canvasWidth / 55));
-    ctx.font = `600 ${fontSize}px "IBM Plex Mono", monospace`;
-    const textW = ctx.measureText(label).width;
-    const padX = 6;
-    const padY = 4;
-    const labelH = fontSize + padY * 2;
-
-    // Person labels → bottom-inside of the box
-    // All other labels → top-outside of the box (original position)
-    const isPersonLabel = det.label.startsWith("Person");
+    const isPersonLabel = label.startsWith("P");
 
     if (isPersonLabel) {
-      // Bottom-inside: label pill sits just inside the bottom edge
+      const fontSize = Math.max(10, Math.min(14, canvasWidth / 55));
+      ctx.font = `600 ${fontSize}px "IBM Plex Mono", monospace`;
+      const textW = ctx.measureText(label).width;
+      const padX = 6;
+      const padY = 4;
+      const labelH = fontSize + padY * 2;
+
+      // Person labels → bottom-inside of the box
       ctx.fillStyle = color;
       ctx.fillRect(x1, y2 - labelH, textW + padX * 2, labelH);
       ctx.fillStyle = "#0a0c0f";
       ctx.fillText(label, x1 + padX, y2 - padY);
-    } else {
-      // Top-outside: label pill sits just above the top edge
-      ctx.fillStyle = color;
-      ctx.fillRect(x1, y1 - labelH, textW + padX * 2, labelH);
-      ctx.fillStyle = "#0a0c0f";
-      ctx.fillText(label, x1 + padX, y1 - padY);
     }
   }
 }

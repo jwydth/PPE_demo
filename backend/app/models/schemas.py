@@ -70,6 +70,41 @@ class VideoSummary(BaseModel):
     inference_ms: float
 
 
+class PersonTrackFrame(BaseModel):
+    frame_index: int
+    track_id: int
+    bbox: BoundingBox  # normalized 0-1 relative to frame dimensions
+    zone_id: Optional[int] = None
+    zone_name: Optional[str] = None
+    zone_type: Optional[str] = None  # "RESTRICTED" or "WALKWAY" when in violation state
+
+
+class ZoneViolation(BaseModel):
+    id: Optional[int] = None
+    zone_id: int
+    zone_name: Optional[str] = None
+    zone_type: Optional[str] = None
+    track_id: int
+    timestamp: str
+    video_name: str
+    frame_index: int
+    snapshot_path: Optional[str] = None
+    bbox: Optional[BoundingBox] = None  # normalized 0-1 coordinates at violation frame
+
+
 class VideoProcessingResponse(BaseModel):
     summary: VideoSummary
     reports: List[ViolationReport]
+    zone_violations: List[ZoneViolation] = []
+    tracking_frames: List[PersonTrackFrame] = []
+
+
+class Zone(BaseModel):
+    id: Optional[int] = None
+    video_name: str
+    zone_name: str
+    zone_type: Literal["RESTRICTED", "WALKWAY"]
+    dwell_threshold_seconds: int = 0
+    is_active: bool = True
+    ui_shape_data: str  # JSON string
+    flattened_coordinates: str  # JSON string

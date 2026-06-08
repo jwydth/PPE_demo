@@ -67,7 +67,20 @@ export interface VideoSummary {
   inference_ms: number;
 }
 
+import { ZoneViolation } from "./zone";
+
+export interface PersonTrackFrame {
+  frame_index: number;
+  track_id: number;
+  bbox: { x1: number; y1: number; x2: number; y2: number };
+  zone_id?: number;
+  zone_name?: string;
+  zone_type?: string; // "RESTRICTED" or "WALKWAY" when in violation state
+}
+
 export interface VideoProcessingResponse {
   summary: VideoSummary;
   reports: ViolationReport[];
+  zone_violations?: ZoneViolation[];
+  tracking_frames?: PersonTrackFrame[];
 }
