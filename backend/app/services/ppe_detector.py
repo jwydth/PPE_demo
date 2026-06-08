@@ -15,6 +15,7 @@ from app.models.schemas import (
     DetectionResponse,
     EquipmentStatus,
     PersonResult,
+    PersonTrackFrame,
     Summary,
     VideoProcessingResponse,
     VideoSummary,
@@ -193,6 +194,7 @@ class PPEDetector:
         cases: list[ViolationCase] = []
         workers: list[WorkerState] = []
         zone_violations_list: list[ZoneViolation] = []
+        tracking_frames_list: list[PersonTrackFrame] = []
         confirmed_aspect_ratios: list[float] = []
         candidate_violations = 0
         processed_frames = 0
@@ -234,6 +236,10 @@ class PPEDetector:
                 candidate_violations += int(decision["candidate"])
 
                 # Check Zone Incursions
+                track_zone_id: int | None = None
+                track_zone_name: str | None = None
+                track_zone_type: str | None = None
+
                 if zones:
                     test_point = get_person_foot_point(person, frame_width, frame_height)
                     incursion_zones = check_zone_incursion(zones, test_point)
@@ -278,6 +284,36 @@ class PPEDetector:
                                     if zv:
                                         zone_violations_list.append(zv)
 
+                    # Determine the most critical zone status for tracking overlay display
+                    for zone in incursion_zones:
+                        if zone.zone_type == "RESTRICTED":
+                            track_zone_id = zone.zone_id
+                            track_zone_name = zone.zone_name
+                            track_zone_type = "RESTRICTED"
+                            break
+                    if track_zone_type is None:
+                        walkway_zones = [z for z in zones if z.zone_type == "WALKWAY"]
+                        if walkway_zones and not any(z.zone_id in incursion_zone_ids for z in walkway_zones):
+                            wz = walkway_zones[0]
+                            track_zone_id = wz.zone_id
+                            track_zone_name = wz.zone_name
+                            track_zone_type = "WALKWAY"
+
+                # Collect per-frame tracking data for live overlay
+                tracking_frames_list.append(PersonTrackFrame(
+                    frame_index=frame_index,
+                    track_id=person.track_id or 0,
+                    bbox=BoundingBox(
+                        x1=person.bbox.x1 / frame_width,
+                        y1=person.bbox.y1 / frame_height,
+                        x2=person.bbox.x2 / frame_width,
+                        y2=person.bbox.y2 / frame_height,
+                    ),
+                    zone_id=track_zone_id,
+                    zone_name=track_zone_name,
+                    zone_type=track_zone_type,
+                ))
+
                 missing_to_report = decision["missing_to_report"]
                 if not missing_to_report:
                     continue
@@ -310,6 +346,7 @@ class PPEDetector:
             ),
             reports=reports,
             zone_violations=zone_violations_list,
+            tracking_frames=tracking_frames_list,
         )
 
     def _mock_predict(self, image: Image.Image) -> DetectionResponse:

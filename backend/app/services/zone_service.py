@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from app.models.schemas import PersonResult, ZoneViolation
+from app.models.schemas import BoundingBox, PersonResult, ZoneViolation
 from app.services.spatial import is_point_in_polygon
 from app.services.violation_store import list_zones, save_zone_violation
 
@@ -97,6 +97,14 @@ def record_zone_violation(
         zone_type=zone.zone_type,
     )
 
+    frame_height, frame_width = frame.shape[:2]
+    normalized_bbox = BoundingBox(
+        x1=person.bbox.x1 / frame_width,
+        y1=person.bbox.y1 / frame_height,
+        x2=person.bbox.x2 / frame_width,
+        y2=person.bbox.y2 / frame_height,
+    )
+
     violation = ZoneViolation(
         zone_id=zone.zone_id,
         zone_name=zone.zone_name,
@@ -106,6 +114,7 @@ def record_zone_violation(
         video_name=video_name,
         frame_index=frame_index,
         snapshot_path=snapshot_filename,
+        bbox=normalized_bbox,
     )
 
     saved = save_zone_violation(violation)

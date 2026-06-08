@@ -27,4 +27,5 @@ export interface ZoneViolation {
   video_name: string;
   frame_index: number;
   snapshot_path?: string;
+  bbox?: { x1: number; y1: number; x2: number; y2: number };
 }
