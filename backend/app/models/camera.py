@@ -9,7 +9,6 @@ if TYPE_CHECKING:
     from app.models.camera_zone_view import CameraZoneView
     from app.models.factory import Factory
     from app.models.ppe_violation import PPEViolation
-    from app.models.zone import Zone
 
 
 def _utc_now() -> datetime:
@@ -56,7 +55,6 @@ class Camera(SQLModel, table=True):
     )
 
     factory: "Factory" = Relationship(back_populates="cameras")
-    zones: list["Zone"] = Relationship(back_populates="camera")
     camera_zone_views: list["CameraZoneView"] = Relationship(
         back_populates="camera",
         cascade_delete=True,

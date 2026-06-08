@@ -66,8 +66,8 @@ class WorkerState:
     reported_missing: set[str] | None = None
     reported: bool = False
     status: str = "unknown"
-    zone_dwell: dict[int, float] | None = None  # zone_id -> seconds
-    reported_zones: set[int] | None = None  # zone_ids
+    zone_dwell: dict[int, float] | None = None  # camera_zone_view_id -> seconds
+    reported_zones: set[int] | None = None  # camera_zone_view_ids
 
     def __post_init__(self) -> None:
         if self.missing_counts is None:
@@ -246,7 +246,8 @@ class PPEDetector:
                 candidate_violations += int(decision["candidate"])
 
                 # Check Zone Incursions
-                track_zone_id: int | None = None
+                track_camera_zone_view_id: int | None = None
+                track_physical_zone_id: int | None = None
                 track_zone_name: str | None = None
                 track_zone_type: str | None = None
 
@@ -255,23 +256,31 @@ class PPEDetector:
                         person, frame_width, frame_height
                     )
                     incursion_zones = check_zone_incursion(zones, test_point)
-                    incursion_zone_ids = {z.zone_id for z in incursion_zones}
+                    incursion_camera_zone_view_ids = {
+                        z.camera_zone_view_id for z in incursion_zones
+                    }
 
                     for zone in zones:
-                        in_zone = zone.zone_id in incursion_zone_ids
+                        camera_zone_view_id = zone.camera_zone_view_id
+                        in_zone = (
+                            camera_zone_view_id in incursion_camera_zone_view_ids
+                        )
 
                         if zone.zone_type == "WALKWAY":
                             if in_zone:
                                 # Person is safely inside walkway; reset outside-dwell counter.
-                                worker.zone_dwell[zone.zone_id] = 0
+                                worker.zone_dwell[camera_zone_view_id] = 0
                             else:
                                 # Person has left the walkway; accumulate violation dwell.
-                                worker.zone_dwell[zone.zone_id] = worker.zone_dwell.get(
-                                    zone.zone_id, 0
-                                ) + (stride / fps)
+                                worker.zone_dwell[camera_zone_view_id] = (
+                                    worker.zone_dwell.get(camera_zone_view_id, 0)
+                                    + (stride / fps)
+                                )
                                 if (
-                                    worker.zone_dwell[zone.zone_id] > zone.threshold
-                                    and zone.zone_id not in worker.reported_zones
+                                    worker.zone_dwell[camera_zone_view_id]
+                                    > zone.threshold
+                                    and camera_zone_view_id
+                                    not in worker.reported_zones
                                 ):
                                     zv = record_zone_violation(
                                         worker_state=worker,
@@ -287,12 +296,15 @@ class PPEDetector:
                         else:
                             # RESTRICTED: violation when person is inside
                             if in_zone:
-                                worker.zone_dwell[zone.zone_id] = worker.zone_dwell.get(
-                                    zone.zone_id, 0
-                                ) + (stride / fps)
+                                worker.zone_dwell[camera_zone_view_id] = (
+                                    worker.zone_dwell.get(camera_zone_view_id, 0)
+                                    + (stride / fps)
+                                )
                                 if (
-                                    worker.zone_dwell[zone.zone_id] > zone.threshold
-                                    and zone.zone_id not in worker.reported_zones
+                                    worker.zone_dwell[camera_zone_view_id]
+                                    > zone.threshold
+                                    and camera_zone_view_id
+                                    not in worker.reported_zones
                                 ):
                                     zv = record_zone_violation(
                                         worker_state=worker,
@@ -309,17 +321,20 @@ class PPEDetector:
                     # Determine the most critical zone status for tracking overlay display
                     for zone in incursion_zones:
                         if zone.zone_type == "RESTRICTED":
-                            track_zone_id = zone.zone_id
+                            track_camera_zone_view_id = zone.camera_zone_view_id
+                            track_physical_zone_id = zone.physical_zone_id
                             track_zone_name = zone.zone_name
                             track_zone_type = "RESTRICTED"
                             break
                     if track_zone_type is None:
                         walkway_zones = [z for z in zones if z.zone_type == "WALKWAY"]
                         if walkway_zones and not any(
-                            z.zone_id in incursion_zone_ids for z in walkway_zones
+                            z.camera_zone_view_id in incursion_camera_zone_view_ids
+                            for z in walkway_zones
                         ):
                             wz = walkway_zones[0]
-                            track_zone_id = wz.zone_id
+                            track_camera_zone_view_id = wz.camera_zone_view_id
+                            track_physical_zone_id = wz.physical_zone_id
                             track_zone_name = wz.zone_name
                             track_zone_type = "WALKWAY"
 
@@ -330,7 +345,8 @@ class PPEDetector:
                     decision=decision,
                     frame_index=frame_index,
                     fps=fps,
-                    zone_id=track_zone_id,
+                    camera_zone_view_id=track_camera_zone_view_id,
+                    physical_zone_id=track_physical_zone_id,
                     zone_name=track_zone_name,
                     zone_type=track_zone_type,
                 )
@@ -506,7 +522,8 @@ def _append_tracking_overlay_frame(
     decision: dict,
     frame_index: int,
     fps: float,
-    zone_id: int | None = None,
+    camera_zone_view_id: int | None = None,
+    physical_zone_id: int | None = None,
     zone_name: str | None = None,
     zone_type: str | None = None,
 ) -> None:
@@ -546,7 +563,9 @@ def _append_tracking_overlay_frame(
             compliant=person.compliant,
             missing_equipment=missing_equipment,
             status=status,
-            zone_id=zone_id,
+            zone_id=camera_zone_view_id,
+            camera_zone_view_id=camera_zone_view_id,
+            physical_zone_id=physical_zone_id,
             zone_name=zone_name,
             zone_type=zone_type,
         )
