@@ -6,8 +6,10 @@ The backend separates structured records from evidence files.
 
 PostgreSQL is the source of truth for structured metadata:
 
-- Cameras and source identifiers
-- Zone definitions and normalized coordinates
+- Factories, cameras, and source identifiers
+- Physical factory zones and optional floor-plan polygons
+- Per-camera views of physical zones and their normalized detection polygons
+- Login users and incident acknowledgement references
 - PPE violation records
 - People associated with PPE violations
 - Zone violation records
@@ -15,6 +17,22 @@ PostgreSQL is the source of truth for structured metadata:
 
 PostgreSQL is accessed through SQLModel repositories and services. SQLite is
 not used by the current application.
+
+The target database design is documented in `database_schema.dbml`. It
+separates a real factory area (`physical_zones`) from the polygon used to
+detect that area in one camera (`camera_zone_views`). A physical zone can be
+monitored by many cameras, and a camera can monitor many physical zones.
+Detection uses `camera_zone_views.normalized_coordinates`; reporting and
+history group incidents by `physical_zones`.
+
+The target design also adds login users and incident workflow fields to PPE
+and zone violations. Users are limited to login and incident acknowledgement
+or resolution. Roles and permissions are deferred. Behavior violations are
+also deferred until danger behavior detection exists.
+
+This is a documentation-only target design. The current SQLModel models,
+database initialization, API routes, and running database still use the
+existing schema until a future implementation and migration are completed.
 
 ## MinIO
 
@@ -139,9 +157,13 @@ Zone breach
 Zone configuration:
 
 ```text
-Frontend zone JSON strings
+Factory floor-plan polygon
+  -> physical_zones.floor_plan_polygon
+
+Frontend polygon for a specific camera and physical zone
   -> service validation and JSON parsing
-  -> cameras and zones tables in PostgreSQL
+  -> camera_zone_views.ui_shape_data
+  -> camera_zone_views.normalized_coordinates used by detection
 ```
 
 ## Deletion Behavior
@@ -149,6 +171,8 @@ Frontend zone JSON strings
 Deleting a violation currently removes its PostgreSQL row. It does not delete
 the corresponding MinIO object.
 
-Deleting a zone does not delete historical zone violations. PostgreSQL sets
-their `zone_id` to `NULL`, while `zone_name`, source, timestamp, frame, and
-snapshot object key remain available.
+In the target design, deleting a camera, physical zone, or camera-zone view
+sets the corresponding historical zone-violation reference to `NULL`.
+`zone_name`, `zone_type`, source, timestamp, frame, and snapshot object key
+remain available. Deleting a camera or physical zone cascades its associated
+camera-zone-view configuration, but does not delete historical incidents.

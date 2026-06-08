@@ -18,6 +18,19 @@ in uploaded images and videos.
 
 PostgreSQL is the only runtime database.
 
+The documented target database schema adds factories and login users, and
+separates real factory areas (`physical_zones`) from per-camera detection
+polygons (`camera_zone_views`). Cameras and physical zones have a many-to-many
+relationship through camera-zone views. Detection uses normalized coordinates
+from the camera-zone view, while reporting and history group by the physical
+zone. The target also adds incident status, severity, acknowledgement, and
+resolution fields to PPE and zone violations.
+
+This target is documentation only. SQLModel models, migrations, routes, and
+tests still describe the currently implemented schema. Users are for login and
+incident acknowledgement only; roles and permissions are deferred. Behavior
+violations are deferred until danger behavior detection exists.
+
 ### Frontend
 
 - Next.js and TypeScript provide the dashboard and history views.
@@ -26,9 +39,10 @@ PostgreSQL is the only runtime database.
 
 ## Zone Monitoring
 
-Zone coordinates are stored as normalized points and scaled to a 1000 by 1000
-logical grid for point-in-polygon checks. BEV calibration and homography are
-not used.
+In the target schema, a physical zone may have a floor-plan polygon, while
+each camera-zone view stores its own normalized polygon for video detection.
+Normalized camera-view points are scaled to a 1000 by 1000 logical grid for
+point-in-polygon checks. BEV calibration and homography are not used.
 
 Supported zone types:
 
