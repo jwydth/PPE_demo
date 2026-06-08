@@ -9,6 +9,7 @@ from app.models.camera import Camera
 from app.models.zone import Zone
 from app.models.zone_violation import ZoneViolation as ZoneViolationModel
 from app.repositories.camera_repository import CameraRepository
+from app.repositories.factory_repository import FactoryRepository
 from app.repositories.zone_repository import ZoneRepository
 from app.repositories.zone_violation_repository import ZoneViolationRepository
 from app.routers import detection, zones
@@ -28,8 +29,14 @@ from app.storage.evidence_storage import StorageObject
 
 
 def _persisted_zone(session) -> Zone:
+    factory = FactoryRepository(session).get_or_create_default_factory()
+    assert factory.id is not None
     camera = CameraRepository(session).create(
-        Camera(name="Factory", source_key="factory.mp4")
+        Camera(
+            factory_id=factory.id,
+            name="Factory",
+            source_key="factory.mp4",
+        )
     )
     assert camera.id is not None
     return ZoneRepository(session).create(

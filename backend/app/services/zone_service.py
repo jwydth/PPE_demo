@@ -11,6 +11,7 @@ from app.db.session import get_engine, get_session
 from app.models.camera import Camera
 from app.models.zone import Zone as ZoneModel
 from app.repositories.camera_repository import CameraRepository
+from app.repositories.factory_repository import FactoryRepository
 from app.repositories.zone_repository import ZoneRepository
 from app.schemas.detection import PersonResult
 from app.schemas.violation import ZoneViolation
@@ -31,9 +32,14 @@ class ZoneService:
             CameraRepository,
             Depends(CameraRepository),
         ],
+        factory_repository: Annotated[
+            FactoryRepository,
+            Depends(FactoryRepository),
+        ],
     ) -> None:
         self.repository = repository
         self.camera_repository = camera_repository
+        self.factory_repository = factory_repository
 
     def create_zone(self, zone: Zone) -> Zone:
         camera = self._get_or_create_camera(zone.video_name)
@@ -131,14 +137,22 @@ class ZoneService:
         camera = self.camera_repository.get_by_source_key(source_key)
         if camera is not None:
             return camera
+        factory_id = self._get_default_factory_id()
         return self.camera_repository.create(
             Camera(
+                factory_id=factory_id,
                 name=source_key,
                 source_key=source_key,
                 source_uri=None,
                 is_active=True,
             )
         )
+
+    def _get_default_factory_id(self) -> int:
+        factory = self.factory_repository.get_or_create_default_factory()
+        if factory.id is None:
+            raise ServiceValidationError("Default factory is missing an ID.")
+        return factory.id
 
 
 def get_zone_service(
@@ -147,6 +161,7 @@ def get_zone_service(
     return ZoneService(
         ZoneRepository(session),
         CameraRepository(session),
+        FactoryRepository(session),
     )
 
 
@@ -178,6 +193,7 @@ def load_zones(video_name: str) -> list[ZoneViolationRecord]:
         service = ZoneService(
             ZoneRepository(session),
             CameraRepository(session),
+            FactoryRepository(session),
         )
         active_zones = [
             zone

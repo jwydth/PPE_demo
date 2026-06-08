@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.repositories.camera_repository import CameraRepository
+from app.repositories.factory_repository import FactoryRepository
 from app.repositories.zone_repository import ZoneRepository
 from app.routers import zones
 from app.services.zone_service import ZoneService, get_zone_service
@@ -13,6 +14,7 @@ def _client(session) -> TestClient:
     app.dependency_overrides[get_zone_service] = lambda: ZoneService(
         ZoneRepository(session),
         CameraRepository(session),
+        FactoryRepository(session),
     )
     return TestClient(app)
 
@@ -46,6 +48,7 @@ def test_zone_crud_uses_postgresql_models_and_preserves_api_shape(session):
     camera = CameraRepository(session).get_by_source_key("factory.mp4")
     assert camera is not None
     assert camera.name == "factory.mp4"
+    assert camera.factory_id is not None
     assert camera.source_uri is None
     assert camera.is_active is True
 

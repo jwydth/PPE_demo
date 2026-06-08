@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from app.models.camera import Camera
+from app.models.factory import Factory
 from app.models.zone import Zone as ZoneModel
 from app.repositories import RepositoryError
 from app.schemas.detection import BoundingBox, PersonResult
@@ -24,6 +25,7 @@ def _camera() -> Camera:
     now = datetime.now(timezone.utc)
     return Camera(
         id=7,
+        factory_id=1,
         name="Factory",
         source_key="factory.mp4",
         created_at=now,
@@ -63,7 +65,7 @@ def test_zone_service_maps_video_name_and_json_fields():
     camera_repository = Mock()
     camera_repository.get_by_source_key.return_value = _camera()
     zone_repository.create.return_value = _zone_model()
-    service = ZoneService(zone_repository, camera_repository)
+    service = ZoneService(zone_repository, camera_repository, Mock())
 
     result = service.create_zone(_zone_schema())
 
@@ -80,16 +82,22 @@ def test_zone_service_maps_video_name_and_json_fields():
 def test_zone_service_creates_missing_camera():
     zone_repository = Mock()
     camera_repository = Mock()
+    factory_repository = Mock()
     camera_repository.get_by_source_key.return_value = None
     camera_repository.create.side_effect = lambda camera: camera.model_copy(
         update={"id": 7}
     )
+    factory_repository.get_or_create_default_factory.return_value = Factory(
+        id=1,
+        name="Default Factory",
+    )
     zone_repository.create.return_value = _zone_model()
-    service = ZoneService(zone_repository, camera_repository)
+    service = ZoneService(zone_repository, camera_repository, factory_repository)
 
     result = service.create_zone(_zone_schema())
 
     created_camera = camera_repository.create.call_args.args[0]
+    assert created_camera.factory_id == 1
     assert created_camera.name == "factory.mp4"
     assert created_camera.source_key == "factory.mp4"
     assert created_camera.source_uri is None
@@ -106,7 +114,7 @@ def test_zone_service_reads_updates_and_deletes():
     zone_repository.delete.return_value = True
     camera_repository.get_by_id.return_value = _camera()
     camera_repository.get_by_source_key.return_value = _camera()
-    service = ZoneService(zone_repository, camera_repository)
+    service = ZoneService(zone_repository, camera_repository, Mock())
 
     assert service.get_zone(3).video_name == "factory.mp4"
     assert service.get_zones_by_source_key("factory.mp4")[0].zone_name == (
@@ -124,7 +132,7 @@ def test_zone_service_validation_and_error_propagation():
     zone_repository = Mock()
     camera_repository = Mock()
     camera_repository.get_by_source_key.return_value = _camera()
-    service = ZoneService(zone_repository, camera_repository)
+    service = ZoneService(zone_repository, camera_repository, Mock())
     invalid = _zone_schema().model_copy(update={"ui_shape_data": "[]"})
 
     with pytest.raises(ServiceValidationError):

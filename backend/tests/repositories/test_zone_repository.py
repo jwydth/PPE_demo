@@ -2,8 +2,15 @@ from app.models.camera import Camera
 from app.models.zone import Zone
 from app.models.zone_violation import ZoneViolation
 from app.repositories.camera_repository import CameraRepository
+from app.repositories.factory_repository import FactoryRepository
 from app.repositories.zone_repository import ZoneRepository
 from app.repositories.zone_violation_repository import ZoneViolationRepository
+
+
+def _factory_id(session) -> int:
+    factory = FactoryRepository(session).get_or_create_default_factory()
+    assert factory.id is not None
+    return factory.id
 
 
 def _zone(camera_id: int) -> Zone:
@@ -22,8 +29,13 @@ def _zone(camera_id: int) -> Zone:
 
 
 def test_zone_repository_create_read_update_and_delete(session):
+    factory_id = _factory_id(session)
     camera = CameraRepository(session).create(
-        Camera(name="Warehouse", source_key="warehouse.mp4")
+        Camera(
+            factory_id=factory_id,
+            name="Warehouse",
+            source_key="warehouse.mp4",
+        )
     )
     assert camera.id is not None
     repository = ZoneRepository(session)
@@ -56,8 +68,13 @@ def test_zone_repository_create_read_update_and_delete(session):
 
 
 def test_zone_repository_deletes_all_zones_for_camera(session):
+    factory_id = _factory_id(session)
     camera = CameraRepository(session).create(
-        Camera(name="Warehouse", source_key="warehouse.mp4")
+        Camera(
+            factory_id=factory_id,
+            name="Warehouse",
+            source_key="warehouse.mp4",
+        )
     )
     assert camera.id is not None
     repository = ZoneRepository(session)
