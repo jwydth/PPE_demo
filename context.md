@@ -16,8 +16,7 @@ in uploaded images and videos.
 - MinIO stores PPE and zone evidence snapshots.
 - OpenCV performs point-in-polygon checks and draws evidence overlays.
 
-SQLite and the legacy `violation_store.py` are not part of the runtime
-architecture.
+PostgreSQL is the only runtime database.
 
 ### Frontend
 
@@ -37,8 +36,6 @@ Supported zone types:
   zone beyond its dwell threshold.
 - `WALKWAY`: a violation occurs when a worker foot point remains outside the
   zone beyond its dwell threshold.
-
-`FORKLIFT_PATH` is no longer supported.
 
 Zone violation evidence draws a semi-transparent zone polygon and solid
 boundary on the snapshot before the image is uploaded to MinIO. Restricted

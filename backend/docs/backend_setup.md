@@ -1,19 +1,53 @@
 # Backend Setup
 
+This guide starts the backend from a fresh checkout for the first time.
+PostgreSQL stores structured data, and MinIO stores evidence files. Both run
+locally through Docker Compose.
+
 ## Requirements
 
+Install these before continuing:
+
 - Python 3.11 or another project-compatible Python version
-- A Neon PostgreSQL database
-- MinIO, either local or remotely hosted
-- Optional NVIDIA CUDA environment for GPU inference
+- Docker Desktop or Docker Engine with Docker Compose
+- Git
+- Optional: NVIDIA CUDA environment for GPU inference
 
-Run all commands from the `backend` directory unless stated otherwise.
+Run the following commands from PowerShell.
 
-## Create the Python Environment
+## First-Time Setup
 
-PowerShell:
+### 1. Open the project
 
 ```powershell
+cd C:\path\to\PPE_demo
+```
+
+All paths in the remaining steps are relative to the project root.
+
+### 2. Start PostgreSQL and MinIO
+
+Make sure Docker is running, then execute:
+
+```powershell
+docker compose up -d
+docker compose ps
+```
+
+Wait until the `postgres` service reports that it is healthy. The services are
+available at:
+
+- PostgreSQL: `localhost:5432`
+- MinIO S3 API: `http://localhost:9000`
+- MinIO console: `http://localhost:9001`
+
+PostgreSQL and MinIO data remain in the Compose-managed `postgres_data` and
+`minio_data` volumes when the containers stop.
+
+### 3. Create and activate the Python environment
+
+```powershell
+cd backend
 python -m venv .venv
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
 .\.venv\Scripts\Activate.ps1
@@ -21,18 +55,21 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-For the repository's documented CUDA environment, install
-`requirements-cuda-cu128.txt` before `requirements.txt`.
+For CUDA inference, install `requirements-cuda-cu132.txt` before
+`requirements.txt`.
 
-## Environment Variables
+### 4. Create the backend environment file
 
-Create `backend/.env` from `.env.example`.
+While still in the `backend` directory:
 
-Required database and storage settings:
+```powershell
+Copy-Item .env.example .env
+```
+
+The default local connection settings are:
 
 ```dotenv
-DATABASE_URL=postgresql+psycopg://username:password@host/database?sslmode=require
-
+DATABASE_URL=postgresql+psycopg://safety_user:safety_password@localhost:5432/safety_monitoring
 MINIO_ENDPOINT=localhost:9000
 MINIO_ACCESS_KEY=minioadmin
 MINIO_SECRET_KEY=minioadmin
@@ -40,34 +77,13 @@ MINIO_BUCKET_NAME=safety-monitoring-evidence
 MINIO_SECURE=false
 ```
 
-Important application settings:
+Do not commit `.env`. Change the development credentials before using this
+setup on a shared server.
 
-```dotenv
-MODEL_PATH=weights/ppe_v1.pt
-INFERENCE_DEVICE=auto
-CONFIDENCE_THRESHOLD=0.5
-VIDEO_FRAME_STRIDE=1
-SNAPSHOT_DIR=storage/snapshots
-ALLOWED_ORIGINS=["http://localhost:3000","http://127.0.0.1:3000"]
-```
+### 5. Initialize the database
 
-`SNAPSHOT_DIR` is optional because the application defaults to
-`storage/snapshots`. It can still be set in `.env`.
-
-Do not commit `.env`. It contains database and MinIO credentials.
-
-## Neon PostgreSQL
-
-1. Create a Neon project and database.
-2. Copy the connection string from the Neon dashboard.
-3. Use the Psycopg SQLAlchemy driver form:
-
-```text
-postgresql+psycopg://username:password@host/database?sslmode=require
-```
-
-4. Set that value as `DATABASE_URL` in `backend/.env`.
-5. Create the SQLModel tables manually:
+The backend does not create database tables automatically during startup.
+Run this once for a new PostgreSQL database:
 
 ```powershell
 python -m app.db.init_db
@@ -79,136 +95,85 @@ Expected output:
 PostgreSQL tables created successfully.
 ```
 
-The application does not automatically call `create_all()` during startup.
+Running this command again is safe when the tables already exist.
 
-## Start MinIO Locally
-
-### Docker
-
-Create a persistent data directory and start MinIO:
-
-```powershell
-docker run --name safety-minio `
-  -p 9000:9000 `
-  -p 9001:9001 `
-  -e MINIO_ROOT_USER=minioadmin `
-  -e MINIO_ROOT_PASSWORD=minioadmin `
-  -v minio-data:/data `
-  minio/minio server /data --console-address ":9001"
-```
-
-Services:
-
-- S3-compatible API: `http://localhost:9000`
-- MinIO console: `http://localhost:9001`
-
-The backend automatically creates `MINIO_BUCKET_NAME` if it does not exist.
-
-For production, use strong credentials, TLS, and restricted network access.
-Set `MINIO_SECURE=true` when the endpoint uses HTTPS.
-
-## Run the Backend
+### 6. Start the backend
 
 ```powershell
 python -m uvicorn app.main:app --reload --port 8000
 ```
 
-Local URLs:
+Keep this terminal open while using the backend. If model weights do not exist
+at `MODEL_PATH`, the detector runs in mock mode.
 
-- API: `http://127.0.0.1:8000`
-- Swagger UI: `http://127.0.0.1:8000/docs`
-- ReDoc: `http://127.0.0.1:8000/redoc`
+### 7. Verify the installation
 
-If model weights do not exist at `MODEL_PATH`, the detector runs in mock mode.
-
-## Check Health
-
-Application:
+Open a second PowerShell terminal and run:
 
 ```powershell
 Invoke-RestMethod http://localhost:8000/health
-```
-
-PostgreSQL:
-
-```powershell
 Invoke-RestMethod http://localhost:8000/health/db
-```
-
-Expected:
-
-```text
-database
---------
-connected
-```
-
-MinIO:
-
-```powershell
 Invoke-RestMethod http://localhost:8000/health/storage
 ```
 
-Expected:
+Expected database response:
 
-```text
-storage   bucket
--------   ------
-connected safety-monitoring-evidence
+```json
+{"database":"connected"}
 ```
 
-## Basic API Checks
+Expected storage response:
 
-List PPE violations:
+```json
+{"storage":"connected","bucket":"safety-monitoring-evidence"}
+```
+
+The API documentation is available at `http://localhost:8000/docs`.
+
+## Starting the Project Again
+
+After the first-time setup, start the infrastructure from the project root:
 
 ```powershell
-Invoke-RestMethod http://localhost:8000/violations
+docker compose up -d
 ```
 
-List zone violations:
+Then start the backend:
 
 ```powershell
-Invoke-RestMethod http://localhost:8000/zone-violations
+cd backend
+.\.venv\Scripts\Activate.ps1
+python -m uvicorn app.main:app --reload --port 8000
 ```
 
-List zones for a source:
+You do not need to recreate `.venv`, reinstall dependencies, copy `.env`, or
+initialize the database each time.
+
+## Stop the Project
+
+Stop PostgreSQL and MinIO while retaining their data:
 
 ```powershell
-Invoke-RestMethod "http://localhost:8000/zones/factory.mp4"
+docker compose down
 ```
 
-Upload an image:
+The backend process can be stopped with `Ctrl+C`.
+
+The following command also permanently deletes the local PostgreSQL and MinIO
+data. Use it only when you intentionally want a completely fresh database and
+object store:
 
 ```powershell
-curl.exe -X POST "http://localhost:8000/predict" `
-  -F "file=@C:\path\to\image.jpg;type=image/jpeg"
+docker compose down -v
 ```
 
-Upload a video:
+After deleting the volumes, repeat the database initialization step.
 
-```powershell
-curl.exe -X POST "http://localhost:8000/predict-video" `
-  -F "file=@C:\path\to\video.mp4;type=video/mp4"
-```
+## Tests and Linting
 
-## Run Tests and Linting
-
-Run all tests:
+From the `backend` directory with `.venv` activated:
 
 ```powershell
 python -m pytest
-```
-
-Run Ruff:
-
-```powershell
 python -m ruff check app tests
 ```
-
-## Storage Notes
-
-- PostgreSQL contains structured application records.
-- MinIO contains persisted evidence snapshots.
-- `storage/snapshots` is a local workspace and compatibility directory.
-- `/snapshots` remains available for older local snapshot URLs.
-- SQLite is not part of the current runtime architecture.

@@ -81,17 +81,14 @@ backend/storage/snapshots
 ```
 
 Video processing creates annotated snapshots locally before uploading them to
-MinIO. This directory is a workspace and compatibility location, not the
-authoritative evidence store.
+MinIO. This directory is temporary upload workspace, not the authoritative
+evidence store.
 
 Current behavior:
 
-- Zone snapshots are removed locally after successful MinIO and PostgreSQL
-  persistence.
-- PPE snapshots are uploaded to MinIO, but local cleanup is not currently
-  guaranteed.
-- Existing local files are retained.
-- `/snapshots/{filename}` remains mounted for compatibility with older paths.
+- PPE and zone snapshots are generated locally before upload.
+- Evidence is persisted to MinIO.
+- Local cleanup is best effort after successful persistence.
 
 New application records use PostgreSQL and MinIO. Team members should not use
 the local directory as a database or permanent evidence archive.

@@ -1,4 +1,4 @@
-# For NVIDIA CUDA, install requirements-cuda-cu128.txt before this file.
+# For NVIDIA CUDA, install requirements-cuda-cu132.txt before this file.
 fastapi==0.111.0
 uvicorn[standard]==0.29.0
 python-multipart==0.0.9
