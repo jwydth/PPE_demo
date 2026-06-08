@@ -153,7 +153,14 @@ def get_zone_service(
 class ZoneViolationRecord:
     """Tracks zone violation data for a person"""
 
-    def __init__(self, zone_id: int, zone_name: str, zone_type: str, poly: list, threshold: float):
+    def __init__(
+        self,
+        zone_id: int,
+        zone_name: str,
+        zone_type: str,
+        poly: list,
+        threshold: float,
+    ):
         self.zone_id = zone_id
         self.zone_name = zone_name
         self.zone_type = zone_type

@@ -143,7 +143,7 @@ def test_tracking_overlay_deduplicates_person_and_reports_unknown_status():
 
     for _ in range(2):
         ppe._append_tracking_overlay_frame(
-            tracking_frames=frames,
+            overlay_frames=frames,
             seen_person_ids=seen,
             person=person,
             decision={"unknown": True, "worker": worker},
@@ -179,7 +179,7 @@ def test_tracking_overlay_includes_missing_equipment_and_violation_status():
     frames = []
 
     ppe._append_tracking_overlay_frame(
-        tracking_frames=frames,
+        overlay_frames=frames,
         seen_person_ids=set(),
         person=person,
         decision={"unknown": False, "worker": worker},

@@ -206,7 +206,7 @@ class PPEDetector:
         processed_frames = 0
         frame_width: int | None = None
         frame_height: int | None = None
-        tracking_frames: list[TrackingOverlayFrame] = []
+        overlay_frames: list[TrackingOverlayFrame] = []
 
         # Load zones
         zones = load_zones(video_name)
@@ -244,16 +244,12 @@ class PPEDetector:
                 )
                 worker = decision["worker"]
                 candidate_violations += int(decision["candidate"])
-                _append_tracking_overlay_frame(
-                    tracking_frames=tracking_frames,
-                    seen_person_ids=overlay_person_ids,
-                    person=person,
-                    decision=decision,
-                    frame_index=frame_index,
-                    fps=fps,
-                )
 
                 # Check Zone Incursions
+                track_zone_id: int | None = None
+                track_zone_name: str | None = None
+                track_zone_type: str | None = None
+
                 if zones:
                     test_point = get_person_foot_point(
                         person, frame_width, frame_height
@@ -266,10 +262,10 @@ class PPEDetector:
 
                         if zone.zone_type == "WALKWAY":
                             if in_zone:
-                                # Person is safely inside walkway — reset outside-dwell counter
+                                # Person is safely inside walkway; reset outside-dwell counter.
                                 worker.zone_dwell[zone.zone_id] = 0
                             else:
-                                # Person has left the walkway — accumulate violation dwell
+                                # Person has left the walkway; accumulate violation dwell.
                                 worker.zone_dwell[zone.zone_id] = worker.zone_dwell.get(
                                     zone.zone_id, 0
                                 ) + (stride / fps)
@@ -310,6 +306,35 @@ class PPEDetector:
                                     if zv:
                                         zone_violations_list.append(zv)
 
+                    # Determine the most critical zone status for tracking overlay display
+                    for zone in incursion_zones:
+                        if zone.zone_type == "RESTRICTED":
+                            track_zone_id = zone.zone_id
+                            track_zone_name = zone.zone_name
+                            track_zone_type = "RESTRICTED"
+                            break
+                    if track_zone_type is None:
+                        walkway_zones = [z for z in zones if z.zone_type == "WALKWAY"]
+                        if walkway_zones and not any(
+                            z.zone_id in incursion_zone_ids for z in walkway_zones
+                        ):
+                            wz = walkway_zones[0]
+                            track_zone_id = wz.zone_id
+                            track_zone_name = wz.zone_name
+                            track_zone_type = "WALKWAY"
+
+                _append_tracking_overlay_frame(
+                    overlay_frames=overlay_frames,
+                    seen_person_ids=overlay_person_ids,
+                    person=person,
+                    decision=decision,
+                    frame_index=frame_index,
+                    fps=fps,
+                    zone_id=track_zone_id,
+                    zone_name=track_zone_name,
+                    zone_type=track_zone_type,
+                )
+
                 missing_to_report = decision["missing_to_report"]
                 if not missing_to_report:
                     continue
@@ -347,7 +372,7 @@ class PPEDetector:
                 stride=stride,
                 frame_width=frame_width,
                 frame_height=frame_height,
-                frames=tracking_frames,
+                frames=overlay_frames,
             ),
         )
 
@@ -391,7 +416,7 @@ class PPEDetector:
         candidate_violations = 0
         frame_width: int | None = None
         frame_height: int | None = None
-        tracking_frames: list[TrackingOverlayFrame] = []
+        overlay_frames: list[TrackingOverlayFrame] = []
 
         while True:
             ok, frame = cap.read()
@@ -422,7 +447,7 @@ class PPEDetector:
                 )
                 candidate_violations += int(decision["candidate"])
                 _append_tracking_overlay_frame(
-                    tracking_frames=tracking_frames,
+                    overlay_frames=overlay_frames,
                     seen_person_ids=overlay_person_ids,
                     person=person,
                     decision=decision,
@@ -468,19 +493,22 @@ class PPEDetector:
                 stride=stride,
                 frame_width=frame_width,
                 frame_height=frame_height,
-                frames=tracking_frames,
+                frames=overlay_frames,
             ),
         )
 
 
 def _append_tracking_overlay_frame(
     *,
-    tracking_frames: list[TrackingOverlayFrame],
+    overlay_frames: list[TrackingOverlayFrame],
     seen_person_ids: set[tuple[str, int]],
     person: PersonResult,
     decision: dict,
     frame_index: int,
     fps: float,
+    zone_id: int | None = None,
+    zone_name: str | None = None,
+    zone_type: str | None = None,
 ) -> None:
     person_key = (
         ("track", person.track_id)
@@ -507,7 +535,7 @@ def _append_tracking_overlay_frame(
     else:
         status = "unknown"
 
-    tracking_frames.append(
+    overlay_frames.append(
         TrackingOverlayFrame(
             frame_index=frame_index,
             time_seconds=frame_index / fps if fps > 0 else 0.0,
@@ -518,6 +546,9 @@ def _append_tracking_overlay_frame(
             compliant=person.compliant,
             missing_equipment=missing_equipment,
             status=status,
+            zone_id=zone_id,
+            zone_name=zone_name,
+            zone_type=zone_type,
         )
     )
 

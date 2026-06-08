@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { fabric } from "fabric";
 import { UploadZone } from "./UploadZone";
 import { Point2D, ZoneConfiguration, ZoneType } from "@/types/zone";
@@ -119,6 +119,7 @@ type Tool = "select" | "draw" | "delete";
 export function ZoneDrawingCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const bboxCanvasRef = useRef<HTMLCanvasElement>(null);
   const changeMediaInputRef = useRef<HTMLInputElement>(null);
   const [fabricCanvas, setFabricCanvas] = useState<fabric.Canvas | null>(null);
   const [tool, setTool] = useState<Tool>("select");
@@ -1037,31 +1038,184 @@ export function ZoneDrawingCanvas() {
     );
 
     setCurrentViolations(activeThisFrame);
-    setActiveZoneBreaches(activeZoneViolations.length > 0);
-
-    const violatingZoneIds = new Set(
-      activeZoneViolations.map((zv) => zv.zone_id),
+    setActiveZoneBreaches(
+      activeZoneViolations.some((zv) => zv.zone_type === "RESTRICTED"),
     );
 
     fabricCanvas.getObjects().forEach((obj) => {
-      const zoneId = (obj as any).zoneId;
-      const isViolating = violatingZoneIds.has(zoneId);
-
-      if (isViolating) {
-        obj.set({
-          fill: "rgba(255, 0, 0, 0.6)",
-          stroke: "#ff0000",
-          strokeWidth: 4,
-        });
-      } else {
-        const originalStyles = getZoneStyles(
-          (obj as any).zoneType || "RESTRICTED",
-        );
-        obj.set({ ...originalStyles, strokeWidth: 2 });
-      }
+      const objZoneType: ZoneType = (obj as any).zoneType || "RESTRICTED";
+      const originalStyles = getZoneStyles(objZoneType);
+      obj.set({ ...originalStyles, strokeWidth: 2 });
     });
     fabricCanvas.renderAll();
   }, [playbackTime, isMonitoring, analysisResult, fabricCanvas]);
+
+  // Sync bbox canvas size with display dimensions
+  useEffect(() => {
+    const canvas = bboxCanvasRef.current;
+    if (!canvas) return;
+    canvas.width = dimensions.width;
+    canvas.height = dimensions.height;
+  }, [dimensions]);
+
+  const drawBboxOverlay = useCallback(() => {
+    const canvas = bboxCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (!isMonitoring || !analysisResult) return;
+
+    const overlay = analysisResult.tracking_overlay;
+    if (!overlay) return;
+
+    const fps = overlay.fps || analysisResult.summary.fps || 30;
+    const stride = Math.max(1, overlay.stride || 1);
+    const currentFrame = Math.floor(playbackTime * fps);
+
+    const frames = overlay.frames ?? [];
+    // For each tracked person keep only the single frame closest to currentFrame.
+    // Without deduplication every frame within the window stacks on the same spot.
+    const byTrackKey = new Map<string, (typeof frames)[number]>();
+    for (const [index, f] of frames.entries()) {
+      const dist = Math.abs(f.frame_index - currentFrame);
+      if (dist > stride * 2) continue; // outside visible window
+      const trackKey =
+        f.track_id != null
+          ? `track:${f.track_id}`
+          : f.person_id != null
+          ? `person:${f.person_id}`
+          : `frame:${f.frame_index}:${index}`;
+      const prev = byTrackKey.get(trackKey);
+      if (!prev || Math.abs(prev.frame_index - currentFrame) > dist) {
+        byTrackKey.set(trackKey, f);
+      }
+    }
+    const visible = Array.from(byTrackKey.values());
+
+    const drawRoundRect = (x: number, y: number, w: number, h: number, r: number) => {
+      if (typeof (ctx as any).roundRect === "function") {
+        (ctx as any).roundRect(x, y, w, h, r);
+      } else {
+        ctx.rect(x, y, w, h);
+      }
+    };
+
+    for (const tf of visible) {
+      const { x1, y1, x2, y2 } = tf.bbox;
+      const sourceWidth = overlay.frame_width || canvas.width;
+      const sourceHeight = overlay.frame_height || canvas.height;
+      const bboxLooksNormalized = Math.max(x1, y1, x2, y2) <= 1;
+      const cx1 = bboxLooksNormalized ? x1 * canvas.width : (x1 / sourceWidth) * canvas.width;
+      const cy1 = bboxLooksNormalized ? y1 * canvas.height : (y1 / sourceHeight) * canvas.height;
+      const cx2 = bboxLooksNormalized ? x2 * canvas.width : (x2 / sourceWidth) * canvas.width;
+      const cy2 = bboxLooksNormalized ? y2 * canvas.height : (y2 / sourceHeight) * canvas.height;
+      const bw = cx2 - cx1;
+      const bh = cy2 - cy1;
+
+      const isRestricted = tf.zone_type === "RESTRICTED";
+      const isWalkway = tf.zone_type === "WALKWAY";
+      const inViolation = isRestricted || isWalkway;
+      const color = isRestricted ? "#ef4444" : isWalkway ? "#3b82f6" : "#22c55e";
+
+      // Bounding box fill
+      ctx.fillStyle = isRestricted
+        ? "rgba(239,68,68,0.12)"
+        : isWalkway
+        ? "rgba(59,130,246,0.12)"
+        : "rgba(34,197,94,0.08)";
+      ctx.fillRect(cx1, cy1, bw, bh);
+
+      // Bounding box stroke
+      ctx.strokeStyle = color;
+      ctx.lineWidth = inViolation ? 2.5 : 1.5;
+      ctx.strokeRect(cx1, cy1, bw, bh);
+
+      // L-shaped corner accents
+      const cs = Math.min(14, bw * 0.22, bh * 0.22);
+      ctx.lineWidth = inViolation ? 3 : 2;
+      ctx.strokeStyle = color;
+      (
+        [
+          [cx1, cy1, 1, 1],
+          [cx2, cy1, -1, 1],
+          [cx1, cy2, 1, -1],
+          [cx2, cy2, -1, -1],
+        ] as [number, number, number, number][]
+      ).forEach(([px, py, dx, dy]) => {
+        ctx.beginPath();
+        ctx.moveTo(px + dx * cs, py);
+        ctx.lineTo(px, py);
+        ctx.lineTo(px, py + dy * cs);
+        ctx.stroke();
+      });
+
+      // Info panel lines
+      const fontPx = Math.max(9, Math.min(11, canvas.width / 80));
+      const panelPad = 6;
+      const lineH = fontPx + 4;
+
+      const lines: { text: string; color: string }[] = inViolation
+        ? [
+            { text: isRestricted ? "RESTRICTED ZONE" : "WALKWAY VIOLATION", color },
+            { text: `Zone: ${tf.zone_name ?? `#${tf.zone_id}`}`, color: "#e4e4e7" },
+            { text: `Track ID: ${tf.track_id ?? tf.person_id ?? "unknown"}`, color: "#a1a1aa" },
+            { text: `Frame: ${tf.frame_index}`, color: "#71717a" },
+          ]
+        : [{ text: `Track ID: ${tf.track_id ?? tf.person_id ?? "unknown"}`, color: "#a1a1aa" }];
+
+      ctx.font = `${fontPx}px 'IBM Plex Mono', monospace`;
+      const longestLine = lines.reduce(
+        (max, l) => (ctx.measureText(l.text).width > ctx.measureText(max).width ? l.text : max),
+        "",
+      );
+      const panelW = Math.max(100, ctx.measureText(longestLine).width + panelPad * 2 + 4);
+      const panelH = lines.length * lineH + panelPad * 2;
+
+      let panelX = cx1;
+      let panelY = cy2 + 4;
+      if (panelY + panelH > canvas.height) panelY = cy1 - panelH - 4;
+      if (panelX + panelW > canvas.width) panelX = canvas.width - panelW - 2;
+      if (panelX < 0) panelX = 2;
+
+      // Panel background
+      ctx.fillStyle = "rgba(9,9,11,0.88)";
+      ctx.beginPath();
+      drawRoundRect(panelX, panelY, panelW, panelH, 4);
+      ctx.fill();
+
+      // Panel border
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      drawRoundRect(panelX, panelY, panelW, panelH, 4);
+      ctx.stroke();
+
+      // Panel text
+      ctx.font = `${fontPx}px 'IBM Plex Mono', monospace`;
+      lines.forEach((line, i) => {
+        ctx.fillStyle = line.color;
+        ctx.fillText(line.text, panelX + panelPad, panelY + panelPad + (i + 1) * lineH - 2);
+      });
+    }
+  }, [isMonitoring, analysisResult, playbackTime, dimensions]);
+
+  useEffect(() => {
+    drawBboxOverlay();
+  }, [drawBboxOverlay]);
+
+  // Clear bbox canvas when monitoring stops
+  useEffect(() => {
+    if (!isMonitoring) {
+      const canvas = bboxCanvasRef.current;
+      if (canvas) {
+        const ctx = canvas.getContext("2d");
+        ctx?.clearRect(0, 0, canvas.width, canvas.height);
+      }
+    }
+  }, [isMonitoring]);
 
   return (
     <div className="flex flex-col gap-4 items-center w-full max-w-6xl mx-auto">
@@ -1263,8 +1417,13 @@ export function ZoneDrawingCanvas() {
               <div key="fabric-host" className="absolute inset-0 z-10">
                 <canvas ref={canvasRef} />
               </div>
+              <canvas
+                ref={bboxCanvasRef}
+                className="absolute inset-0 z-20 pointer-events-none"
+                style={{ width: dimensions.width, height: dimensions.height }}
+              />
               {isMonitoring && activeZoneBreaches && (
-                <div className="absolute top-4 left-4 z-20 animate-bounce">
+                <div className="absolute top-4 left-4 z-30 animate-bounce">
                   <div className="bg-red-600 text-white text-[10px] font-bold px-3 py-1 rounded shadow-lg border border-red-400 uppercase tracking-widest">
                     ⚠️ Restricted Area Breach
                   </div>
