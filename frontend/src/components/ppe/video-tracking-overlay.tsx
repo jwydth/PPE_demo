@@ -3,6 +3,41 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { TrackingOverlay, TrackingOverlayFrame } from "@/types/detection";
 
+export function TrackingOverlayLayer({
+  overlay,
+  currentTime,
+}: {
+  overlay?: TrackingOverlay;
+  currentTime: number;
+}) {
+  const currentBoxes = useCurrentBoxes(overlay, currentTime);
+  const frameWidth = overlay?.frame_width || 16;
+  const frameHeight = overlay?.frame_height || 9;
+
+  if (!overlay) return null;
+
+  return (
+    <>
+      {currentBoxes.length > 0 ? (
+        <svg
+          className="pointer-events-none absolute inset-0 h-full w-full"
+          viewBox={`0 0 ${frameWidth} ${frameHeight}`}
+          preserveAspectRatio="none"
+        >
+          <TrackingBoxes
+            frames={currentBoxes}
+            frameWidth={frameWidth}
+            frameHeight={frameHeight}
+          />
+        </svg>
+      ) : null}
+      <div className="pointer-events-none absolute left-3 top-3 rounded bg-black/65 px-2 py-1 text-xs font-semibold text-white ring-1 ring-white/10">
+        Tracking {currentBoxes.length} worker{currentBoxes.length === 1 ? "" : "s"}
+      </div>
+    </>
+  );
+}
+
 export function VideoTrackingOverlay({
   src,
   overlay,
@@ -13,29 +48,7 @@ export function VideoTrackingOverlay({
   const videoRef = useRef<HTMLVideoElement>(null);
   const animationRef = useRef<number | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
-  const sortedFrameIndexes = useMemo(() => {
-    if (!overlay?.frames.length) return [];
-    return Array.from(new Set(overlay.frames.map((frame) => frame.frame_index))).sort(
-      (a, b) => a - b,
-    );
-  }, [overlay]);
-  const framesByIndex = useMemo(() => {
-    const grouped = new Map<number, TrackingOverlayFrame[]>();
-    for (const frame of overlay?.frames ?? []) {
-      grouped.set(frame.frame_index, [...(grouped.get(frame.frame_index) ?? []), frame]);
-    }
-    return grouped;
-  }, [overlay]);
-  const currentBoxes = useMemo(() => {
-    if (!overlay || sortedFrameIndexes.length === 0) return [];
-    const currentFrame = Math.round(currentTime * overlay.fps);
-    const nearestFrame = findNearestFrame(sortedFrameIndexes, currentFrame);
-    if (nearestFrame === null) return [];
-
-    const tolerance = Math.max(overlay.stride || 1, 1) * 2;
-    if (Math.abs(nearestFrame - currentFrame) > tolerance) return [];
-    return framesByIndex.get(nearestFrame) ?? [];
-  }, [currentTime, framesByIndex, overlay, sortedFrameIndexes]);
+  const currentBoxes = useCurrentBoxes(overlay, currentTime);
   const frameWidth = overlay?.frame_width || 16;
   const frameHeight = overlay?.frame_height || 9;
 
@@ -78,65 +91,11 @@ export function VideoTrackingOverlay({
           viewBox={`0 0 ${frameWidth} ${frameHeight}`}
           preserveAspectRatio="none"
         >
-          {currentBoxes.map((frame, index) => {
-            const labels = trackingLabels(frame);
-            const color = trackingColor(frame);
-            const width = Math.max(0, frame.bbox.x2 - frame.bbox.x1);
-            const height = Math.max(0, frame.bbox.y2 - frame.bbox.y1);
-            const panelWidth = Math.min(
-              frameWidth - frame.bbox.x1,
-              Math.max(frameWidth * 0.22, Math.max(...labels.map((label) => label.length)) * frameWidth * 0.008),
-            );
-            const lineHeight = frameHeight * 0.032;
-            const panelHeight = lineHeight * labels.length + frameHeight * 0.018;
-            const panelY =
-              frame.bbox.y1 > panelHeight + frameHeight * 0.012
-                ? frame.bbox.y1 - panelHeight - frameHeight * 0.008
-                : Math.min(frameHeight - panelHeight, frame.bbox.y2 + frameHeight * 0.008);
-            const panelX = Math.min(frame.bbox.x1, frameWidth - panelWidth);
-
-            return (
-              <g key={`${frame.frame_index}-${frame.track_id ?? frame.person_id ?? index}-${index}`}>
-                <rect
-                  x={frame.bbox.x1}
-                  y={frame.bbox.y1}
-                  width={width}
-                  height={height}
-                  fill="transparent"
-                  stroke={color}
-                  strokeWidth={Math.max(frameWidth, frameHeight) * 0.004}
-                />
-                <rect
-                  x={panelX}
-                  y={panelY}
-                  width={panelWidth}
-                  height={panelHeight}
-                  rx={frameWidth * 0.006}
-                  fill="rgba(2, 6, 23, 0.88)"
-                  stroke={color}
-                  strokeWidth={Math.max(frameWidth, frameHeight) * 0.0015}
-                />
-                <text
-                  x={panelX + frameWidth * 0.008}
-                  y={panelY + lineHeight * 0.85}
-                  fill="#ffffff"
-                  fontSize={frameHeight * 0.022}
-                  fontWeight={700}
-                >
-                  {labels.map((label, labelIndex) => (
-                    <tspan
-                      key={label}
-                      x={panelX + frameWidth * 0.008}
-                      dy={labelIndex === 0 ? 0 : lineHeight}
-                      fill={labelColor(label, color)}
-                    >
-                      {label}
-                    </tspan>
-                  ))}
-                </text>
-              </g>
-            );
-          })}
+          <TrackingBoxes
+            frames={currentBoxes}
+            frameWidth={frameWidth}
+            frameHeight={frameHeight}
+          />
         </svg>
       ) : null}
 
@@ -146,6 +105,110 @@ export function VideoTrackingOverlay({
         </div>
       ) : null}
     </div>
+  );
+}
+
+function useCurrentBoxes(overlay: TrackingOverlay | undefined, currentTime: number) {
+  const sortedFrameIndexes = useMemo(() => {
+    if (!overlay?.frames.length) return [];
+    return Array.from(new Set(overlay.frames.map((frame) => frame.frame_index))).sort(
+      (a, b) => a - b,
+    );
+  }, [overlay]);
+  const framesByIndex = useMemo(() => {
+    const grouped = new Map<number, TrackingOverlayFrame[]>();
+    for (const frame of overlay?.frames ?? []) {
+      grouped.set(frame.frame_index, [...(grouped.get(frame.frame_index) ?? []), frame]);
+    }
+    return grouped;
+  }, [overlay]);
+  const currentBoxes = useMemo(() => {
+    if (!overlay || sortedFrameIndexes.length === 0) return [];
+    const currentFrame = Math.round(currentTime * overlay.fps);
+    const nearestFrame = findNearestFrame(sortedFrameIndexes, currentFrame);
+    if (nearestFrame === null) return [];
+
+    const tolerance = Math.max(overlay.stride || 1, 1) * 2;
+    if (Math.abs(nearestFrame - currentFrame) > tolerance) return [];
+    return framesByIndex.get(nearestFrame) ?? [];
+  }, [currentTime, framesByIndex, overlay, sortedFrameIndexes]);
+  return currentBoxes;
+}
+
+function TrackingBoxes({
+  frames,
+  frameWidth,
+  frameHeight,
+}: {
+  frames: TrackingOverlayFrame[];
+  frameWidth: number;
+  frameHeight: number;
+}) {
+  return (
+    <>
+      {frames.map((frame, index) => {
+        const labels = trackingLabels(frame);
+        const color = trackingColor(frame);
+        const width = Math.max(0, frame.bbox.x2 - frame.bbox.x1);
+        const height = Math.max(0, frame.bbox.y2 - frame.bbox.y1);
+        const panelWidth = Math.min(
+          frameWidth - frame.bbox.x1,
+          Math.max(
+            frameWidth * 0.22,
+            Math.max(...labels.map((label) => label.length)) * frameWidth * 0.008,
+          ),
+        );
+        const lineHeight = frameHeight * 0.032;
+        const panelHeight = lineHeight * labels.length + frameHeight * 0.018;
+        const panelY =
+          frame.bbox.y1 > panelHeight + frameHeight * 0.012
+            ? frame.bbox.y1 - panelHeight - frameHeight * 0.008
+            : Math.min(frameHeight - panelHeight, frame.bbox.y2 + frameHeight * 0.008);
+        const panelX = Math.min(frame.bbox.x1, frameWidth - panelWidth);
+
+        return (
+          <g key={`${frame.frame_index}-${frame.track_id ?? frame.person_id ?? index}-${index}`}>
+            <rect
+              x={frame.bbox.x1}
+              y={frame.bbox.y1}
+              width={width}
+              height={height}
+              fill="transparent"
+              stroke={color}
+              strokeWidth={Math.max(frameWidth, frameHeight) * 0.004}
+            />
+            <rect
+              x={panelX}
+              y={panelY}
+              width={panelWidth}
+              height={panelHeight}
+              rx={frameWidth * 0.006}
+              fill="rgba(2, 6, 23, 0.88)"
+              stroke={color}
+              strokeWidth={Math.max(frameWidth, frameHeight) * 0.0015}
+            />
+            <text
+              x={panelX + frameWidth * 0.008}
+              y={panelY + lineHeight * 0.85}
+              fill="#ffffff"
+              fontSize={frameHeight * 0.022}
+              fontWeight={700}
+            >
+              {labels.map((label, labelIndex) => (
+                <tspan
+                  key={label}
+                  x={panelX + frameWidth * 0.008}
+                  dy={labelIndex === 0 ? 0 : lineHeight}
+                  fill={labelColor(label, color)}
+                >
+                  {label}
+                </tspan>
+              ))}
+            </text>
+          </g>
+        );
+      })}
+    </>
   );
 }
 

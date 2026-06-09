@@ -7,9 +7,7 @@ import {
   Factory,
   Maximize2,
   MoreHorizontal,
-  MousePointer2,
   Pause,
-  Pencil,
   Play,
   RefreshCw,
   Shield,
@@ -28,7 +26,7 @@ import {
 } from "@/lib/ppe-api";
 import { BoundingBoxView } from "@/components/ppe/bounding-box-view";
 import { FileUpload } from "@/components/ppe/file-upload";
-import { VideoTrackingOverlay } from "@/components/ppe/video-tracking-overlay";
+import { TrackingOverlayLayer } from "@/components/ppe/video-tracking-overlay";
 import {
   DetectionSummary,
   EmptyState,
@@ -294,6 +292,7 @@ function CameraPanel() {
   const [surfaceElement, setSurfaceElement] = useState<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [currentVideoTime, setCurrentVideoTime] = useState(0);
 
   const videoUrl = useMemo(
     () => (file?.type.startsWith("video/") ? URL.createObjectURL(file) : ""),
@@ -308,6 +307,17 @@ function CameraPanel() {
       videoRef.current.play();
     }
   };
+
+  useEffect(() => {
+    if (!isPlaying) return;
+    let frameId = 0;
+    const syncTime = () => {
+      setCurrentVideoTime(videoRef.current?.currentTime ?? 0);
+      frameId = requestAnimationFrame(syncTime);
+    };
+    frameId = requestAnimationFrame(syncTime);
+    return () => cancelAnimationFrame(frameId);
+  }, [isPlaying]);
 
   const currentIncidents = useMemo(
     () => [
@@ -324,6 +334,9 @@ function CameraPanel() {
     [ppeEnabled, videoResult?.tracking_overlay, zoneEnabled],
   );
   const isVideo = !!file?.type.startsWith("video/");
+  const feedAspectRatio = visibleTrackingOverlay
+    ? `${visibleTrackingOverlay.frame_width ?? 16} / ${visibleTrackingOverlay.frame_height ?? 9}`
+    : "16 / 9";
   const zonesReadyToSave = useMemo(
     () =>
       draftPoints.length >= 3
@@ -386,6 +399,7 @@ function CameraPanel() {
     setDraftPoints([]);
     setPhase("idle");
     setIsDrawing(false);
+    setCurrentVideoTime(0);
     if (nextFile.type.startsWith("video/")) {
       void loadSavedZones(nextFile.name);
     }
@@ -607,6 +621,7 @@ function CameraPanel() {
     setDraftPoints([]);
     setPhase("idle");
     setIsDrawing(false);
+    setCurrentVideoTime(0);
   };
 
   return (
@@ -675,6 +690,7 @@ function CameraPanel() {
                     onMouseUp={handleMouseUp}
                     onMouseLeave={handleMouseUp}
                     className="relative aspect-video overflow-hidden rounded-md border border-slate-800 bg-black"
+                    style={{ aspectRatio: feedAspectRatio }}
                   >
                     <video
                       ref={videoRef}
@@ -682,8 +698,16 @@ function CameraPanel() {
                       controls={!isDrawing}
                       muted
                       playsInline
-                      onPlay={() => setIsPlaying(true)}
-                      onPause={() => setIsPlaying(false)}
+                      onPlay={() => {
+                        setIsPlaying(true);
+                        setCurrentVideoTime(videoRef.current?.currentTime ?? 0);
+                      }}
+                      onPause={() => {
+                        setIsPlaying(false);
+                        setCurrentVideoTime(videoRef.current?.currentTime ?? 0);
+                      }}
+                      onSeeked={() => setCurrentVideoTime(videoRef.current?.currentTime ?? 0)}
+                      onTimeUpdate={() => setCurrentVideoTime(videoRef.current?.currentTime ?? 0)}
                       className={`absolute inset-0 h-full w-full object-contain ${
                         isDrawing ? "pointer-events-none" : ""
                       }`}
@@ -740,6 +764,12 @@ function CameraPanel() {
                           />
                         ))}
                       </svg>
+                    ) : null}
+                    {!isDrawing ? (
+                      <TrackingOverlayLayer
+                        overlay={visibleTrackingOverlay}
+                        currentTime={currentVideoTime}
+                      />
                     ) : null}
                   </div>
                   {isDrawing ? (
@@ -934,37 +964,28 @@ function CameraPanel() {
         ) : null}
 
         {phase === "done" && videoResult ? (
-          <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1.45fr)_360px]">
-            <div className="grid h-fit content-start gap-3">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <p className="text-xs font-semibold uppercase tracking-wide text-lime-200">
-                    Analysis Result
-                  </p>
-                  <h3 className="mt-1 text-base font-semibold text-white">
-                    {videoResult.summary.video_name}
-                  </h3>
-                </div>
-                <span
-                  className={`rounded px-2 py-1 text-xs font-semibold ring-1 ${
-                    currentIncidents.length > 0
-                      ? "bg-red-500/10 text-red-200 ring-red-400/30"
-                      : "bg-emerald-500/10 text-emerald-200 ring-emerald-400/30"
-                  }`}
-                >
-                  {currentIncidents.length > 0 ? `${currentIncidents.length} incident` : "No incidents"}
-                </span>
+          <div className="grid h-fit content-start gap-3 rounded-md border border-slate-800 bg-slate-900 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-lime-200">
+                  Analysis Result
+                </p>
+                <h3 className="mt-1 text-base font-semibold text-white">
+                  {videoResult.summary.video_name}
+                </h3>
               </div>
-
-              {videoUrl ? (
-              <VideoTrackingOverlay
-                src={videoUrl}
-                overlay={visibleTrackingOverlay}
-              />
-              ) : null}
+              <span
+                className={`rounded px-2 py-1 text-xs font-semibold ring-1 ${
+                  currentIncidents.length > 0
+                    ? "bg-red-500/10 text-red-200 ring-red-400/30"
+                    : "bg-emerald-500/10 text-emerald-200 ring-emerald-400/30"
+                }`}
+              >
+                {currentIncidents.length > 0 ? `${currentIncidents.length} incident` : "No incidents"}
+              </span>
             </div>
 
-            <aside className="grid h-fit content-start gap-3 rounded-md border border-slate-800 bg-slate-900 p-3">
+            <div className="grid items-start gap-3 xl:grid-cols-[minmax(0,320px)_1fr_auto]">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
                   Processing Summary
@@ -984,7 +1005,7 @@ function CameraPanel() {
                 </div>
               </div>
 
-              <div className="border-t border-slate-800 pt-3">
+              <div className="border-t border-slate-800 pt-3 xl:border-l xl:border-t-0 xl:pl-3 xl:pt-0">
                 <div className="mb-2 flex items-center justify-between gap-2">
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
                     Incident Evidence
@@ -1009,11 +1030,11 @@ function CameraPanel() {
               <button
                 type="button"
                 onClick={() => void runSelectedModels()}
-                className="rounded-md border border-white/10 px-3 py-2 text-sm font-semibold text-slate-200 transition hover:bg-white/10"
+                className="h-fit rounded-md border border-white/10 px-3 py-2 text-sm font-semibold text-slate-200 transition hover:bg-white/10"
               >
                 Rerun selected models
               </button>
-            </aside>
+            </div>
           </div>
         ) : null}
       </div>
