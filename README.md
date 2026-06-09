@@ -32,7 +32,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
 python -m pip install --upgrade pip
 ```
 
-For GPU inference, install the recommended CUDA runtime before the normal
+For GPU inference, install the recommended CUDA 13.2 runtime before the normal
 backend requirements:
 
 ```powershell
@@ -142,11 +142,26 @@ INFERENCE_DEVICE=auto
 If model weights are missing or unavailable, the detector can run in mock mode
 for development.
 
-## CUDA Setup
+## Reproducible GPU Runtime Setup
 
-### Recommended: CUDA 13.2 Runtime
+The PPE model was trained in a GPU software stack. Developers do not need the
+exact same NVIDIA GPU model, but they should use the same verified Python,
+PyTorch CUDA, torchvision, Ultralytics, model weights, and inference device
+configuration when running the backend.
 
-Use this setup for the standard project GPU runtime:
+Official recommended runtime:
+
+```text
+Python 3.11.x (verified with Python 3.11.9)
+torch==2.12.0+cu132
+torchvision==0.27.0+cu132
+ultralytics==8.4.58
+torch CUDA build == 13.2
+MODEL_PATH=weights/ppe_v4.pt
+INFERENCE_DEVICE=auto
+```
+
+Use this setup for the standard reproducible PPE model runtime:
 
 ```powershell
 cd C:\path\to\PPE_demo\backend
@@ -155,29 +170,27 @@ pip install -r requirements-cuda-cu132.txt
 pip install -r requirements.txt
 ```
 
-Pinned CUDA packages:
+If cu132 fails on a developer machine, do not silently install another CUDA
+stack. Ask the team first, verify the new runtime, and document the new
+approved setup before changing dependency files.
 
-```text
-torch==2.12.0+cu132
-torchvision==0.27.0+cu132
-```
-
-### Fallback: CUDA 12.8 Runtime
-
-Use this only when the target PC/GPU cannot use the recommended cu132 runtime:
+All developers should run the verification script before starting the backend:
 
 ```powershell
 cd C:\path\to\PPE_demo\backend
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements-cuda-cu128.txt
-pip install -r requirements.txt
+python scripts/check_gpu_runtime.py
 ```
 
-Fallback CUDA packages:
+Expected verified runtime values:
 
 ```text
-torch==2.11.0+cu128
-torchvision==0.26.0+cu128
+torch version: 2.12.0+cu132
+torch CUDA build: 13.2
+CUDA available: True
+Selected detector device: cuda:0
+YOLO model loaded: True
+Backend using mock mode: False
 ```
 
 ## GPU Runtime Verification

@@ -1,12 +1,10 @@
-# Recommended CUDA runtime for this project.
+# Official recommended CUDA 13.2 runtime for this project.
 #
-# Install this before requirements.txt when this service should use NVIDIA CUDA.
+# Install this before requirements.txt for the standard reproducible GPU
+# runtime used by PPE model inference.
 # Verified available from the PyTorch cu132 wheel index:
 # - torch 2.12.0+cu132
 # - torchvision 0.27.0+cu132
-#
-# If a PC/GPU cannot use cu132, use requirements-cuda-cu128.txt as the
-# fallback runtime.
 --index-url https://download.pytorch.org/whl/cu132
 torch==2.12.0+cu132
 torchvision==0.27.0+cu132
