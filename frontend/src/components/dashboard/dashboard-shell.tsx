@@ -39,6 +39,7 @@ import {
 } from "@/components/ppe/result-panels";
 import {
   DetectionResponse,
+  TrackingOverlay,
   VideoProcessingResponse,
   ViolationReport,
 } from "@/types/detection";
@@ -306,6 +307,13 @@ function CameraPanel() {
       ...(zoneEnabled ? (videoResult?.zone_violations ?? []) : []),
     ],
     [ppeEnabled, videoResult, zoneEnabled],
+  );
+  const visibleTrackingOverlay = useMemo(
+    () => filterTrackingOverlay(videoResult?.tracking_overlay, {
+      showPpe: ppeEnabled,
+      showZone: zoneEnabled,
+    }),
+    [ppeEnabled, videoResult?.tracking_overlay, zoneEnabled],
   );
   const isVideo = !!file?.type.startsWith("video/");
   const zonesReadyToSave = useMemo(
@@ -732,7 +740,7 @@ function CameraPanel() {
                     </p>
                   ) : zoneEnabled ? (
                     <p className="mt-2 text-xs text-slate-400">
-                      Viewing saved zones. Click "Start draw zone" to add new areas.
+                      Viewing saved zones. Click &quot;Start draw zone&quot; to add new areas.
                     </p>
                   ) : null}
                 </div>
@@ -943,7 +951,7 @@ function CameraPanel() {
               {videoUrl ? (
               <VideoTrackingOverlay
                 src={videoUrl}
-                overlay={ppeEnabled || zoneEnabled ? videoResult.tracking_overlay : undefined}
+                overlay={visibleTrackingOverlay}
               />
               ) : null}
             </div>
@@ -1112,6 +1120,46 @@ function safeParsePoints(value: string): Point2D[] {
   } catch {
     return [];
   }
+}
+
+function filterTrackingOverlay(
+  overlay: TrackingOverlay | undefined,
+  {
+    showPpe,
+    showZone,
+  }: {
+    showPpe: boolean;
+    showZone: boolean;
+  },
+): TrackingOverlay | undefined {
+  if (!overlay || (!showPpe && !showZone)) return undefined;
+
+  const frames = overlay.frames.map((frame) => {
+    const missingEquipment = showPpe ? frame.missing_equipment : [];
+    const zoneFields = showZone
+      ? {
+          zone_id: frame.zone_id,
+          zone_name: frame.zone_name,
+          zone_type: frame.zone_type,
+        }
+      : {
+          zone_id: undefined,
+          zone_name: undefined,
+          zone_type: undefined,
+        };
+    const hasViolation =
+      missingEquipment.length > 0 || (showZone && Boolean(frame.zone_type));
+
+    return {
+      ...frame,
+      ...zoneFields,
+      missing_equipment: missingEquipment,
+      compliant: hasViolation ? false : showPpe ? frame.compliant : true,
+      status: hasViolation ? "violation" : showPpe ? frame.status : "compliant",
+    };
+  });
+
+  return { ...overlay, frames };
 }
 
 function clamp01(value: number) {

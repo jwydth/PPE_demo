@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from PIL import Image
 
 from app.schemas.detection import DetectionResponse, VideoProcessingResponse
@@ -59,7 +59,11 @@ async def predict(file: UploadFile = File(...)) -> DetectionResponse:
 
 
 @router.post("/predict-video", response_model=VideoProcessingResponse)
-async def predict_video(file: UploadFile = File(...)) -> VideoProcessingResponse:
+async def predict_video(
+    file: UploadFile = File(...),
+    enable_ppe: bool = Form(True),
+    enable_zone: bool = Form(True),
+) -> VideoProcessingResponse:
     if file.content_type not in _ALLOWED_VIDEO_TYPES:
         raise HTTPException(
             status_code=415,
@@ -78,7 +82,12 @@ async def predict_video(file: UploadFile = File(...)) -> VideoProcessingResponse
             while chunk := await file.read(1024 * 1024):
                 tmp.write(chunk)
 
-        return _detector.process_video(tmp_path, file.filename or tmp_path.name)
+        return _detector.process_video(
+            tmp_path,
+            file.filename or tmp_path.name,
+            enable_ppe=enable_ppe,
+            enable_zone=enable_zone,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     finally:

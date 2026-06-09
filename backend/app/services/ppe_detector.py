@@ -163,11 +163,26 @@ class PPEDetector:
         return self._real_predict(image)
 
     def process_video(
-        self, video_path: Path, video_name: str
+        self,
+        video_path: Path,
+        video_name: str,
+        *,
+        enable_ppe: bool = True,
+        enable_zone: bool = True,
     ) -> VideoProcessingResponse:
         if self.model is None:
-            return self._mock_process_video(video_path, video_name)
-        return self._real_process_video(video_path, video_name)
+            return self._mock_process_video(
+                video_path,
+                video_name,
+                enable_ppe=enable_ppe,
+                enable_zone=enable_zone,
+            )
+        return self._real_process_video(
+            video_path,
+            video_name,
+            enable_ppe=enable_ppe,
+            enable_zone=enable_zone,
+        )
 
     def _real_predict(self, image: Image.Image) -> DetectionResponse:
         start = time.perf_counter()
@@ -192,7 +207,12 @@ class PPEDetector:
         return _build_response(persons, helmets, vests, elapsed_ms)
 
     def _real_process_video(
-        self, video_path: Path, video_name: str
+        self,
+        video_path: Path,
+        video_name: str,
+        *,
+        enable_ppe: bool = True,
+        enable_zone: bool = True,
     ) -> VideoProcessingResponse:
         fps, total_frames = _video_metadata(video_path)
         start = time.perf_counter()
@@ -208,8 +228,7 @@ class PPEDetector:
         frame_height: int | None = None
         overlay_frames: list[TrackingOverlayFrame] = []
 
-        # Load zones
-        zones = load_zones(video_name)
+        zones = load_zones(video_name) if enable_zone else []
 
         results = self.model.track(
             source=str(video_path),
@@ -243,7 +262,8 @@ class PPEDetector:
                     used_worker_ids=used_worker_ids,
                 )
                 worker = decision["worker"]
-                candidate_violations += int(decision["candidate"])
+                if enable_ppe:
+                    candidate_violations += int(decision["candidate"])
 
                 # Check Zone Incursions
                 track_zone_id: int | None = None
@@ -330,13 +350,14 @@ class PPEDetector:
                     decision=decision,
                     frame_index=frame_index,
                     fps=fps,
+                    include_ppe=enable_ppe,
                     zone_id=track_zone_id,
                     zone_name=track_zone_name,
                     zone_type=track_zone_type,
                 )
 
                 missing_to_report = decision["missing_to_report"]
-                if not missing_to_report:
+                if not enable_ppe or not missing_to_report:
                     continue
 
                 _record_violation_case(
@@ -397,7 +418,12 @@ class PPEDetector:
         return _build_response(persons, helmets, vests, elapsed_ms)
 
     def _mock_process_video(
-        self, video_path: Path, video_name: str
+        self,
+        video_path: Path,
+        video_name: str,
+        *,
+        enable_ppe: bool = True,
+        enable_zone: bool = True,
     ) -> VideoProcessingResponse:
         import cv2
 
@@ -417,6 +443,7 @@ class PPEDetector:
         frame_width: int | None = None
         frame_height: int | None = None
         overlay_frames: list[TrackingOverlayFrame] = []
+        zones = load_zones(video_name) if enable_zone else []
 
         while True:
             ok, frame = cap.read()
@@ -445,7 +472,36 @@ class PPEDetector:
                     frame_height=frame_height,
                     used_worker_ids=used_worker_ids,
                 )
-                candidate_violations += int(decision["candidate"])
+                if enable_ppe:
+                    candidate_violations += int(decision["candidate"])
+
+                track_zone_id: int | None = None
+                track_zone_name: str | None = None
+                track_zone_type: str | None = None
+
+                if zones:
+                    test_point = get_person_foot_point(
+                        person, frame_width, frame_height
+                    )
+                    incursion_zones = check_zone_incursion(zones, test_point)
+                    incursion_zone_ids = {z.zone_id for z in incursion_zones}
+
+                    for zone in incursion_zones:
+                        if zone.zone_type == "RESTRICTED":
+                            track_zone_id = zone.zone_id
+                            track_zone_name = zone.zone_name
+                            track_zone_type = "RESTRICTED"
+                            break
+                    if track_zone_type is None:
+                        walkway_zones = [z for z in zones if z.zone_type == "WALKWAY"]
+                        if walkway_zones and not any(
+                            z.zone_id in incursion_zone_ids for z in walkway_zones
+                        ):
+                            wz = walkway_zones[0]
+                            track_zone_id = wz.zone_id
+                            track_zone_name = wz.zone_name
+                            track_zone_type = "WALKWAY"
+
                 _append_tracking_overlay_frame(
                     overlay_frames=overlay_frames,
                     seen_person_ids=overlay_person_ids,
@@ -453,9 +509,13 @@ class PPEDetector:
                     decision=decision,
                     frame_index=frame_index,
                     fps=fps,
+                    include_ppe=enable_ppe,
+                    zone_id=track_zone_id,
+                    zone_name=track_zone_name,
+                    zone_type=track_zone_type,
                 )
                 missing_to_report = decision["missing_to_report"]
-                if not missing_to_report:
+                if not enable_ppe or not missing_to_report:
                     continue
 
                 _record_violation_case(
@@ -506,6 +566,7 @@ def _append_tracking_overlay_frame(
     decision: dict,
     frame_index: int,
     fps: float,
+    include_ppe: bool = True,
     zone_id: int | None = None,
     zone_name: str | None = None,
     zone_type: str | None = None,
@@ -519,18 +580,23 @@ def _append_tracking_overlay_frame(
         return
     seen_person_ids.add(person_key)
 
-    missing_equipment = [
-        equipment.label
-        for equipment in person.equipment
-        if equipment.status == "violation"
-    ]
+    missing_equipment = (
+        [
+            equipment.label
+            for equipment in person.equipment
+            if equipment.status == "violation"
+        ]
+        if include_ppe
+        else []
+    )
+    has_zone_violation = zone_type in {"RESTRICTED", "WALKWAY"}
     worker = decision.get("worker")
     worker_status = getattr(worker, "status", "unknown")
-    if decision.get("unknown") or worker_status == "unknown":
-        status = "unknown"
-    elif missing_equipment:
+    if missing_equipment or has_zone_violation:
         status = "violation"
-    elif person.compliant:
+    elif decision.get("unknown") or worker_status == "unknown":
+        status = "unknown"
+    elif person.compliant or not include_ppe:
         status = "compliant"
     else:
         status = "unknown"
@@ -543,7 +609,7 @@ def _append_tracking_overlay_frame(
             person_id=person.person_id,
             bbox=person.bbox,
             confidence=person.confidence,
-            compliant=person.compliant,
+            compliant=person.compliant and not has_zone_violation,
             missing_equipment=missing_equipment,
             status=status,
             zone_id=zone_id,
