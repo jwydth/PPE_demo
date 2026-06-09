@@ -1,4 +1,5 @@
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any
@@ -9,9 +10,12 @@ from sqlmodel import Session
 
 from app.db.session import get_engine, get_session
 from app.models.camera import Camera
-from app.models.zone import Zone as ZoneModel
+from app.models.camera_zone_view import CameraZoneView
+from app.models.physical_zone import PhysicalZone
 from app.repositories.camera_repository import CameraRepository
-from app.repositories.zone_repository import ZoneRepository
+from app.repositories.camera_zone_view_repository import CameraZoneViewRepository
+from app.repositories.factory_repository import FactoryRepository
+from app.repositories.physical_zone_repository import PhysicalZoneRepository
 from app.schemas.detection import PersonResult
 from app.schemas.violation import ZoneViolation
 from app.schemas.zone import Zone
@@ -26,67 +30,101 @@ COORD_SCALE = 1000
 class ZoneService:
     def __init__(
         self,
-        repository: Annotated[ZoneRepository, Depends(ZoneRepository)],
+        physical_zone_repository: Annotated[
+            PhysicalZoneRepository,
+            Depends(PhysicalZoneRepository),
+        ],
+        camera_zone_view_repository: Annotated[
+            CameraZoneViewRepository,
+            Depends(CameraZoneViewRepository),
+        ],
         camera_repository: Annotated[
             CameraRepository,
             Depends(CameraRepository),
         ],
+        factory_repository: Annotated[
+            FactoryRepository,
+            Depends(FactoryRepository),
+        ],
     ) -> None:
-        self.repository = repository
+        self.physical_zone_repository = physical_zone_repository
+        self.camera_zone_view_repository = camera_zone_view_repository
         self.camera_repository = camera_repository
+        self.factory_repository = factory_repository
 
     def create_zone(self, zone: Zone) -> Zone:
-        camera = self._get_or_create_camera(zone.video_name)
+        factory_id = self._get_default_factory_id()
+        camera = self._get_or_create_camera(zone.video_name, factory_id=factory_id)
         if camera.id is None:
             raise ServiceValidationError("Persisted camera is missing an ID.")
 
-        created = self.repository.create(
-            ZoneModel(
-                camera_id=camera.id,
-                name=_require_text(zone.zone_name, "zone_name"),
+        zone_name = _require_text(zone.zone_name, "zone_name")
+        dwell_threshold_seconds = _validate_dwell(zone.dwell_threshold_seconds)
+        ui_shape_data = _parse_json_object(
+            zone.ui_shape_data,
+            "ui_shape_data",
+        )
+        normalized_coordinates = _parse_coordinate_list(zone.flattened_coordinates)
+        physical_zone = self.physical_zone_repository.create(
+            PhysicalZone(
+                factory_id=factory_id,
+                name=zone_name,
                 zone_type=zone.zone_type,
-                dwell_threshold_seconds=_validate_dwell(
-                    zone.dwell_threshold_seconds
-                ),
+                dwell_threshold_seconds=dwell_threshold_seconds,
                 is_active=zone.is_active,
-                ui_shape_data=_parse_json_object(
-                    zone.ui_shape_data,
-                    "ui_shape_data",
-                ),
-                normalized_coordinates=_parse_coordinate_list(
-                    zone.flattened_coordinates
-                ),
             )
         )
-        return _to_schema(created, camera.source_key)
+        if physical_zone.id is None:
+            raise ServiceValidationError("Persisted physical zone is missing an ID.")
+
+        view = self.camera_zone_view_repository.create(
+            CameraZoneView(
+                camera_id=camera.id,
+                physical_zone_id=physical_zone.id,
+                ui_shape_data=ui_shape_data,
+                normalized_coordinates=normalized_coordinates,
+                is_active=zone.is_active,
+            )
+        )
+        return _to_schema(view, physical_zone, camera.source_key)
 
     def update_zone(self, zone_id: int, zone: Zone) -> Zone:
-        persisted = self._get_zone_model(zone_id)
+        view = self._get_camera_zone_view_model(zone_id)
+        physical_zone = self._get_physical_zone_model(view.physical_zone_id)
+        factory_id = self._get_default_factory_id()
         camera = self._get_camera_by_video_name(zone.video_name)
         if camera.id is None:
             raise ServiceValidationError("Persisted camera is missing an ID.")
 
-        persisted.camera_id = camera.id
-        persisted.name = _require_text(zone.zone_name, "zone_name")
-        persisted.zone_type = zone.zone_type
-        persisted.dwell_threshold_seconds = _validate_dwell(
+        physical_zone.factory_id = factory_id
+        physical_zone.name = _require_text(zone.zone_name, "zone_name")
+        physical_zone.zone_type = zone.zone_type
+        physical_zone.dwell_threshold_seconds = _validate_dwell(
             zone.dwell_threshold_seconds
         )
-        persisted.is_active = zone.is_active
-        persisted.ui_shape_data = _parse_json_object(
+        physical_zone.is_active = zone.is_active
+        view.camera_id = camera.id
+        view.ui_shape_data = _parse_json_object(
             zone.ui_shape_data,
             "ui_shape_data",
         )
-        persisted.normalized_coordinates = _parse_coordinate_list(
+        view.normalized_coordinates = _parse_coordinate_list(
             zone.flattened_coordinates
         )
-        updated = self.repository.update(persisted)
-        return _to_schema(updated, camera.source_key)
+        view.is_active = zone.is_active
+        updated_zone = self.physical_zone_repository.update(physical_zone)
+        updated_view = self.camera_zone_view_repository.update(view)
+        return _to_schema(updated_view, updated_zone, camera.source_key)
 
     def delete_zone(self, zone_id: int) -> bool:
         normalized_id = _require_positive_id(zone_id, "zone_id")
-        if not self.repository.delete(normalized_id):
+        view = self.camera_zone_view_repository.get_by_id(normalized_id)
+        if view is None:
             raise ServiceNotFoundError(f"Zone {zone_id} was not found.")
+        physical_zone_id = view.physical_zone_id
+        if not self.camera_zone_view_repository.delete(normalized_id):
+            raise ServiceNotFoundError(f"Zone {zone_id} was not found.")
+        self.physical_zone_repository.delete(physical_zone_id)
         return True
 
     def delete_zones_by_source_key(self, source_key: str) -> int:
@@ -94,27 +132,55 @@ class ZoneService:
         camera = self.camera_repository.get_by_source_key(normalized_source_key)
         if camera is None or camera.id is None:
             return 0
-        return self.repository.delete_by_camera(camera.id)
+        views = self.camera_zone_view_repository.get_by_camera(camera.id)
+        deleted = 0
+        for view in views:
+            if view.id is None:
+                continue
+            physical_zone_id = view.physical_zone_id
+            if self.camera_zone_view_repository.delete(view.id):
+                deleted += 1
+                self.physical_zone_repository.delete(physical_zone_id)
+        return deleted
 
     def get_zone(self, zone_id: int) -> Zone:
-        zone = self._get_zone_model(zone_id)
-        camera = self.camera_repository.get_by_id(zone.camera_id)
+        view = self._get_camera_zone_view_model(zone_id)
+        physical_zone = self._get_physical_zone_model(view.physical_zone_id)
+        camera = self.camera_repository.get_by_id(view.camera_id)
         if camera is None:
             raise ServiceNotFoundError(
-                f"Camera {zone.camera_id} for zone {zone_id} was not found."
+                f"Camera {view.camera_id} for zone {zone_id} was not found."
             )
-        return _to_schema(zone, camera.source_key)
+        return _to_schema(view, physical_zone, camera.source_key)
 
     def get_zones_by_source_key(self, source_key: str) -> list[Zone]:
         normalized_source_key = _require_text(source_key, "video_name")
-        zones = self.repository.get_by_source_key(normalized_source_key)
-        return [_to_schema(zone, normalized_source_key) for zone in zones]
+        camera = self.camera_repository.get_by_source_key(normalized_source_key)
+        if camera is None or camera.id is None:
+            return []
+        views = self.camera_zone_view_repository.get_by_camera(camera.id)
+        return [
+            _to_schema(
+                view,
+                self._get_physical_zone_model(view.physical_zone_id),
+                normalized_source_key,
+            )
+            for view in views
+        ]
 
-    def _get_zone_model(self, zone_id: int) -> ZoneModel:
+    def _get_camera_zone_view_model(self, zone_id: int) -> CameraZoneView:
         normalized_id = _require_positive_id(zone_id, "zone_id")
-        zone = self.repository.get_by_id(normalized_id)
-        if zone is None:
+        view = self.camera_zone_view_repository.get_by_id(normalized_id)
+        if view is None:
             raise ServiceNotFoundError(f"Zone {zone_id} was not found.")
+        return view
+
+    def _get_physical_zone_model(self, physical_zone_id: int) -> PhysicalZone:
+        zone = self.physical_zone_repository.get_by_id(physical_zone_id)
+        if zone is None:
+            raise ServiceNotFoundError(
+                f"Physical zone {physical_zone_id} was not found."
+            )
         return zone
 
     def _get_camera_by_video_name(self, video_name: str) -> Camera:
@@ -126,13 +192,21 @@ class ZoneService:
             )
         return camera
 
-    def _get_or_create_camera(self, video_name: str) -> Camera:
+    def _get_or_create_camera(
+        self,
+        video_name: str,
+        *,
+        factory_id: int | None = None,
+    ) -> Camera:
         source_key = _require_text(video_name, "video_name")
         camera = self.camera_repository.get_by_source_key(source_key)
         if camera is not None:
             return camera
+        if factory_id is None:
+            factory_id = self._get_default_factory_id()
         return self.camera_repository.create(
             Camera(
+                factory_id=factory_id,
                 name=source_key,
                 source_key=source_key,
                 source_uri=None,
@@ -140,32 +214,34 @@ class ZoneService:
             )
         )
 
+    def _get_default_factory_id(self) -> int:
+        factory = self.factory_repository.get_or_create_default_factory()
+        if factory.id is None:
+            raise ServiceValidationError("Default factory is missing an ID.")
+        return factory.id
+
 
 def get_zone_service(
     session: Annotated[Session, Depends(get_session)],
 ) -> ZoneService:
     return ZoneService(
-        ZoneRepository(session),
+        PhysicalZoneRepository(session),
+        CameraZoneViewRepository(session),
         CameraRepository(session),
+        FactoryRepository(session),
     )
 
 
+@dataclass
 class ZoneViolationRecord:
-    """Tracks zone violation data for a person"""
+    """Camera-specific zone metadata used during detection."""
 
-    def __init__(
-        self,
-        zone_id: int,
-        zone_name: str,
-        zone_type: str,
-        poly: list,
-        threshold: float,
-    ):
-        self.zone_id = zone_id
-        self.zone_name = zone_name
-        self.zone_type = zone_type
-        self.poly = poly
-        self.threshold = threshold
+    camera_zone_view_id: int
+    physical_zone_id: int
+    zone_name: str
+    zone_type: str
+    poly: list[tuple[float, float]]
+    threshold: float
 
     def point_in_zone(self, test_point: tuple) -> bool:
         """Check if a point is inside this zone's polygon"""
@@ -173,36 +249,46 @@ class ZoneViolationRecord:
 
 
 def load_zones(video_name: str) -> list[ZoneViolationRecord]:
-    """Load all active zones for a video with normalized coordinates"""
-    with Session(get_engine()) as session:
-        service = ZoneService(
-            ZoneRepository(session),
-            CameraRepository(session),
-        )
-        active_zones = [
-            zone
-            for zone in service.get_zones_by_source_key(video_name)
-            if zone.is_active
-        ]
+    """Load active camera-zone views for a video with normalized coordinates."""
     zones: list[ZoneViolationRecord] = []
+    with Session(get_engine()) as session:
+        view_repository = CameraZoneViewRepository(session)
+        physical_zone_repository = PhysicalZoneRepository(session)
+        active_views = view_repository.get_active_by_camera_source_key(video_name)
 
-    for zone in active_zones:
-        try:
-            raw = json.loads(zone.flattened_coordinates)
-            if not raw:
+        for view in active_views:
+            if view.id is None:
                 continue
-            coords = [(p["x"] * COORD_SCALE, p["y"] * COORD_SCALE) for p in raw]
+            physical_zone = physical_zone_repository.get_by_id(
+                view.physical_zone_id
+            )
+            if physical_zone is None or physical_zone.id is None:
+                continue
+
+            try:
+                coords = [
+                    (
+                        float(point["x"]) * COORD_SCALE,
+                        float(point["y"]) * COORD_SCALE,
+                    )
+                    for point in view.normalized_coordinates
+                ]
+            except (KeyError, TypeError, ValueError):
+                continue
+
+            if not coords:
+                continue
+
             zones.append(
                 ZoneViolationRecord(
-                    zone_id=zone.id,
-                    zone_name=zone.zone_name,
-                    zone_type=zone.zone_type,
+                    camera_zone_view_id=view.id,
+                    physical_zone_id=physical_zone.id,
+                    zone_name=physical_zone.name,
+                    zone_type=physical_zone.zone_type,
                     poly=coords,
-                    threshold=zone.dwell_threshold_seconds,
+                    threshold=physical_zone.dwell_threshold_seconds,
                 )
             )
-        except Exception:
-            pass
 
     return zones
 
@@ -257,7 +343,8 @@ def record_zone_violation(
     local_snapshot_path = SNAPSHOT_DIR / snapshot_filename
     with open_zone_violation_service() as service:
         saved = service.persist_zone_violation(
-            zone_id=zone.zone_id,
+            camera_zone_view_id=zone.camera_zone_view_id,
+            physical_zone_id=zone.physical_zone_id,
             zone_name=zone.zone_name,
             zone_type=zone.zone_type,
             track_id=person.track_id or 0,
@@ -267,21 +354,25 @@ def record_zone_violation(
             local_snapshot_path=str(local_snapshot_path),
         )
     local_snapshot_path.unlink(missing_ok=True)
-    worker_state.reported_zones.add(zone.zone_id)
+    worker_state.reported_zones.add(zone.camera_zone_view_id)
     return saved
 
 
-def _to_schema(zone: ZoneModel, source_key: str) -> Zone:
+def _to_schema(
+    view: CameraZoneView,
+    physical_zone: PhysicalZone,
+    source_key: str,
+) -> Zone:
     return Zone(
-        id=zone.id,
+        id=view.id,
         video_name=source_key,
-        zone_name=zone.name,
-        zone_type=zone.zone_type,
-        dwell_threshold_seconds=zone.dwell_threshold_seconds,
-        is_active=zone.is_active,
-        ui_shape_data=json.dumps(zone.ui_shape_data, separators=(",", ":")),
+        zone_name=physical_zone.name,
+        zone_type=physical_zone.zone_type,
+        dwell_threshold_seconds=physical_zone.dwell_threshold_seconds,
+        is_active=view.is_active and physical_zone.is_active,
+        ui_shape_data=json.dumps(view.ui_shape_data, separators=(",", ":")),
         flattened_coordinates=json.dumps(
-            zone.normalized_coordinates,
+            view.normalized_coordinates,
             separators=(",", ":"),
         ),
     )

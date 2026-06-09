@@ -3,12 +3,21 @@ import pytest
 from app.models.camera import Camera
 from app.repositories import RepositoryError
 from app.repositories.camera_repository import CameraRepository
+from app.repositories.factory_repository import FactoryRepository
+
+
+def _factory_id(session) -> int:
+    factory = FactoryRepository(session).get_or_create_default_factory()
+    assert factory.id is not None
+    return factory.id
 
 
 def test_camera_repository_create_read_update_and_deactivate(session):
     repository = CameraRepository(session)
+    factory_id = _factory_id(session)
     camera = repository.create(
         Camera(
+            factory_id=factory_id,
             name="Loading Bay",
             source_key="loading-bay.mp4",
             source_uri="rtsp://example/loading-bay",
@@ -32,10 +41,29 @@ def test_camera_repository_create_read_update_and_deactivate(session):
 
 def test_camera_repository_rolls_back_failed_create(session):
     repository = CameraRepository(session)
-    repository.create(Camera(name="Camera 1", source_key="duplicate-source"))
+    factory_id = _factory_id(session)
+    repository.create(
+        Camera(
+            factory_id=factory_id,
+            name="Camera 1",
+            source_key="duplicate-source",
+        )
+    )
 
     with pytest.raises(RepositoryError):
-        repository.create(Camera(name="Camera 2", source_key="duplicate-source"))
+        repository.create(
+            Camera(
+                factory_id=factory_id,
+                name="Camera 2",
+                source_key="duplicate-source",
+            )
+        )
 
-    created = repository.create(Camera(name="Camera 3", source_key="valid-source"))
+    created = repository.create(
+        Camera(
+            factory_id=factory_id,
+            name="Camera 3",
+            source_key="valid-source",
+        )
+    )
     assert created.id is not None

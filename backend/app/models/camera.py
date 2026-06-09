@@ -6,8 +6,9 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, Relationship, SQLModel
 
 if TYPE_CHECKING:
+    from app.models.camera_zone_view import CameraZoneView
+    from app.models.factory import Factory
     from app.models.ppe_violation import PPEViolation
-    from app.models.zone import Zone
 
 
 def _utc_now() -> datetime:
@@ -18,6 +19,13 @@ class Camera(SQLModel, table=True):
     __tablename__ = "cameras"
 
     id: int | None = Field(default=None, primary_key=True, sa_type=BigInteger)
+    factory_id: int = Field(
+        foreign_key="factories.id",
+        ondelete="RESTRICT",
+        nullable=False,
+        index=True,
+        sa_type=BigInteger,
+    )
     name: str = Field(sa_column=Column(String(255), nullable=False))
     source_key: str = Field(
         sa_column=Column(String(500), nullable=False, unique=True, index=True)
@@ -46,7 +54,12 @@ class Camera(SQLModel, table=True):
         ),
     )
 
-    zones: list["Zone"] = Relationship(back_populates="camera")
+    factory: "Factory" = Relationship(back_populates="cameras")
+    camera_zone_views: list["CameraZoneView"] = Relationship(
+        back_populates="camera",
+        cascade_delete=True,
+        passive_deletes=True,
+    )
     ppe_violations: list["PPEViolation"] = Relationship(
         back_populates="camera",
         passive_deletes=True,

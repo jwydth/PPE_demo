@@ -71,7 +71,10 @@ class TrackingOverlayFrame(BaseModel):
     compliant: bool
     missing_equipment: list[str]
     status: Literal["compliant", "violation", "unknown"]
+    # Backward-compatible API alias for camera_zone_view_id.
     zone_id: int | None = None
+    camera_zone_view_id: int | None = None
+    physical_zone_id: int | None = None
     zone_name: str | None = None
     zone_type: Literal["RESTRICTED", "WALKWAY"] | None = None
 

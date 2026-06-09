@@ -9,7 +9,6 @@ PostgreSQL is the source of truth for structured metadata:
 - Factories, cameras, and source identifiers
 - Physical factory zones and optional floor-plan polygons
 - Per-camera views of physical zones and their normalized detection polygons
-- Login users and incident acknowledgement references
 - PPE violation records
 - People associated with PPE violations
 - Zone violation records
@@ -18,21 +17,18 @@ PostgreSQL is the source of truth for structured metadata:
 PostgreSQL is accessed through SQLModel repositories and services. SQLite is
 not used by the current application.
 
-The target database design is documented in `database_schema.dbml`. It
-separates a real factory area (`physical_zones`) from the polygon used to
-detect that area in one camera (`camera_zone_views`). A physical zone can be
-monitored by many cameras, and a camera can monitor many physical zones.
-Detection uses `camera_zone_views.normalized_coordinates`; reporting and
-history group incidents by `physical_zones`.
+The database design is documented in `database_schema.dbml`. It separates a
+real factory area (`physical_zones`) from the polygon used to detect that area
+in one camera (`camera_zone_views`). A physical zone can be monitored by many
+cameras, and a camera can monitor many physical zones. Detection uses
+`camera_zone_views.normalized_coordinates`; reporting and history group
+incidents by `physical_zones`.
 
-The target design also adds login users and incident workflow fields to PPE
-and zone violations. Users are limited to login and incident acknowledgement
-or resolution. Roles and permissions are deferred. Behavior violations are
-also deferred until danger behavior detection exists.
-
-This is a documentation-only target design. The current SQLModel models,
-database initialization, API routes, and running database still use the
-existing schema until a future implementation and migration are completed.
+The current backend implements the DBML persistence model for factories,
+cameras, physical zones, camera-zone views, PPE violations, PPE violation
+subjects, and zone violations. The DBML `users` table is approved for a later
+auth/report-recipient phase; auth is not implemented in the current backend.
+Behavior violations are deferred until danger behavior detection exists.
 
 ## MinIO
 
@@ -149,7 +145,9 @@ Zone violation:
 Zone breach
   -> annotated local snapshot
   -> MinIO upload
-  -> zone violation row in PostgreSQL
+  -> zone violation row in PostgreSQL with physical_zone_id,
+     camera_zone_view_id, copied zone_name, copied zone_type, and copied
+     source_key
   -> local temporary snapshot removal
   -> frontend-compatible API response
 ```
@@ -171,8 +169,12 @@ Frontend polygon for a specific camera and physical zone
 Deleting a violation currently removes its PostgreSQL row. It does not delete
 the corresponding MinIO object.
 
-In the target design, deleting a camera, physical zone, or camera-zone view
-sets the corresponding historical zone-violation reference to `NULL`.
-`zone_name`, `zone_type`, source, timestamp, frame, and snapshot object key
-remain available. Deleting a camera or physical zone cascades its associated
-camera-zone-view configuration, but does not delete historical incidents.
+Deleting a camera, physical zone, or camera-zone view sets the corresponding
+historical zone-violation reference to `NULL`. `zone_name`, `zone_type`,
+source, timestamp, frame, and snapshot object key remain available. Deleting a
+camera or physical zone cascades its associated camera-zone-view
+configuration, but does not delete historical incidents.
+
+The zone violation API still exposes `zone_id` for frontend compatibility. It
+is an alias for `camera_zone_view_id`, not a reference to a legacy `zones`
+table.

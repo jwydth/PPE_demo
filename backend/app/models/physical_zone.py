@@ -1,35 +1,32 @@
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import BigInteger, CheckConstraint, Column, DateTime, String, func
+from sqlalchemy import BigInteger, CheckConstraint, Column, DateTime, Index, String, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, Relationship, SQLModel
 
 if TYPE_CHECKING:
-    from app.models.camera import Camera
-    from app.models.zone_violation import ZoneViolation
+    from app.models.camera_zone_view import CameraZoneView
+    from app.models.factory import Factory
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class Zone(SQLModel, table=True):
-    __tablename__ = "zones"
+class PhysicalZone(SQLModel, table=True):
+    __tablename__ = "physical_zones"
     __table_args__ = (
         CheckConstraint(
-            "zone_type IN ('RESTRICTED', 'WALKWAY')",
-            name="ck_zones_zone_type",
-        ),
-        CheckConstraint(
             "dwell_threshold_seconds >= 0",
-            name="ck_zones_dwell_threshold_nonnegative",
+            name="ck_physical_zones_dwell_threshold_nonnegative",
         ),
+        Index("ix_physical_zones_factory_id_name", "factory_id", "name"),
     )
 
     id: int | None = Field(default=None, primary_key=True, sa_type=BigInteger)
-    camera_id: int = Field(
-        foreign_key="cameras.id",
+    factory_id: int = Field(
+        foreign_key="factories.id",
         ondelete="RESTRICT",
         nullable=False,
         index=True,
@@ -37,14 +34,12 @@ class Zone(SQLModel, table=True):
     )
     name: str = Field(sa_column=Column(String(255), nullable=False))
     zone_type: str = Field(sa_column=Column(String(32), nullable=False))
+    floor_plan_polygon: list[dict[str, Any]] | None = Field(
+        default=None,
+        sa_column=Column(JSONB, nullable=True),
+    )
     dwell_threshold_seconds: int = Field(default=0, nullable=False)
     is_active: bool = Field(default=True, nullable=False)
-    ui_shape_data: dict[str, Any] = Field(
-        sa_column=Column(JSONB, nullable=False),
-    )
-    normalized_coordinates: list[dict[str, float]] = Field(
-        sa_column=Column(JSONB, nullable=False),
-    )
     created_at: datetime = Field(
         default_factory=_utc_now,
         sa_column=Column(
@@ -63,8 +58,9 @@ class Zone(SQLModel, table=True):
         ),
     )
 
-    camera: "Camera" = Relationship(back_populates="zones")
-    zone_violations: list["ZoneViolation"] = Relationship(
-        back_populates="zone",
+    factory: "Factory" = Relationship(back_populates="physical_zones")
+    camera_zone_views: list["CameraZoneView"] = Relationship(
+        back_populates="physical_zone",
+        cascade_delete=True,
         passive_deletes=True,
     )

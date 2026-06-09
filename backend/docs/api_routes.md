@@ -170,19 +170,26 @@ Example response:
     {
       "id": 18,
       "zone_id": 3,
+      "camera_id": 2,
+      "physical_zone_id": 5,
+      "camera_zone_view_id": 3,
       "zone_name": "Restricted Area",
       "zone_type": "RESTRICTED",
       "track_id": 7,
       "timestamp": "2026-06-06T08:30:02+00:00",
       "video_name": "factory.mp4",
       "frame_index": 170,
-      "snapshot_path": "http://localhost:9000/bucket/object?signature=..."
+      "snapshot_path": "http://localhost:9000/bucket/object?signature=...",
+      "status": "OPEN",
+      "severity": null
     }
   ]
 }
 ```
 
 The returned evidence links are normally temporary MinIO presigned URLs.
+`zone_id` is kept as a backward-compatible API alias for
+`camera_zone_view_id`.
 
 ## PPE Violations
 
@@ -253,7 +260,12 @@ currently deleted.
 ## Zones
 
 Zone API field names remain compatible with the frontend. Internally,
-`video_name` maps to `cameras.source_key`, and JSON strings are stored as JSONB.
+`video_name` maps to `cameras.source_key`. One submitted zone is stored as a
+`physical_zones` row for the real factory area and a `camera_zone_views` row
+for the camera-specific polygon used by detection. JSON strings from the API
+are stored as JSONB.
+
+The API `id` for a zone is the `camera_zone_views.id` value.
 
 Zone types are `RESTRICTED` and `WALKWAY`.
 
@@ -347,8 +359,11 @@ Response:
 }
 ```
 
-Deleting a zone sets `zone_violations.zone_id` to `NULL`. Historical zone
-violations keep their copied `zone_name`.
+Deleting a zone removes its camera-zone-view configuration and physical-zone
+configuration. Historical zone violations keep copied `zone_name`,
+`zone_type`, and `source_key`; nullable references such as
+`physical_zone_id`, `camera_zone_view_id`, and the API alias `zone_id` may be
+`null` after referenced configuration is deleted.
 
 ### Delete zones for a video
 
@@ -384,18 +399,29 @@ Response:
   {
     "id": 18,
     "zone_id": 3,
+    "camera_id": 2,
+    "physical_zone_id": 5,
+    "camera_zone_view_id": 3,
     "zone_name": "Restricted Area",
     "zone_type": "RESTRICTED",
     "track_id": 7,
     "timestamp": "2026-06-06T08:30:02+00:00",
     "video_name": "factory.mp4",
     "frame_index": 170,
-    "snapshot_path": "http://localhost:9000/bucket/object?signature=..."
+    "snapshot_path": "http://localhost:9000/bucket/object?signature=...",
+    "status": "OPEN",
+    "severity": null
   }
 ]
 ```
 
-`zone_id` and `zone_type` can be `null` after the referenced zone is deleted.
+Zone incidents persist `physical_zone_id`, `camera_zone_view_id`, copied
+`zone_name`, copied `zone_type`, and copied `source_key`. `zone_id` is kept as
+a backward-compatible API alias for `camera_zone_view_id`.
+
+`physical_zone_id`, `camera_zone_view_id`, and `zone_id` can be `null` after
+referenced configuration is deleted. Copied `zone_name`, `zone_type`, and
+`video_name` remain available for historical reporting.
 
 ### Delete one zone violation
 

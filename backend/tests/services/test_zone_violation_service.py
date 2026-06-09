@@ -16,8 +16,11 @@ NOW = datetime(2026, 6, 5, 12, 0, tzinfo=timezone.utc)
 def _violation() -> ZoneViolationModel:
     return ZoneViolationModel(
         id=5,
-        zone_id=3,
+        camera_id=2,
+        physical_zone_id=3,
+        camera_zone_view_id=4,
         zone_name="Restricted Area",
+        zone_type="RESTRICTED",
         source_key="factory.mp4",
         tracker_id=42,
         occurred_at=NOW,
@@ -32,8 +35,11 @@ def test_zone_violation_service_maps_api_and_database_fields():
     service = ZoneViolationService(repository)
 
     result = service.create_zone_violation(
-        zone_id=3,
+        camera_zone_view_id=4,
+        physical_zone_id=3,
+        camera_id=2,
         zone_name="Restricted Area",
+        zone_type="RESTRICTED",
         video_name="factory.mp4",
         track_id=42,
         timestamp="2026-06-05T12:00:00Z",
@@ -42,12 +48,22 @@ def test_zone_violation_service_maps_api_and_database_fields():
     )
 
     created = repository.create.call_args.args[0]
+    assert created.camera_id == 2
+    assert created.physical_zone_id == 3
+    assert created.camera_zone_view_id == 4
     assert created.source_key == "factory.mp4"
+    assert created.zone_type == "RESTRICTED"
     assert created.tracker_id == 42
     assert created.snapshot_path == "zone.jpg"
+    assert result.zone_id == 4
+    assert result.camera_id == 2
+    assert result.physical_zone_id == 3
+    assert result.camera_zone_view_id == 4
     assert result.video_name == "factory.mp4"
+    assert result.zone_type == "RESTRICTED"
     assert result.track_id == 42
     assert result.snapshot_path == "/snapshots/zone.jpg"
+    assert result.status == "OPEN"
     assert not isinstance(result, ZoneViolationModel)
 
 
@@ -63,7 +79,9 @@ def test_zone_violation_service_uploads_snapshot_and_stores_object_key():
     service = ZoneViolationService(repository, storage)
 
     result = service.persist_zone_violation(
-        zone_id=3,
+        camera_zone_view_id=4,
+        physical_zone_id=3,
+        camera_id=2,
         zone_name="Restricted Area",
         zone_type="RESTRICTED",
         video_name="factory.mp4",
@@ -74,6 +92,9 @@ def test_zone_violation_service_uploads_snapshot_and_stores_object_key():
     )
 
     created = repository.create.call_args.args[0]
+    assert created.camera_id == 2
+    assert created.physical_zone_id == 3
+    assert created.camera_zone_view_id == 4
     assert created.snapshot_path == (
         "zone-violations/2026/06/05/evidence.jpg"
     )
@@ -107,30 +128,30 @@ def test_zone_violation_service_read_recent_validation_and_errors():
         service.get_recent_zone_violations(10)
 
 
-def test_zone_violation_service_returns_detached_zone_with_null_id():
+def test_zone_violation_service_returns_detached_camera_zone_view_with_null_id():
     repository = Mock()
     repository.get_recent.return_value = [
-        _violation().model_copy(update={"zone_id": None})
+        _violation().model_copy(update={"camera_zone_view_id": None})
     ]
     storage = Mock()
     storage.get_object_url.return_value = "http://minio/read-url"
-    zone_repository = Mock()
     service = ZoneViolationService(
         repository,
         storage,
-        zone_repository,
     )
 
     result = service.get_recent_zone_violations()[0]
 
     assert result.zone_id is None
+    assert result.camera_zone_view_id is None
+    assert result.physical_zone_id == 3
+    assert result.camera_id == 2
     assert result.zone_name == "Restricted Area"
-    assert result.zone_type is None
+    assert result.zone_type == "RESTRICTED"
     assert result.video_name == "factory.mp4"
     assert result.timestamp == "2026-06-05T12:00:00+00:00"
     assert result.frame_index == 20
     assert result.snapshot_path == "http://minio/read-url"
-    zone_repository.get_by_id.assert_not_called()
 
 
 def test_zone_violation_service_returns_null_track_id():

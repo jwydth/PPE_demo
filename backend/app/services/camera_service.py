@@ -8,6 +8,7 @@ from sqlmodel import Session
 from app.db.session import get_session
 from app.models.camera import Camera
 from app.repositories.camera_repository import CameraRepository
+from app.repositories.factory_repository import FactoryRepository
 from app.services import ServiceNotFoundError, ServiceValidationError
 
 
@@ -27,8 +28,13 @@ class CameraService:
     def __init__(
         self,
         repository: Annotated[CameraRepository, Depends(CameraRepository)],
+        factory_repository: Annotated[
+            FactoryRepository,
+            Depends(FactoryRepository),
+        ],
     ) -> None:
         self.repository = repository
+        self.factory_repository = factory_repository
 
     def create_camera(
         self,
@@ -46,8 +52,10 @@ class CameraService:
                 f"Camera source_key '{normalized_source_key}' already exists."
             )
 
+        factory_id = self._get_default_factory_id()
         camera = self.repository.create(
             Camera(
+                factory_id=factory_id,
                 name=normalized_name,
                 source_key=normalized_source_key,
                 source_uri=_optional_text(source_uri),
@@ -79,11 +87,17 @@ class CameraService:
             raise ServiceNotFoundError(f"Camera {camera_id} was not found.")
         return _to_dto(camera)
 
+    def _get_default_factory_id(self) -> int:
+        factory = self.factory_repository.get_or_create_default_factory()
+        if factory.id is None:
+            raise ServiceValidationError("Default factory is missing an ID.")
+        return factory.id
+
 
 def get_camera_service(
     session: Annotated[Session, Depends(get_session)],
 ) -> CameraService:
-    return CameraService(CameraRepository(session))
+    return CameraService(CameraRepository(session), FactoryRepository(session))
 
 
 def _to_dto(camera: Camera) -> CameraDTO:

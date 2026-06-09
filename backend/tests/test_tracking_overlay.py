@@ -185,8 +185,17 @@ def test_tracking_overlay_includes_missing_equipment_and_violation_status():
         decision={"unknown": False, "worker": worker},
         frame_index=4,
         fps=20,
+        camera_zone_view_id=12,
+        physical_zone_id=3,
+        zone_name="Restricted Area",
+        zone_type="RESTRICTED",
     )
 
     assert frames[0].missing_equipment == ["Vest"]
     assert frames[0].status == "violation"
     assert frames[0].compliant is False
+    assert frames[0].zone_id == 12
+    assert frames[0].camera_zone_view_id == 12
+    assert frames[0].physical_zone_id == 3
+    assert frames[0].zone_name == "Restricted Area"
+    assert frames[0].zone_type == "RESTRICTED"

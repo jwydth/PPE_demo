@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated, Iterator
 from urllib.parse import urlparse
@@ -8,7 +9,8 @@ from sqlmodel import Session
 
 from app.db.session import get_engine, get_session
 from app.models.zone_violation import ZoneViolation as ZoneViolationModel
-from app.repositories.zone_repository import ZoneRepository
+from app.repositories.camera_repository import CameraRepository
+from app.repositories.camera_zone_view_repository import CameraZoneViewRepository
 from app.repositories.zone_violation_repository import ZoneViolationRepository
 from app.schemas.violation import ZoneViolation
 from app.services import ServiceNotFoundError, ServiceValidationError
@@ -23,18 +25,24 @@ class ZoneViolationService:
             Depends(ZoneViolationRepository),
         ],
         storage: EvidenceStorage | None = None,
-        zone_repository: ZoneRepository | None = None,
+        camera_zone_view_repository: CameraZoneViewRepository | None = None,
+        camera_repository: CameraRepository | None = None,
     ) -> None:
         self.repository = repository
         self.storage = storage
-        self.zone_repository = zone_repository
+        self.camera_zone_view_repository = camera_zone_view_repository
+        self.camera_repository = camera_repository
 
     def persist_zone_violation(
         self,
         *,
-        zone_id: int,
+        camera_zone_view_id: int | None = None,
+        # Backward-compatible caller alias for camera_zone_view_id.
+        zone_id: int | None = None,
+        camera_id: int | None = None,
+        physical_zone_id: int | None = None,
         zone_name: str,
-        zone_type: str | None,
+        zone_type: str,
         video_name: str,
         track_id: int,
         timestamp: str | datetime,
@@ -43,11 +51,22 @@ class ZoneViolationService:
     ) -> ZoneViolation:
         storage = self._require_storage()
         stored_object = storage.upload_zone_snapshot(local_snapshot_path)
+        source_key = _require_text(video_name, "video_name")
+        context = self._zone_context(
+            camera_zone_view_id=camera_zone_view_id,
+            zone_id=zone_id,
+            camera_id=camera_id,
+            physical_zone_id=physical_zone_id,
+            source_key=source_key,
+        )
         violation = self.repository.create(
             ZoneViolationModel(
-                zone_id=_require_positive_id(zone_id, "zone_id"),
+                camera_id=context.camera_id,
+                physical_zone_id=context.physical_zone_id,
+                camera_zone_view_id=context.camera_zone_view_id,
                 zone_name=_require_text(zone_name, "zone_name"),
-                source_key=_require_text(video_name, "video_name"),
+                zone_type=_require_text(zone_type, "zone_type"),
+                source_key=source_key,
                 tracker_id=track_id,
                 occurred_at=_parse_timestamp(timestamp),
                 frame_index=_require_nonnegative(frame_index, "frame_index"),
@@ -57,33 +76,51 @@ class ZoneViolationService:
         return _to_schema(
             violation,
             snapshot_url=stored_object.object_url,
-            zone_type=zone_type,
         )
 
     def create_zone_violation(
         self,
         *,
-        zone_id: int,
+        camera_zone_view_id: int | None = None,
+        # Backward-compatible caller alias for camera_zone_view_id.
+        zone_id: int | None = None,
+        camera_id: int | None = None,
+        physical_zone_id: int | None = None,
         zone_name: str,
+        zone_type: str,
         video_name: str,
         track_id: int,
         timestamp: str | datetime,
         frame_index: int,
         snapshot_url: str | None = None,
-        zone_type: str | None = None,
+        status: str = "OPEN",
+        severity: str | None = None,
     ) -> ZoneViolation:
+        source_key = _require_text(video_name, "video_name")
+        context = self._zone_context(
+            camera_zone_view_id=camera_zone_view_id,
+            zone_id=zone_id,
+            camera_id=camera_id,
+            physical_zone_id=physical_zone_id,
+            source_key=source_key,
+        )
         violation = self.repository.create(
             ZoneViolationModel(
-                zone_id=_require_positive_id(zone_id, "zone_id"),
+                camera_id=context.camera_id,
+                physical_zone_id=context.physical_zone_id,
+                camera_zone_view_id=context.camera_zone_view_id,
                 zone_name=_require_text(zone_name, "zone_name"),
-                source_key=_require_text(video_name, "video_name"),
+                zone_type=_require_text(zone_type, "zone_type"),
+                source_key=source_key,
                 tracker_id=track_id,
                 occurred_at=_parse_timestamp(timestamp),
                 frame_index=_require_nonnegative(frame_index, "frame_index"),
                 snapshot_path=_to_snapshot_path(snapshot_url),
+                status=_require_text(status, "status"),
+                severity=_optional_text(severity),
             )
         )
-        return _to_schema(violation, zone_type=zone_type)
+        return _to_schema(violation)
 
     def get_zone_violation(self, violation_id: int) -> ZoneViolation:
         normalized_id = _require_positive_id(violation_id, "violation_id")
@@ -115,7 +152,6 @@ class ZoneViolationService:
         return _to_schema(
             violation,
             snapshot_url=self._snapshot_url(violation.snapshot_path),
-            zone_type=self._zone_type(violation.zone_id),
         )
 
     def _snapshot_url(self, snapshot_path: str | None) -> str | None:
@@ -125,12 +161,6 @@ class ZoneViolationService:
             return _to_snapshot_url(snapshot_path)
         return self.storage.get_object_url(snapshot_path)
 
-    def _zone_type(self, zone_id: int | None) -> str | None:
-        if zone_id is None or self.zone_repository is None:
-            return None
-        zone = self.zone_repository.get_by_id(zone_id)
-        return zone.zone_type if zone is not None else None
-
     def _require_storage(self) -> EvidenceStorage:
         if self.storage is None:
             raise ServiceValidationError(
@@ -138,18 +168,65 @@ class ZoneViolationService:
             )
         return self.storage
 
+    def _zone_context(
+        self,
+        *,
+        camera_zone_view_id: int | None,
+        zone_id: int | None,
+        camera_id: int | None,
+        physical_zone_id: int | None,
+        source_key: str,
+    ) -> "ZoneViolationContext":
+        resolved_view_id = _optional_positive_id(
+            camera_zone_view_id if camera_zone_view_id is not None else zone_id,
+            "camera_zone_view_id",
+        )
+        resolved_camera_id = _optional_positive_id(camera_id, "camera_id")
+        resolved_physical_zone_id = _optional_positive_id(
+            physical_zone_id,
+            "physical_zone_id",
+        )
+
+        if resolved_view_id is not None and self.camera_zone_view_repository:
+            view = self.camera_zone_view_repository.get_by_id(resolved_view_id)
+            if view is not None:
+                resolved_camera_id = view.camera_id
+                resolved_physical_zone_id = view.physical_zone_id
+
+        if resolved_camera_id is None and self.camera_repository:
+            camera = self.camera_repository.get_by_source_key(source_key)
+            if camera is not None:
+                resolved_camera_id = camera.id
+
+        return ZoneViolationContext(
+            camera_id=resolved_camera_id,
+            physical_zone_id=resolved_physical_zone_id,
+            camera_zone_view_id=resolved_view_id,
+        )
+
+
+@dataclass(frozen=True)
+class ZoneViolationContext:
+    camera_id: int | None
+    physical_zone_id: int | None
+    camera_zone_view_id: int | None
+
 
 def _to_schema(
     violation: ZoneViolationModel,
     *,
     snapshot_url: str | None = None,
-    zone_type: str | None = None,
 ) -> ZoneViolation:
     return ZoneViolation(
         id=violation.id,
-        zone_id=violation.zone_id,
+        # Keep the frontend contract stable while persistence uses
+        # camera_zone_view_id instead of the retired zones table.
+        zone_id=violation.camera_zone_view_id,
+        camera_id=violation.camera_id,
+        physical_zone_id=violation.physical_zone_id,
+        camera_zone_view_id=violation.camera_zone_view_id,
         zone_name=violation.zone_name,
-        zone_type=zone_type,
+        zone_type=violation.zone_type,
         track_id=violation.tracker_id,
         timestamp=_timestamp_iso(violation.occurred_at),
         video_name=violation.source_key,
@@ -157,8 +234,10 @@ def _to_schema(
         snapshot_path=(
             snapshot_url
             if snapshot_url is not None
-            else _to_snapshot_url(violation.snapshot_path)
+                else _to_snapshot_url(violation.snapshot_path)
         ),
+        status=violation.status,
+        severity=violation.severity,
     )
 
 
@@ -212,6 +291,12 @@ def _require_positive_id(value: int, field_name: str) -> int:
     return value
 
 
+def _optional_positive_id(value: int | None, field_name: str) -> int | None:
+    if value is None:
+        return None
+    return _require_positive_id(value, field_name)
+
+
 def _require_nonnegative(value: int, field_name: str) -> int:
     if value < 0:
         raise ServiceValidationError(f"{field_name} must not be negative.")
@@ -239,7 +324,8 @@ def get_zone_violation_service(
     return ZoneViolationService(
         ZoneViolationRepository(session),
         storage,
-        ZoneRepository(session),
+        CameraZoneViewRepository(session),
+        CameraRepository(session),
     )
 
 
@@ -249,5 +335,6 @@ def open_zone_violation_service() -> Iterator[ZoneViolationService]:
         yield ZoneViolationService(
             ZoneViolationRepository(session),
             get_evidence_storage(),
-            ZoneRepository(session),
+            CameraZoneViewRepository(session),
+            CameraRepository(session),
         )
