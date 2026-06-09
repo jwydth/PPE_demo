@@ -7,11 +7,15 @@ import {
   Factory,
   Maximize2,
   MoreHorizontal,
+  MousePointer2,
+  Pause,
+  Pencil,
+  Play,
   RefreshCw,
   Shield,
   type LucideIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   analyzeImage,
   analyzeVideo,
@@ -263,6 +267,15 @@ function CameraPanel() {
   const [error, setError] = useState("");
   const [ppeEnabled, setPpeEnabled] = useState(true);
   const [zoneEnabled, setZoneEnabled] = useState(false);
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [configMode, setConfigMode] = useState<"draw" | "modify">("draw");
+  const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null);
+  const [dragState, setDragState] = useState<{
+    type: "point" | "zone";
+    zoneId: string;
+    pointIndex?: number;
+    startPos: Point2D;
+  } | null>(null);
   const [zonesForVideo, setZonesForVideo] = useState<DraftZone[]>([]);
   const [draftPoints, setDraftPoints] = useState<Point2D[]>([]);
   const [zoneName, setZoneName] = useState("Restricted Area");
@@ -270,10 +283,23 @@ function CameraPanel() {
   const [dwellThresholdSeconds, setDwellThresholdSeconds] = useState(0);
   const [status, setStatus] = useState("");
   const [surfaceElement, setSurfaceElement] = useState<HTMLDivElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+
   const videoUrl = useMemo(
     () => (file?.type.startsWith("video/") ? URL.createObjectURL(file) : ""),
     [file],
   );
+
+  const togglePlayback = () => {
+    if (!videoRef.current) return;
+    if (isPlaying) {
+      videoRef.current.pause();
+    } else {
+      videoRef.current.play();
+    }
+  };
+
   const currentIncidents = useMemo(
     () => [
       ...(ppeEnabled ? (videoResult?.reports ?? []) : []),
@@ -343,13 +369,14 @@ function CameraPanel() {
     setZonesForVideo([]);
     setDraftPoints([]);
     setPhase("idle");
+    setIsDrawing(false);
     if (nextFile.type.startsWith("video/")) {
       void loadSavedZones(nextFile.name);
     }
   };
 
   const addZonePoint = (event: React.MouseEvent<HTMLDivElement>) => {
-    if (!surfaceElement || phase === "loading" || !zoneEnabled) return;
+    if (!surfaceElement || phase === "loading" || !isDrawing) return;
     const rect = surfaceElement.getBoundingClientRect();
     setDraftPoints((current) => [
       ...current,
@@ -419,7 +446,7 @@ function CameraPanel() {
       setPhase("error");
       return;
     }
-    if (zoneEnabled && isVideo && zonesReadyToSave.length === 0) {
+    if (zoneEnabled && isVideo && zonesReadyToSave.length === 0 && zonesForVideo.length === 0) {
       setError("Draw or load at least one zone before running Zone Monitoring.");
       setPhase("error");
       return;
@@ -429,9 +456,10 @@ function CameraPanel() {
     setVideoResult(null);
     setError("");
     setPhase("loading");
+    setIsDrawing(false);
     try {
       if (isVideo) {
-        if (zoneEnabled) {
+        if (zoneEnabled && zonesReadyToSave.length > 0) {
           await persistZones(zonesReadyToSave);
         }
         setVideoResult(
@@ -458,6 +486,7 @@ function CameraPanel() {
     setStatus("");
     setDraftPoints([]);
     setPhase("idle");
+    setIsDrawing(false);
   };
 
   return (
@@ -526,14 +555,19 @@ function CameraPanel() {
                     className="relative aspect-video overflow-hidden rounded-md border border-slate-800 bg-black"
                   >
                     <video
+                      ref={videoRef}
                       src={videoUrl}
-                      controls
+                      controls={!isDrawing}
                       muted
                       playsInline
-                      className="absolute inset-0 h-full w-full object-contain"
+                      onPlay={() => setIsPlaying(true)}
+                      onPause={() => setIsPlaying(false)}
+                      className={`absolute inset-0 h-full w-full object-contain ${
+                        isDrawing ? "pointer-events-none" : ""
+                      }`}
                     />
-                    {zoneEnabled ? (
-                      <svg className="absolute inset-0 h-full w-full" viewBox="0 0 1 1" preserveAspectRatio="none">
+                    {zoneEnabled || isDrawing ? (
+                      <svg className={`absolute inset-0 h-full w-full ${isDrawing ? "pointer-events-auto" : "pointer-events-none"}`} viewBox="0 0 1 1" preserveAspectRatio="none">
                         {displayedZones.map((zone) => (
                           <polygon
                             key={zone.id}
@@ -555,9 +589,13 @@ function CameraPanel() {
                       </svg>
                     ) : null}
                   </div>
-                  {zoneEnabled ? (
+                  {isDrawing ? (
                     <p className="mt-2 text-xs text-slate-400">
-                      Click the video frame to add zone polygon points before running Zone Monitoring.
+                      Click the video frame to add zone polygon points. Video controls are disabled during drawing.
+                    </p>
+                  ) : zoneEnabled ? (
+                    <p className="mt-2 text-xs text-slate-400">
+                      Viewing saved zones. Click "Start draw zone" to add new areas.
                     </p>
                   ) : null}
                 </div>
@@ -566,8 +604,25 @@ function CameraPanel() {
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
                     Camera Model Settings
                   </p>
-                  {zoneEnabled ? (
+                  {isDrawing ? (
                     <>
+                      <div className="flex items-center justify-between border-b border-white/10 pb-2">
+                        <span className="text-xs font-bold text-lime-200">Drawing Active</span>
+                        <button
+                          onClick={togglePlayback}
+                          className="flex items-center gap-1.5 rounded bg-white/10 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-white hover:bg-white/20"
+                        >
+                          {isPlaying ? (
+                            <>
+                              <Pause className="size-3" /> Pause
+                            </>
+                          ) : (
+                            <>
+                              <Play className="size-3" /> Play
+                            </>
+                          )}
+                        </button>
+                      </div>
                       <label className="grid gap-1 text-sm font-semibold text-slate-200">
                         Zone name
                         <input
@@ -638,14 +693,35 @@ function CameraPanel() {
                           Clear zones
                         </button>
                       </div>
+                      <button
+                        type="button"
+                        onClick={() => setIsDrawing(false)}
+                        className="w-full rounded-md border border-white/20 bg-white/5 py-2 text-sm font-semibold text-white hover:bg-white/10"
+                      >
+                        Stop configuration
+                      </button>
                       <div className="rounded-md bg-slate-900 p-3 text-sm text-slate-300">
-                        Saved zones: {zonesForVideo.length}
-                        <br />
                         Draft points: {draftPoints.length}
                       </div>
                     </>
                   ) : (
-                    <EmptyState text="Enable Zone Monitoring to draw or load camera zones." />
+                    <div className="grid gap-3">
+                      {!zoneEnabled ? (
+                        <EmptyState text="Enable Zone Monitoring to view saved areas or start drawing." />
+                      ) : (
+                        <div className="rounded-md bg-slate-900 p-3 text-sm text-slate-300">
+                          Viewing {zonesForVideo.length} saved zone(s).
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setIsDrawing(true)}
+                        disabled={!isVideo || phase === "loading"}
+                        className="w-full rounded-md bg-lime-200 py-2 text-sm font-semibold text-green-950 hover:bg-lime-100 disabled:opacity-50"
+                      >
+                        Configure zones
+                      </button>
+                    </div>
                   )}
                 </aside>
               </div>

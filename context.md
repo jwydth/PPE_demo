@@ -2,82 +2,77 @@
 
 ## Overview
 
-The application detects PPE compliance and monitors configurable safety zones
-in uploaded images and videos.
+The application detects PPE compliance (helmets and vests) and monitors configurable safety zones in uploaded images and videos. It is designed for smart factory safety monitoring.
 
 ## Architecture
 
 ### Backend
 
-- FastAPI provides detection, zone CRUD, violation history, and health routes.
-- YOLOv8 performs person, helmet, and vest detection and video tracking.
-- PostgreSQL stores cameras, zones, PPE violations, and zone violations through
-  SQLModel repositories and services.
-- MinIO stores PPE and zone evidence snapshots.
-- OpenCV performs point-in-polygon checks and draws evidence overlays.
-
-PostgreSQL is the only runtime database.
-
-The documented target database schema adds factories and login users, and
-separates real factory areas (`physical_zones`) from per-camera detection
-polygons (`camera_zone_views`). Cameras and physical zones have a many-to-many
-relationship through camera-zone views. Detection uses normalized coordinates
-from the camera-zone view, while reporting and history group by the physical
-zone. The target also adds incident status, severity, acknowledgement, and
-resolution fields to PPE and zone violations.
-
-This target is documentation only. SQLModel models, migrations, routes, and
-tests still describe the currently implemented schema. Users are for login and
-incident acknowledgement only; roles and permissions are deferred. Behavior
-violations are deferred until danger behavior detection exists.
+- **Framework:** FastAPI provides the REST API.
+- **Detection & Tracking:** YOLOv8 (via `ultralytics` library) performs person, helmet, and vest detection. It also handles object tracking for video processing.
+- **Database:** PostgreSQL with SQLModel (SQLAlchemy) stores cameras, zones, and violation history.
+- **Storage:** MinIO is used for persistent evidence storage (snapshots). Local storage is used for temporary snapshots during processing.
+- **Inference Logic:**
+    - **PPE Detection:** Checks overlap between person and equipment (helmet/vest) detections.
+    - **Zone Monitoring:** Performs point-in-polygon checks using a normalized 1000x1000 grid. Foot points of tracked persons are used for incursion detection.
+    - **Dwell Threshold:** Violations are triggered when a person stays in a restricted zone (or outside a walkway) longer than a configured threshold.
 
 ### Frontend
 
-- Next.js and TypeScript provide the dashboard and history views.
-- Fabric.js provides zone drawing and editing.
-- Zone API response fields remain compatible with the frontend.
+- **Framework:** Next.js (App Router) with TypeScript.
+- **Styling:** Tailwind CSS (v4).
+- **Icons:** Lucide React.
+- **Zone Drawing:** Custom SVG overlay on the video element for drawing and displaying polygons (replaces previous Fabric.js mentions).
+- **Dashboard:** A single-page dashboard (`DashboardShell`) that manages camera feeds, violation logs, and safety rules.
 
-## Zone Monitoring
+## Data Model
 
-In the target schema, a physical zone may have a floor-plan polygon, while
-each camera-zone view stores its own normalized polygon for video detection.
-Normalized camera-view points are scaled to a 1000 by 1000 logical grid for
-point-in-polygon checks. BEV calibration and homography are not used.
+- **Camera:** Represents a video source (often identified by filename in this demo).
+- **Zone:** Configuration for a safety zone (RESTRICTED or WALKWAY). Includes `dwell_threshold_seconds`, `ui_shape_data`, and `normalized_coordinates`.
+- **PPEViolation:** Recorded incident of missing PPE.
+- **PPEViolationSubject:** Specific person in a PPE violation, listing missing equipment.
+- **ZoneViolation:** Recorded incident of a zone incursion.
 
-Supported zone types:
+## Folder Structure
 
-- `RESTRICTED`: a violation occurs when a worker foot point remains inside the
-  zone beyond its dwell threshold.
-- `WALKWAY`: a violation occurs when a worker foot point remains outside the
-  zone beyond its dwell threshold.
+### Backend (`/backend`)
+- `app/main.py`: Application entry point and router inclusion.
+- `app/core/config.py`: Configuration and environment settings.
+- `app/models/`: SQLModel table definitions (`camera.py`, `zone.py`, `ppe_violation.py`, `zone_violation.py`).
+- `app/repositories/`: Database abstraction layer (CRUD).
+- `app/routers/`: API endpoints (`detection.py`, `zones.py`, `testing.py`).
+- `app/schemas/`: Pydantic models for API requests/responses.
+- `app/services/`:
+    - `ppe_detector.py`: YOLOv8 inference and tracking logic.
+    - `zone_service.py`: Zone management and incursion detection.
+    - `ppe_violation_service.py` / `zone_violation_service.py`: Violation persistence logic.
+    - `spatial.py`: Geometric utilities (point-in-polygon).
+- `app/storage/`: Evidence storage handling (MinIO).
 
-Zone violation evidence draws a semi-transparent zone polygon and solid
-boundary on the snapshot before the image is uploaded to MinIO. Restricted
-zones use red; walkways use green.
+### Frontend (`/frontend`)
+- `src/app/`: Next.js App Router pages and layout.
+- `src/components/`:
+    - `dashboard/`: `DashboardShell.tsx` (main UI) and data constants.
+    - `ppe/`: UI components for detection results, video overlays, and file uploads.
+- `src/lib/ppe-api.ts`: API client for communicating with the backend.
+- `src/types/`: TypeScript interfaces for detection and zone data.
 
-## Persistence
+## Key Workflows
 
-- PPE violations are persisted through `PPEViolationService`.
-- Zone violations are persisted through `ZoneViolationService`.
-- Zone CRUD is persisted through `ZoneService` and PostgreSQL repositories.
-- Evidence files are uploaded through `EvidenceStorage`.
-- Local temporary snapshots are removed after successful persistence.
-
-## Key Backend Files
-
-- `backend/app/routers/detection.py`: detection and violation-history routes.
-- `backend/app/routers/testing.py`: PostgreSQL and MinIO health routes.
-- `backend/app/routers/zones.py`: PostgreSQL-backed zone CRUD and history.
-- `backend/app/services/ppe_detector.py`: inference and evidence rendering.
-- `backend/app/services/zone_service.py`: zone loading, incursion logic, and
-  zone violation persistence.
-- `backend/app/services/spatial.py`: point-in-polygon utility.
-- `backend/app/storage/evidence_storage.py`: MinIO evidence handling.
+1. **Zone Configuration:** Users can upload a video and draw polygons over the frame to define safety zones. These are saved to the backend.
+2. **Inference:**
+    - For images: A single-pass detection returns PPE status.
+    - For videos: Tracking-based inference monitors persons across frames, applying temporal filters to reduce false positives and detecting zone incursions based on dwell time.
+3. **Violation Reporting:** When a violation is confirmed, a snapshot is taken, annotated with the violation details, and saved to MinIO. The event is recorded in PostgreSQL.
 
 ## Commands
 
-```text
+```bash
+# Backend
 uvicorn app.main:app --app-dir backend --reload --port 8000
 python -m pytest
-python -m ruff check app tests
+
+# Frontend
+cd frontend
+npm run dev
 ```
