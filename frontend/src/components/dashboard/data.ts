@@ -1,15 +1,11 @@
 import {
-  AlertTriangle,
-  BadgeCheck,
   Bell,
   Camera,
   ClipboardCheck,
   Clock3,
   Factory,
-  Forklift,
   Gauge,
   HardHat,
-  ShieldCheck,
   Siren,
   Thermometer,
   Users,
@@ -30,14 +26,6 @@ export type SafetyMetric = {
   trend: string;
   icon: LucideIcon;
   tone: "green" | "amber" | "blue" | "slate";
-};
-
-export type SafetyRule = {
-  title: string;
-  description: string;
-  status: "Enabled" | "Active" | "Standing By";
-  confidence: number;
-  icon: LucideIcon;
 };
 
 export type Incident = {
@@ -90,30 +78,6 @@ export const safetyMetrics: SafetyMetric[] = [
   },
 ];
 
-export const safetyRules: SafetyRule[] = [
-  {
-    title: "Mandatory PPE Detection",
-    description: "Monitoring helmets, face masks, and high-visibility vests.",
-    status: "Enabled",
-    confidence: 98,
-    icon: ShieldCheck,
-  },
-  {
-    title: "Forklift Proximity Geofence",
-    description: "Alerts when personnel enter the 3m operating radius.",
-    status: "Active",
-    confidence: 94,
-    icon: Forklift,
-  },
-  {
-    title: "Hazard Sign Zone Activation",
-    description: "Triggers digital warnings when spill or obstruction risk rises.",
-    status: "Standing By",
-    confidence: 87,
-    icon: AlertTriangle,
-  },
-];
-
 export const incidents: Incident[] = [
   {
     title: "Vest not detected near palletizer",
@@ -145,7 +109,6 @@ export const cameraStats = [
 export const navigation = [
   { label: "Camera Feeds", active: true, icon: Camera },
   { label: "Violations Log", active: false, icon: ClipboardCheck },
-  { label: "Safety Audit", active: false, icon: BadgeCheck, disabled: true },
 ];
 
 export const appActions = [

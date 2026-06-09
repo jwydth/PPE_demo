@@ -2,11 +2,9 @@
 
 import {
   ArrowUpRight,
-  CheckCircle2,
   ChevronDown,
   Factory,
   Maximize2,
-  MoreHorizontal,
   Pause,
   Play,
   RefreshCw,
@@ -46,10 +44,8 @@ import {
   appActions,
   navigation,
   safetyMetrics,
-  safetyRules,
   zones,
   type SafetyMetric,
-  type SafetyRule,
   type Zone,
 } from "./data";
 
@@ -67,7 +63,7 @@ const zoneStatus = {
 };
 
 type AnalysisPhase = "idle" | "loading" | "done" | "error";
-type DashboardView = "feeds" | "violations" | "audit";
+type DashboardView = "feeds" | "violations";
 type DraftZone = {
   id: string;
   name: string;
@@ -79,7 +75,6 @@ type DraftZone = {
 const navViewByLabel: Record<string, DashboardView> = {
   "Camera Feeds": "feeds",
   "Violations Log": "violations",
-  "Safety Audit": "audit",
 };
 
 const zoneColors: Record<ZoneType, string> = {
@@ -133,24 +128,16 @@ function TopBar({
         {navigation.map((item) => (
           <button
             key={item.label}
-            onClick={() => !item.disabled && onViewChange(navViewByLabel[item.label] ?? "feeds")}
-            disabled={item.disabled}
+            onClick={() => onViewChange(navViewByLabel[item.label] ?? "feeds")}
             className={`flex h-full items-center gap-2 border-b-2 px-4 text-xs font-semibold uppercase tracking-wide transition ${
-              item.disabled
-                ? "cursor-not-allowed border-transparent text-slate-600"
-                : activeView === (navViewByLabel[item.label] ?? "feeds")
-                  ? "border-lime-200 text-lime-200"
-                  : "border-transparent text-slate-400 hover:text-slate-100"
+              activeView === (navViewByLabel[item.label] ?? "feeds")
+                ? "border-lime-200 text-lime-200"
+                : "border-transparent text-slate-400 hover:text-slate-100"
             }`}
             type="button"
           >
             <item.icon className="size-4" aria-hidden="true" />
             {item.label}
-            {item.disabled && (
-              <span className="ml-1 rounded bg-slate-800 px-1 py-0.5 text-[8px] font-bold text-slate-400">
-                SOON
-              </span>
-            )}
           </button>
         ))}
       </nav>
@@ -197,21 +184,6 @@ function ZoneSidebar() {
           {zones.map((zone) => (
             <ZoneButton key={zone.name} zone={zone} active={zone.name === "Packaging Line 1"} />
           ))}
-        </div>
-
-        <div className="mt-auto rounded-md border border-slate-200 bg-white p-3">
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-            System Health
-          </p>
-          <div className="mt-3 flex items-center justify-between">
-            <span className="text-2xl font-semibold text-slate-950">99.7%</span>
-            <span className="rounded bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-200">
-              Operational
-            </span>
-          </div>
-          <p className="mt-2 text-sm text-slate-600">
-            Edge inference cluster is processing normally.
-          </p>
         </div>
       </div>
     </aside>
@@ -289,10 +261,6 @@ function CameraPanel() {
   const [zoneType, setZoneType] = useState<ZoneType>("RESTRICTED");
   const [dwellThresholdSeconds, setDwellThresholdSeconds] = useState(1.5);
   const [status, setStatus] = useState("");
-
-  useEffect(() => {
-    setDwellThresholdSeconds(zoneType === "RESTRICTED" ? 1.5 : 3);
-  }, [zoneType]);
 
   const [surfaceElement, setSurfaceElement] = useState<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -851,7 +819,11 @@ function CameraPanel() {
                         Zone type
                         <select
                           value={zoneType}
-                          onChange={(event) => setZoneType(event.target.value as ZoneType)}
+                          onChange={(event) => {
+                            const nextType = event.target.value as ZoneType;
+                            setZoneType(nextType);
+                            setDwellThresholdSeconds(nextType === "RESTRICTED" ? 1.5 : 3);
+                          }}
                           className="rounded-md border border-slate-700 bg-slate-900 px-3 py-2 font-normal text-white outline-none focus:border-lime-200"
                         >
                           <option value="RESTRICTED">Restricted</option>
@@ -1177,69 +1149,6 @@ function clamp01(value: number) {
   return Math.max(0, Math.min(1, value));
 }
 
-function RuleCard({ rule }: { rule: SafetyRule }) {
-  const standby = rule.status === "Standing By";
-
-  return (
-    <article className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex size-10 items-center justify-center rounded-md bg-slate-100 text-slate-700">
-          <rule.icon className="size-5" aria-hidden="true" />
-        </div>
-        <span
-          className={`rounded px-2 py-1 text-xs font-semibold ring-1 ${
-            standby
-              ? "bg-sky-50 text-sky-700 ring-sky-200"
-              : "bg-emerald-50 text-emerald-700 ring-emerald-200"
-          }`}
-        >
-          {rule.status}
-        </span>
-      </div>
-      <h3 className="mt-4 text-sm font-semibold text-slate-950">{rule.title}</h3>
-      <p className="mt-2 text-sm leading-6 text-slate-600">{rule.description}</p>
-      <div className="mt-4">
-        <div className="flex items-center justify-between text-xs font-medium text-slate-500">
-          <span>Confidence</span>
-          <span>{rule.confidence}%</span>
-        </div>
-        <div className="mt-2 h-2 rounded-full bg-slate-100">
-          <div
-            className="h-2 rounded-full bg-green-900"
-            style={{ width: `${rule.confidence}%` }}
-          />
-        </div>
-      </div>
-    </article>
-  );
-}
-
-function RulesPanel() {
-  return (
-    <section className="rounded-md border border-slate-200 bg-slate-50 p-4 shadow-sm">
-      <div className="mb-4 flex items-center justify-between gap-4 border-b border-slate-200 pb-3">
-        <div className="flex items-center gap-2">
-          <CheckCircle2 className="size-5 text-green-900" aria-hidden="true" />
-          <h2 className="text-base font-semibold text-slate-950">Active Safety Rules</h2>
-        </div>
-        <button
-          className="inline-flex size-9 items-center justify-center rounded-md text-slate-500 transition hover:bg-white hover:text-slate-950"
-          type="button"
-          aria-label="More safety rule actions"
-          title="More safety rule actions"
-        >
-          <MoreHorizontal className="size-5" aria-hidden="true" />
-        </button>
-      </div>
-      <div className="grid gap-3 md:grid-cols-3 lg:grid-cols-1 xl:grid-cols-3">
-        {safetyRules.map((rule) => (
-          <RuleCard key={rule.title} rule={rule} />
-        ))}
-      </div>
-    </section>
-  );
-}
-
 function IncidentPanel() {
   const [events, setEvents] = useState<(ViolationReport | ZoneViolation)[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1310,15 +1219,11 @@ export function DashboardShell() {
   const pageTitle =
     activeView === "violations"
         ? "Violations Log"
-        : activeView === "audit"
-          ? "Safety Audit"
-          : "Packaging Line 1";
+        : "Packaging Line 1";
   const pageDescription =
     activeView === "violations"
         ? "Review PPE and zone incidents recorded by the backend incident store."
-        : activeView === "audit"
-          ? "Review active computer vision safety rules and monitoring confidence."
-          : "Upload a camera simulation file, choose which detection models are enabled, and review the model outputs in one place.";
+        : "Upload a camera simulation file, choose which detection models are enabled, and review the model outputs in one place.";
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-950">
@@ -1355,14 +1260,8 @@ export function DashboardShell() {
 
             <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1.8fr)_minmax(360px,0.8fr)]">
               <div className="grid h-fit gap-4">
-                {activeView === "audit" ? <RulesPanel /> : null}
                 {activeView === "violations" ? <IncidentPanel /> : null}
-                {activeView === "feeds" ? (
-                  <>
-                    <CameraPanel />
-                    <RulesPanel />
-                  </>
-                ) : null}
+                {activeView === "feeds" ? <CameraPanel /> : null}
               </div>
               <div className="grid content-start gap-4">
                 <section className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
