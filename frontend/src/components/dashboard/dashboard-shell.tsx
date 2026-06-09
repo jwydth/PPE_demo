@@ -135,16 +135,24 @@ function TopBar({
         {navigation.map((item) => (
           <button
             key={item.label}
-            onClick={() => onViewChange(navViewByLabel[item.label] ?? "feeds")}
+            onClick={() => !item.disabled && onViewChange(navViewByLabel[item.label] ?? "feeds")}
+            disabled={item.disabled}
             className={`flex h-full items-center gap-2 border-b-2 px-4 text-xs font-semibold uppercase tracking-wide transition ${
-              activeView === (navViewByLabel[item.label] ?? "feeds")
-                ? "border-lime-200 text-lime-200"
-                : "border-transparent text-slate-400 hover:text-slate-100"
+              item.disabled
+                ? "cursor-not-allowed border-transparent text-slate-600"
+                : activeView === (navViewByLabel[item.label] ?? "feeds")
+                  ? "border-lime-200 text-lime-200"
+                  : "border-transparent text-slate-400 hover:text-slate-100"
             }`}
             type="button"
           >
             <item.icon className="size-4" aria-hidden="true" />
             {item.label}
+            {item.disabled && (
+              <span className="ml-1 rounded bg-slate-800 px-1 py-0.5 text-[8px] font-bold text-slate-400">
+                SOON
+              </span>
+            )}
           </button>
         ))}
       </nav>
@@ -963,14 +971,6 @@ function CameraPanel() {
                 </p>
                 <div className="mt-3 grid grid-cols-2 gap-2">
                   <CompactMetric
-                    label="Frames"
-                    value={`${videoResult.summary.processed_frames}/${videoResult.summary.total_frames}`}
-                  />
-                  <CompactMetric
-                    label="Runtime"
-                    value={`${(videoResult.summary.inference_ms / 1000).toFixed(1)}s`}
-                  />
-                  <CompactMetric
                     label="Models"
                     value={[ppeEnabled ? "PPE" : "", zoneEnabled ? "Zone" : ""]
                       .filter(Boolean)
@@ -1354,7 +1354,6 @@ export function DashboardShell() {
                 ) : null}
               </div>
               <div className="grid content-start gap-4">
-                {activeView !== "violations" ? <IncidentPanel /> : null}
                 <section className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
                   <h2 className="text-base font-semibold text-slate-950">
                     Operational Notes

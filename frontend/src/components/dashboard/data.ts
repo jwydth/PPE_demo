@@ -145,7 +145,7 @@ export const cameraStats = [
 export const navigation = [
   { label: "Camera Feeds", active: true, icon: Camera },
   { label: "Violations Log", active: false, icon: ClipboardCheck },
-  { label: "Safety Audit", active: false, icon: BadgeCheck },
+  { label: "Safety Audit", active: false, icon: BadgeCheck, disabled: true },
 ];
 
 export const appActions = [
