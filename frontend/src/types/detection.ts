@@ -1,3 +1,5 @@
+import { ZoneViolation } from "./zone";
+
 export interface BoundingBox {
   x1: number;
   y1: number;
@@ -67,28 +69,26 @@ export interface VideoSummary {
   inference_ms: number;
 }
 
-import { ZoneViolation } from "./zone";
-
 export interface TrackingOverlayFrame {
   frame_index: number;
   time_seconds: number;
-  track_id?: number | null;
-  person_id?: number | null;
+  track_id?: number;
+  person_id?: number;
   bbox: BoundingBox;
   confidence: number;
   compliant: boolean;
   missing_equipment: string[];
-  status: "compliant" | "violation" | "unknown";
   zone_id?: number;
-  zone_name?: string | null;
-  zone_type?: "RESTRICTED" | "WALKWAY" | null;
+  zone_name?: string;
+  zone_type?: "RESTRICTED" | "WALKWAY";
+  status: Category | "unknown";
 }
 
 export interface TrackingOverlay {
   fps: number;
   stride: number;
-  frame_width?: number | null;
-  frame_height?: number | null;
+  frame_width: number | null;
+  frame_height: number | null;
   frames: TrackingOverlayFrame[];
 }
 
@@ -96,5 +96,5 @@ export interface VideoProcessingResponse {
   summary: VideoSummary;
   reports: ViolationReport[];
   zone_violations?: ZoneViolation[];
-  tracking_overlay?: TrackingOverlay | null;
+  tracking_overlay?: TrackingOverlay;
 }
