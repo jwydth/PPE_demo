@@ -1,0 +1,9 @@
+# Fallback / legacy verified CUDA runtime for this project.
+#
+# Use this only when a PC/GPU cannot use the recommended cu132 runtime.
+# This matches the previously verified local environment:
+# - torch 2.11.0+cu128
+# - torchvision 0.26.0+cu128
+--index-url https://download.pytorch.org/whl/cu128
+torch==2.11.0+cu128
+torchvision==0.26.0+cu128

@@ -1,6 +1,12 @@
-# Install before requirements.txt when this service should use NVIDIA CUDA.
-# If your GPU/driver needs another CUDA build, use the selector at:
-# https://pytorch.org/get-started/locally/
+# Recommended CUDA runtime for this project.
+#
+# Install this before requirements.txt when this service should use NVIDIA CUDA.
+# Verified available from the PyTorch cu132 wheel index:
+# - torch 2.12.0+cu132
+# - torchvision 0.27.0+cu132
+#
+# If a PC/GPU cannot use cu132, use requirements-cuda-cu128.txt as the
+# fallback runtime.
 --index-url https://download.pytorch.org/whl/cu132
-torch
-torchvision
+torch==2.12.0+cu132
+torchvision==0.27.0+cu132

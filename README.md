@@ -10,11 +10,9 @@ The current local development stack uses:
 - FastAPI for detection, zone configuration, health checks, and incident APIs
 - Next.js for image/video upload, zone drawing, tracking overlays, and history
 
-## Quick Start
+## Infrastructure Setup
 
-Run these commands from PowerShell.
-
-### 1. Start PostgreSQL and MinIO
+Run these commands from PowerShell to start local PostgreSQL and MinIO.
 
 ```powershell
 cd C:\path\to\PPE_demo
@@ -24,7 +22,7 @@ docker compose ps
 
 Wait until `postgres` shows `healthy`.
 
-### 2. Start the backend
+## Backend Setup
 
 ```powershell
 cd backend
@@ -32,7 +30,25 @@ python -m venv .venv
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
+```
+
+For GPU inference, install the recommended CUDA runtime before the normal
+backend requirements:
+
+```powershell
+pip install -r requirements-cuda-cu132.txt
 pip install -r requirements.txt
+```
+
+For CPU-only development, install only the normal backend requirements:
+
+```powershell
+pip install -r requirements.txt
+```
+
+Then create the backend environment file, initialize tables, and start the API:
+
+```powershell
 Copy-Item .env.example .env
 python -m app.db.init_db
 python -m uvicorn app.main:app --reload --port 8000
@@ -46,7 +62,7 @@ Backend URLs:
 - PostgreSQL health: `http://localhost:8000/health/db`
 - MinIO health: `http://localhost:8000/health/storage`
 
-### 3. Start the frontend
+## Frontend Setup
 
 Open another PowerShell terminal:
 
@@ -125,6 +141,80 @@ INFERENCE_DEVICE=auto
 
 If model weights are missing or unavailable, the detector can run in mock mode
 for development.
+
+## CUDA Setup
+
+### Recommended: CUDA 13.2 Runtime
+
+Use this setup for the standard project GPU runtime:
+
+```powershell
+cd C:\path\to\PPE_demo\backend
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements-cuda-cu132.txt
+pip install -r requirements.txt
+```
+
+Pinned CUDA packages:
+
+```text
+torch==2.12.0+cu132
+torchvision==0.27.0+cu132
+```
+
+### Fallback: CUDA 12.8 Runtime
+
+Use this only when the target PC/GPU cannot use the recommended cu132 runtime:
+
+```powershell
+cd C:\path\to\PPE_demo\backend
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements-cuda-cu128.txt
+pip install -r requirements.txt
+```
+
+Fallback CUDA packages:
+
+```text
+torch==2.11.0+cu128
+torchvision==0.26.0+cu128
+```
+
+## GPU Runtime Verification
+
+Run this from the backend directory with the project venv activated:
+
+```powershell
+python scripts/check_gpu_runtime.py
+```
+
+Example successful GPU output:
+
+```text
+CUDA available: True
+CUDA device count: 1
+GPU: NVIDIA RTX ...
+Selected detector device: cuda:0
+YOLO model loaded: True
+Backend using mock mode: False
+```
+
+The script exits successfully even when CUDA is unavailable. In that case it
+prints CPU/mock-mode status so the environment problem is visible.
+
+IMPORTANT: running plain `python` may use a different Python installation and
+a CPU-only PyTorch build. Always activate the project venv or call the venv
+Python directly before starting the backend:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+or:
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
+```
 
 ## Useful Backend Commands
 
