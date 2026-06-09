@@ -287,8 +287,13 @@ function CameraPanel() {
   const [draftPoints, setDraftPoints] = useState<Point2D[]>([]);
   const [zoneName, setZoneName] = useState("Restricted Area");
   const [zoneType, setZoneType] = useState<ZoneType>("RESTRICTED");
-  const [dwellThresholdSeconds, setDwellThresholdSeconds] = useState(0);
+  const [dwellThresholdSeconds, setDwellThresholdSeconds] = useState(1.5);
   const [status, setStatus] = useState("");
+
+  useEffect(() => {
+    setDwellThresholdSeconds(zoneType === "RESTRICTED" ? 1.5 : 3);
+  }, [zoneType]);
+
   const [surfaceElement, setSurfaceElement] = useState<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -852,21 +857,6 @@ function CameraPanel() {
                           <option value="RESTRICTED">Restricted</option>
                           <option value="WALKWAY">Walkway</option>
                         </select>
-                      </label>
-                      <label className="grid gap-1 text-sm font-semibold text-slate-200">
-                        Dwell threshold seconds
-                        <input
-                          type="number"
-                          min={0}
-                          step={1}
-                          value={dwellThresholdSeconds}
-                          onChange={(event) =>
-                            setDwellThresholdSeconds(
-                              Math.max(0, Math.round(Number(event.target.value) || 0)),
-                            )
-                          }
-                          className="rounded-md border border-slate-700 bg-slate-900 px-3 py-2 font-normal text-white outline-none focus:border-lime-200"
-                        />
                       </label>
                       <div className="grid grid-cols-2 gap-2">
                         <button

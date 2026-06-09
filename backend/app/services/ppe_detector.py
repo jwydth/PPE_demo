@@ -525,7 +525,7 @@ class PPEDetector:
                     frame_index=frame_index,
                     fps=fps,
                     include_ppe=enable_ppe,
-                    zone_id=track_zone_id,
+                    physical_zone_id=track_zone_id,
                     zone_name=track_zone_name,
                     zone_type=track_zone_type,
                 )

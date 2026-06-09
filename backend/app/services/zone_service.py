@@ -418,7 +418,7 @@ def _parse_json(value: str, field_name: str) -> Any:
         ) from exc
 
 
-def _validate_dwell(value: int) -> int:
+def _validate_dwell(value: float) -> float:
     if value < 0:
         raise ServiceValidationError(
             "dwell_threshold_seconds must not be negative."

@@ -38,7 +38,7 @@ class PhysicalZone(SQLModel, table=True):
         default=None,
         sa_column=Column(JSONB, nullable=True),
     )
-    dwell_threshold_seconds: int = Field(default=0, nullable=False)
+    dwell_threshold_seconds: float = Field(default=0.0, nullable=False)
     is_active: bool = Field(default=True, nullable=False)
     created_at: datetime = Field(
         default_factory=_utc_now,
