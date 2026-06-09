@@ -434,6 +434,110 @@ function CameraPanel() {
     }
   };
 
+  const onPointMouseDown = (e: React.MouseEvent, zoneId: string, pointIndex: number) => {
+    if (configMode !== "modify") return;
+    e.stopPropagation();
+    if (!surfaceElement) return;
+    const rect = surfaceElement.getBoundingClientRect();
+    setDragState({
+      type: "point",
+      zoneId,
+      pointIndex,
+      startPos: {
+        x: (e.clientX - rect.left) / rect.width,
+        y: (e.clientY - rect.top) / rect.height,
+      },
+    });
+    setSelectedZoneId(zoneId);
+  };
+
+  const onZoneMouseDown = (e: React.MouseEvent, zoneId: string) => {
+    if (configMode !== "modify") return;
+    e.stopPropagation();
+    if (!surfaceElement) return;
+    const rect = surfaceElement.getBoundingClientRect();
+    setDragState({
+      type: "zone",
+      zoneId,
+      startPos: {
+        x: (e.clientX - rect.left) / rect.width,
+        y: (e.clientY - rect.top) / rect.height,
+      },
+    });
+    setSelectedZoneId(zoneId);
+  };
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (!dragState || !surfaceElement) return;
+    const rect = surfaceElement.getBoundingClientRect();
+    const currentPos = {
+      x: (e.clientX - rect.left) / rect.width,
+      y: (e.clientY - rect.top) / rect.height,
+    };
+    const dx = currentPos.x - dragState.startPos.x;
+    const dy = currentPos.y - dragState.startPos.y;
+
+    if (dragState.type === "point") {
+      setZonesForVideo((prev) =>
+        prev.map((z) => {
+          if (z.id !== dragState.zoneId) return z;
+          const newPoints = [...z.points];
+          newPoints[dragState.pointIndex!] = {
+            x: clamp01(newPoints[dragState.pointIndex!].x + dx),
+            y: clamp01(newPoints[dragState.pointIndex!].y + dy),
+          };
+          return { ...z, points: newPoints };
+        }),
+      );
+    } else {
+      setZonesForVideo((prev) =>
+        prev.map((z) => {
+          if (z.id !== dragState.zoneId) return z;
+          const canMove = z.points.every(
+            (p) =>
+              p.x + dx >= 0 && p.x + dx <= 1 && p.y + dy >= 0 && p.y + dy <= 1,
+          );
+          if (!canMove) return z;
+          return {
+            ...z,
+            points: z.points.map((p) => ({ x: p.x + dx, y: p.y + dy })),
+          };
+        }),
+      );
+    }
+    setDragState((prev) => (prev ? { ...prev, startPos: currentPos } : null));
+  };
+
+  const handleMouseUp = () => {
+    setDragState(null);
+  };
+
+  const handleSurfaceClick = (event: React.MouseEvent<unknown>) => {
+    if (configMode === "draw") {
+      addZonePoint(event as React.MouseEvent<HTMLDivElement>);
+    } else {
+      if (event.target === event.currentTarget) {
+        setSelectedZoneId(null);
+      }
+    }
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (
+        e.key === "Delete" &&
+        selectedZoneId &&
+        configMode === "modify" &&
+        isDrawing
+      ) {
+        setZonesForVideo((prev) => prev.filter((z) => z.id !== selectedZoneId));
+        setSelectedZoneId(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [selectedZoneId, configMode, isDrawing]);
+
   const runSelectedModels = async () => {
     if (!file) return;
     if (!ppeEnabled && !zoneEnabled) {
@@ -551,7 +655,9 @@ function CameraPanel() {
                 <div>
                   <div
                     ref={setSurfaceElement}
-                    onClick={addZonePoint}
+                    onMouseMove={handleMouseMove}
+                    onMouseUp={handleMouseUp}
+                    onMouseLeave={handleMouseUp}
                     className="relative aspect-video overflow-hidden rounded-md border border-slate-800 bg-black"
                   >
                     <video
@@ -567,15 +673,46 @@ function CameraPanel() {
                       }`}
                     />
                     {zoneEnabled || isDrawing ? (
-                      <svg className={`absolute inset-0 h-full w-full ${isDrawing ? "pointer-events-auto" : "pointer-events-none"}`} viewBox="0 0 1 1" preserveAspectRatio="none">
+                      <svg
+                        onClick={handleSurfaceClick}
+                        className={`absolute inset-0 h-full w-full ${
+                          isDrawing ? "pointer-events-auto" : "pointer-events-none"
+                        }`}
+                        viewBox="0 0 1 1"
+                        preserveAspectRatio="none"
+                      >
                         {displayedZones.map((zone) => (
-                          <polygon
-                            key={zone.id}
-                            points={zone.points.map((point) => `${point.x},${point.y}`).join(" ")}
-                            fill={`${zoneColors[zone.type]}33`}
-                            stroke={zoneColors[zone.type]}
-                            strokeWidth={0.004}
-                          />
+                          <g key={zone.id}>
+                            <polygon
+                              points={zone.points
+                                .map((point) => `${point.x},${point.y}`)
+                                .join(" ")}
+                              fill={`${zoneColors[zone.type]}33`}
+                              stroke={selectedZoneId === zone.id ? "#bef264" : zoneColors[zone.type]}
+                              strokeWidth={selectedZoneId === zone.id ? 0.008 : 0.004}
+                              className={
+                                configMode === "modify" && isDrawing
+                                  ? "cursor-move pointer-events-auto"
+                                  : "pointer-events-none"
+                              }
+                              onMouseDown={(e) => {
+                                if (zone.id !== "draft") onZoneMouseDown(e, zone.id);
+                              }}
+                            />
+                            {selectedZoneId === zone.id &&
+                              isDrawing &&
+                              zone.points.map((point, idx) => (
+                                <circle
+                                  key={`${zone.id}-pt-${idx}`}
+                                  cx={point.x}
+                                  cy={point.y}
+                                  r={0.012}
+                                  fill="#bef264"
+                                  className="cursor-pointer pointer-events-auto"
+                                  onMouseDown={(e) => onPointMouseDown(e, zone.id, idx)}
+                                />
+                              ))}
+                          </g>
                         ))}
                         {draftPoints.map((point, index) => (
                           <circle
@@ -621,6 +758,34 @@ function CameraPanel() {
                               <Play className="size-3" /> Play
                             </>
                           )}
+                        </button>
+                      </div>
+
+                      <div className="flex rounded-md border border-slate-700 bg-slate-900 p-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setConfigMode("draw");
+                            setSelectedZoneId(null);
+                          }}
+                          className={`flex-1 rounded py-1.5 text-xs font-semibold transition ${
+                            configMode === "draw"
+                              ? "bg-lime-200 text-green-950"
+                              : "text-slate-400 hover:text-slate-200"
+                          }`}
+                        >
+                          Draw zones
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfigMode("modify")}
+                          className={`flex-1 rounded py-1.5 text-xs font-semibold transition ${
+                            configMode === "modify"
+                              ? "bg-lime-200 text-green-950"
+                              : "text-slate-400 hover:text-slate-200"
+                          }`}
+                        >
+                          Modify zones
                         </button>
                       </div>
                       <label className="grid gap-1 text-sm font-semibold text-slate-200">
