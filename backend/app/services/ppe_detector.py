@@ -575,6 +575,7 @@ class PPEDetector:
 
 def _append_tracking_overlay_frame(
     *,
+    include_ppe: bool = True,
     overlay_frames: list[TrackingOverlayFrame],
     seen_person_ids: set[tuple[str, int]],
     person: PersonResult,
