@@ -22,7 +22,7 @@ The application detects PPE compliance (helmets and vests) and monitors configur
 - **Framework:** Next.js (App Router) with TypeScript.
 - **Styling:** Tailwind CSS (v4).
 - **Icons:** Lucide React.
-- **Zone Drawing:** Custom SVG overlay on the video element for drawing and displaying polygons (replaces previous Fabric.js mentions).
+- **Zone Drawing:** Custom SVG overlay on the video element for drawing and displaying polygons. Supports advanced interactions like vertex dragging, edge-click point insertion, and synchronized sidebar configuration.
 - **Dashboard:** A single-page dashboard (`DashboardShell`) that manages camera feeds, violation logs, and safety rules.
 
 ## Data Model
@@ -59,7 +59,12 @@ The application detects PPE compliance (helmets and vests) and monitors configur
 
 ## Key Workflows
 
-1. **Zone Configuration:** Users can upload a video and draw polygons over the frame to define safety zones. These are saved to the backend.
+1. **Zone Configuration:** Users can upload a video and define safety zones using a custom SVG tool.
+    - **Drawing:** Users click to define vertices for new polygon zones.
+    - **Modification:** Existing zones can be selected to move the entire shape or drag individual vertices.
+    - **Advanced Editing:** A specialized "Add Point" mode allows users to insert new vertices by clicking on polygon edges.
+    - **State Sync:** The configuration sidebar (name, type) is conditionally enabled and synchronized in real-time with the selected zone.
+    - **Persistence:** Configurations are stored in the backend and associated with specific video filenames.
 2. **Inference:**
     - For images: A single-pass detection returns PPE status.
     - For videos: Tracking-based inference monitors persons across frames, applying temporal filters to reduce false positives and detecting zone incursions based on dwell time.

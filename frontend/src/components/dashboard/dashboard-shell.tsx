@@ -276,6 +276,7 @@ function CameraPanel() {
   const [zoneEnabled, setZoneEnabled] = useState(false);
   const [isDrawing, setIsDrawing] = useState(false);
   const [configMode, setConfigMode] = useState<"draw" | "modify">("draw");
+  const [isAddingPoint, setIsAddingPoint] = useState(false);
   const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null);
   const [dragState, setDragState] = useState<{
     type: "point" | "zone";
@@ -293,6 +294,16 @@ function CameraPanel() {
   useEffect(() => {
     setDwellThresholdSeconds(zoneType === "RESTRICTED" ? 1.5 : 3);
   }, [zoneType]);
+
+  useEffect(() => {
+    if (configMode === "modify" && selectedZoneId) {
+      const selectedZone = zonesForVideo.find((z) => z.id === selectedZoneId);
+      if (selectedZone) {
+        setZoneName(selectedZone.name);
+        setZoneType(selectedZone.type);
+      }
+    }
+  }, [selectedZoneId, configMode, zonesForVideo]);
 
   const [surfaceElement, setSurfaceElement] = useState<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -402,6 +413,7 @@ function CameraPanel() {
     setStatus("");
     setZonesForVideo([]);
     setDraftPoints([]);
+    setSelectedZoneId(null);
     setPhase("idle");
     setIsDrawing(false);
     setCurrentVideoTime(0);
@@ -502,6 +514,26 @@ function CameraPanel() {
     setSelectedZoneId(zoneId);
   };
 
+  const onEdgeClick = (e: React.MouseEvent, zoneId: string, edgeIndex: number) => {
+    if (!isAddingPoint || !surfaceElement) return;
+    e.stopPropagation();
+    const rect = surfaceElement.getBoundingClientRect();
+    const newPoint = {
+      x: (e.clientX - rect.left) / rect.width,
+      y: (e.clientY - rect.top) / rect.height,
+    };
+
+    setZonesForVideo((prev) =>
+      prev.map((z) => {
+        if (z.id !== zoneId) return z;
+        const newPoints = [...z.points];
+        newPoints.splice(edgeIndex + 1, 0, newPoint);
+        return { ...z, points: newPoints };
+      }),
+    );
+    setIsAddingPoint(false);
+  };
+
   const handleMouseMove = (e: React.MouseEvent) => {
     if (!dragState || !surfaceElement) return;
     const rect = surfaceElement.getBoundingClientRect();
@@ -553,6 +585,7 @@ function CameraPanel() {
     } else {
       if (event.target === event.currentTarget) {
         setSelectedZoneId(null);
+        setIsAddingPoint(false);
       }
     }
   };
@@ -746,6 +779,24 @@ function CameraPanel() {
                             />
                             {selectedZoneId === zone.id &&
                               isDrawing &&
+                              zone.points.map((p1, idx) => {
+                                const p2 = zone.points[(idx + 1) % zone.points.length];
+                                return (
+                                  <line
+                                    key={`${zone.id}-edge-${idx}`}
+                                    x1={p1.x}
+                                    y1={p1.y}
+                                    x2={p2.x}
+                                    y2={p2.y}
+                                    stroke="transparent"
+                                    strokeWidth={isAddingPoint ? 0.04 : 0}
+                                    className={isAddingPoint ? "cursor-crosshair pointer-events-auto" : "pointer-events-none"}
+                                    onClick={(e) => onEdgeClick(e, zone.id, idx)}
+                                  />
+                                );
+                              })}
+                            {selectedZoneId === zone.id &&
+                              isDrawing &&
                               zone.points.map((point, idx) => (
                                 <circle
                                   key={`${zone.id}-pt-${idx}`}
@@ -839,20 +890,55 @@ function CameraPanel() {
                           Modify zones
                         </button>
                       </div>
+                      {configMode === "modify" && selectedZoneId && (
+                        <button
+                          type="button"
+                          onClick={() => setIsAddingPoint(!isAddingPoint)}
+                          className={`w-full rounded py-1.5 text-xs font-semibold transition ${
+                            isAddingPoint
+                              ? "bg-amber-200 text-amber-950"
+                              : "bg-slate-800 text-slate-200 hover:bg-slate-700"
+                          }`}
+                        >
+                          {isAddingPoint ? "Cancel Add Point" : "Add Point"}
+                        </button>
+                      )}
                       <label className="grid gap-1 text-sm font-semibold text-slate-200">
                         Zone name
                         <input
                           value={zoneName}
-                          onChange={(event) => setZoneName(event.target.value)}
-                          className="rounded-md border border-slate-700 bg-slate-900 px-3 py-2 font-normal text-white outline-none focus:border-lime-200"
+                          onChange={(event) => {
+                            const newName = event.target.value;
+                            setZoneName(newName);
+                            if (configMode === "modify" && selectedZoneId) {
+                              setZonesForVideo((prev) =>
+                                prev.map((z) =>
+                                  z.id === selectedZoneId ? { ...z, name: newName } : z,
+                                ),
+                              );
+                            }
+                          }}
+                          disabled={configMode === "modify" && !selectedZoneId}
+                          className="rounded-md border border-slate-700 bg-slate-900 px-3 py-2 font-normal text-white outline-none focus:border-lime-200 disabled:opacity-50 disabled:cursor-not-allowed"
                         />
                       </label>
                       <label className="grid gap-1 text-sm font-semibold text-slate-200">
                         Zone type
                         <select
                           value={zoneType}
-                          onChange={(event) => setZoneType(event.target.value as ZoneType)}
-                          className="rounded-md border border-slate-700 bg-slate-900 px-3 py-2 font-normal text-white outline-none focus:border-lime-200"
+                          onChange={(event) => {
+                            const newType = event.target.value as ZoneType;
+                            setZoneType(newType);
+                            if (configMode === "modify" && selectedZoneId) {
+                              setZonesForVideo((prev) =>
+                                prev.map((z) =>
+                                  z.id === selectedZoneId ? { ...z, type: newType } : z,
+                                ),
+                              );
+                            }
+                          }}
+                          disabled={configMode === "modify" && !selectedZoneId}
+                          className="rounded-md border border-slate-700 bg-slate-900 px-3 py-2 font-normal text-white outline-none focus:border-lime-200 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           <option value="RESTRICTED">Restricted</option>
                           <option value="WALKWAY">Walkway</option>
@@ -870,7 +956,7 @@ function CameraPanel() {
                         <button
                           type="button"
                           onClick={() => setDraftPoints([])}
-                          disabled={phase === "loading"}
+                          disabled={phase === "loading" || (configMode === "modify" && !selectedZoneId)}
                           className="rounded-md border border-slate-700 px-3 py-2 text-sm font-semibold text-slate-200 disabled:opacity-50"
                         >
                           Clear draft
