@@ -33,6 +33,7 @@ import {
   LoadingState,
   PeopleResults,
 } from "@/components/ppe/result-panels";
+import { doPolygonsOverlap } from "@/lib/spatial-utils";
 import {
   DetectionResponse,
   TrackingOverlay,
@@ -408,6 +409,18 @@ function CameraPanel() {
 
   const finishZone = () => {
     if (draftPoints.length < 3) return;
+
+    const hasOverlap = zonesForVideo.some((existingZone) =>
+      doPolygonsOverlap(draftPoints, existingZone.points),
+    );
+
+    if (hasOverlap) {
+      window.alert(
+        "Cannot finish zone: The drawn polygon overlaps with an existing zone. Please adjust the vertices to avoid overlap.",
+      );
+      return;
+    }
+
     setZonesForVideo((current) => [
       ...current,
       {
