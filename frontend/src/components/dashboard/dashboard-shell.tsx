@@ -250,9 +250,10 @@ function CameraPanel() {
   const [isDrawing, setIsDrawing] = useState(false);
   const [configMode, setConfigMode] = useState<"draw" | "modify">("draw");
   const [isAddingPoint, setIsAddingPoint] = useState(false);
+  const [isDrawingCurve, setIsDrawingCurve] = useState(false);
   const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null);
   const [dragState, setDragState] = useState<{
-    type: "point" | "zone";
+    type: "point" | "zone" | "curve";
     zoneId: string;
     pointIndex?: number;
     startPos: Point2D;
@@ -519,6 +520,22 @@ function CameraPanel() {
     setIsAddingPoint(false);
   };
 
+  const onCurveEdgeMouseDown = (e: React.MouseEvent, zoneId: string, edgeIndex: number) => {
+    if (!isDrawingCurve || !surfaceElement) return;
+    e.stopPropagation();
+    const rect = surfaceElement.getBoundingClientRect();
+    setDragState({
+      type: "curve",
+      zoneId,
+      pointIndex: edgeIndex,
+      startPos: {
+        x: (e.clientX - rect.left) / rect.width,
+        y: (e.clientY - rect.top) / rect.height,
+      },
+    });
+    setSelectedZoneId(zoneId);
+  };
+
   const handleMouseMove = (e: React.MouseEvent) => {
     if (!dragState || !surfaceElement) return;
     const rect = surfaceElement.getBoundingClientRect();
@@ -535,8 +552,26 @@ function CameraPanel() {
           if (z.id !== dragState.zoneId) return z;
           const newPoints = [...z.points];
           newPoints[dragState.pointIndex!] = {
+            ...newPoints[dragState.pointIndex!],
             x: clamp01(newPoints[dragState.pointIndex!].x + dx),
             y: clamp01(newPoints[dragState.pointIndex!].y + dy),
+          };
+          return { ...z, points: newPoints };
+        }),
+      );
+    } else if (dragState.type === "curve") {
+      setZonesForVideo((prev) =>
+        prev.map((z) => {
+          if (z.id !== dragState.zoneId) return z;
+          const newPoints = [...z.points];
+          const pt = newPoints[dragState.pointIndex!];
+          const newControl = {
+            x: clamp01((pt.curveControl?.x ?? (pt.x + z.points[(dragState.pointIndex! + 1) % z.points.length].x) / 2) + dx),
+            y: clamp01((pt.curveControl?.y ?? (pt.y + z.points[(dragState.pointIndex! + 1) % z.points.length].y) / 2) + dy),
+          };
+          newPoints[dragState.pointIndex!] = {
+            ...pt,
+            curveControl: newControl,
           };
           return { ...z, points: newPoints };
         }),
@@ -552,7 +587,14 @@ function CameraPanel() {
           if (!canMove) return z;
           return {
             ...z,
-            points: z.points.map((p) => ({ x: p.x + dx, y: p.y + dy })),
+            points: z.points.map((p) => ({
+              ...p,
+              x: p.x + dx,
+              y: p.y + dy,
+              curveControl: p.curveControl
+                ? { x: p.curveControl.x + dx, y: p.curveControl.y + dy }
+                : undefined,
+            })),
           };
         }),
       );
@@ -744,57 +786,99 @@ function CameraPanel() {
                         viewBox="0 0 1 1"
                         preserveAspectRatio="none"
                       >
-                        {displayedZones.map((zone) => (
-                          <g key={zone.id}>
-                            <polygon
-                              points={zone.points
-                                .map((point) => `${point.x},${point.y}`)
-                                .join(" ")}
-                              fill={`${zoneColors[zone.type]}33`}
-                              stroke={selectedZoneId === zone.id ? "#bef264" : zoneColors[zone.type]}
-                              strokeWidth={selectedZoneId === zone.id ? 0.008 : 0.004}
-                              className={
-                                configMode === "modify" && isDrawing
-                                  ? "cursor-move pointer-events-auto"
-                                  : "pointer-events-none"
-                              }
-                              onMouseDown={(e) => {
-                                if (zone.id !== "draft") onZoneMouseDown(e, zone.id);
-                              }}
-                            />
-                            {selectedZoneId === zone.id &&
-                              isDrawing &&
-                              zone.points.map((p1, idx) => {
-                                const p2 = zone.points[(idx + 1) % zone.points.length];
-                                return (
-                                  <line
-                                    key={`${zone.id}-edge-${idx}`}
-                                    x1={p1.x}
-                                    y1={p1.y}
-                                    x2={p2.x}
-                                    y2={p2.y}
-                                    stroke="transparent"
-                                    strokeWidth={isAddingPoint ? 0.04 : 0}
-                                    className={isAddingPoint ? "cursor-crosshair pointer-events-auto" : "pointer-events-none"}
-                                    onClick={(e) => onEdgeClick(e, zone.id, idx)}
+                        {displayedZones.map((zone) => {
+                          const pathData = zone.points.length > 0
+                            ? `M ${zone.points[0].x} ${zone.points[0].y} ` +
+                              zone.points.map((p, i) => {
+                                const nextP = zone.points[(i + 1) % zone.points.length];
+                                if (p.curveControl) {
+                                  return `Q ${p.curveControl.x} ${p.curveControl.y}, ${nextP.x} ${nextP.y}`;
+                                }
+                                return `L ${nextP.x} ${nextP.y}`;
+                              }).join(" ") + " Z"
+                            : "";
+
+                          return (
+                            <g key={zone.id}>
+                              <path
+                                d={pathData}
+                                fill={`${zoneColors[zone.type]}33`}
+                                stroke={selectedZoneId === zone.id ? "#bef264" : zoneColors[zone.type]}
+                                strokeWidth={selectedZoneId === zone.id ? 0.008 : 0.004}
+                                className={
+                                  configMode === "modify" && isDrawing
+                                    ? "cursor-move pointer-events-auto"
+                                    : "pointer-events-none"
+                                }
+                                onMouseDown={(e) => {
+                                  if (zone.id !== "draft") onZoneMouseDown(e, zone.id);
+                                }}
+                              />
+                              {selectedZoneId === zone.id &&
+                                isDrawing &&
+                                zone.points.map((p1, idx) => {
+                                  const p2 = zone.points[(idx + 1) % zone.points.length];
+                                  return (
+                                    <g key={`${zone.id}-edge-group-${idx}`}>
+                                      {p1.curveControl ? (
+                                        <path
+                                          d={`M ${p1.x} ${p1.y} Q ${p1.curveControl.x} ${p1.curveControl.y}, ${p2.x} ${p2.y}`}
+                                          fill="none"
+                                          stroke="transparent"
+                                          strokeWidth={0.04}
+                                          className="cursor-move pointer-events-auto"
+                                          onMouseDown={(e) => onCurveEdgeMouseDown(e, zone.id, idx)}
+                                        />
+                                      ) : (
+                                        <line
+                                          x1={p1.x}
+                                          y1={p1.y}
+                                          x2={p2.x}
+                                          y2={p2.y}
+                                          stroke="transparent"
+                                          strokeWidth={0.04}
+                                          className={
+                                            isAddingPoint || isDrawingCurve
+                                              ? "cursor-crosshair pointer-events-auto"
+                                              : "pointer-events-none"
+                                          }
+                                          onClick={(e) => {
+                                            if (isAddingPoint) onEdgeClick(e, zone.id, idx);
+                                          }}
+                                          onMouseDown={(e) => {
+                                            if (isDrawingCurve) onCurveEdgeMouseDown(e, zone.id, idx);
+                                          }}
+                                        />
+                                      )}
+                                      {p1.curveControl && (
+                                        <circle
+                                          cx={p1.curveControl.x}
+                                          cy={p1.curveControl.y}
+                                          r={0.006}
+                                          fill="#fef08a"
+                                          className="cursor-move pointer-events-auto"
+                                          onMouseDown={(e) => onCurveEdgeMouseDown(e, zone.id, idx)}
+                                        />
+                                      )}
+                                    </g>
+                                  );
+                                })}
+                              {selectedZoneId === zone.id &&
+                                isDrawing &&
+                                zone.points.map((point, idx) => (
+                                  <circle
+                                    key={`${zone.id}-pt-${idx}`}
+                                    cx={point.x}
+                                    cy={point.y}
+                                    r={0.012}
+                                    fill="#bef264"
+                                    className="cursor-pointer pointer-events-auto"
+                                    onMouseDown={(e) => onPointMouseDown(e, zone.id, idx)}
                                   />
-                                );
-                              })}
-                            {selectedZoneId === zone.id &&
-                              isDrawing &&
-                              zone.points.map((point, idx) => (
-                                <circle
-                                  key={`${zone.id}-pt-${idx}`}
-                                  cx={point.x}
-                                  cy={point.y}
-                                  r={0.012}
-                                  fill="#bef264"
-                                  className="cursor-pointer pointer-events-auto"
-                                  onMouseDown={(e) => onPointMouseDown(e, zone.id, idx)}
-                                />
-                              ))}
-                          </g>
-                        ))}
+                                ))}
+                            </g>
+                          );
+                        })}
                         {draftPoints.map((point, index) => (
                           <circle
                             key={`${point.x}-${point.y}-${index}`}
@@ -876,17 +960,36 @@ function CameraPanel() {
                         </button>
                       </div>
                       {configMode === "modify" && selectedZoneId && (
-                        <button
-                          type="button"
-                          onClick={() => setIsAddingPoint(!isAddingPoint)}
-                          className={`w-full rounded py-1.5 text-xs font-semibold transition ${
-                            isAddingPoint
-                              ? "bg-amber-200 text-amber-950"
-                              : "bg-slate-800 text-slate-200 hover:bg-slate-700"
-                          }`}
-                        >
-                          {isAddingPoint ? "Cancel Add Point" : "Add Point"}
-                        </button>
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setIsAddingPoint(!isAddingPoint);
+                              setIsDrawingCurve(false);
+                            }}
+                            className={`w-full rounded py-1.5 text-xs font-semibold transition ${
+                              isAddingPoint
+                                ? "bg-amber-200 text-amber-950"
+                                : "bg-slate-800 text-slate-200 hover:bg-slate-700"
+                            }`}
+                          >
+                            {isAddingPoint ? "Cancel Add Point" : "Add Point"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setIsDrawingCurve(!isDrawingCurve);
+                              setIsAddingPoint(false);
+                            }}
+                            className={`w-full rounded py-1.5 text-xs font-semibold transition ${
+                              isDrawingCurve
+                                ? "bg-amber-200 text-amber-950"
+                                : "bg-slate-800 text-slate-200 hover:bg-slate-700"
+                            }`}
+                          >
+                            {isDrawingCurve ? "Cancel Draw Curve" : "Draw Curve"}
+                          </button>
+                        </div>
                       )}
                       <label className="grid gap-1 text-sm font-semibold text-slate-200">
                         Zone name
@@ -1166,6 +1269,21 @@ function ModelToggle({
 }
 
 function zoneFromBackend(zone: ZoneConfiguration): DraftZone {
+  try {
+    const uiData = JSON.parse(zone.ui_shape_data);
+    if (uiData && Array.isArray(uiData.points)) {
+      return {
+        id: String(zone.id ?? crypto.randomUUID()),
+        name: zone.zone_name,
+        type: zone.zone_type,
+        dwellThresholdSeconds: zone.dwell_threshold_seconds,
+        points: uiData.points,
+      };
+    }
+  } catch {
+    // Fallback to flattened coordinates
+  }
+
   return {
     id: String(zone.id ?? crypto.randomUUID()),
     name: zone.zone_name,
@@ -1189,15 +1307,35 @@ function toBackendZone(zone: DraftZone, videoName: string): ZoneConfiguration {
       dwellThresholdSeconds: zone.dwellThresholdSeconds,
       points: zone.points,
     }),
-    flattened_coordinates: JSON.stringify(zone.points),
+    flattened_coordinates: JSON.stringify(flattenPoints(zone.points)),
   };
+}
+
+function flattenPoints(points: Point2D[]): Point2D[] {
+  const result: Point2D[] = [];
+  for (let i = 0; i < points.length; i++) {
+    const p1 = points[i];
+    const p2 = points[(i + 1) % points.length];
+    result.push({ x: p1.x, y: p1.y });
+
+    if (p1.curveControl) {
+      // Approximate Quadratic Bezier with 8 segments
+      for (let t = 0.125; t < 1; t += 0.125) {
+        const invT = 1 - t;
+        const x = invT * invT * p1.x + 2 * invT * t * p1.curveControl.x + t * t * p2.x;
+        const y = invT * invT * p1.y + 2 * invT * t * p1.curveControl.y + t * t * p2.y;
+        result.push({ x, y });
+      }
+    }
+  }
+  return result;
 }
 
 function safeParsePoints(value: string): Point2D[] {
   try {
     const parsed = JSON.parse(value) as Point2D[];
     return Array.isArray(parsed)
-      ? parsed.filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
+      ? parsed.filter((point) => point && typeof point.x === "number" && typeof point.y === "number")
       : [];
   } catch {
     return [];

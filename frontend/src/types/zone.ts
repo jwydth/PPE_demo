@@ -4,6 +4,7 @@ export type ZoneType = "RESTRICTED" | "WALKWAY";
 export interface Point2D {
   x: number;
   y: number;
+  curveControl?: { x: number; y: number };
 }
 
 export interface ZoneConfiguration {
