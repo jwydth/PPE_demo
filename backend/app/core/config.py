@@ -6,7 +6,13 @@ BACKEND_DIR = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
-    MODEL_PATH: str = "weights/ppe_v1.pt"
+    MODEL_PATH: str = "weights/ppe_v4.pt"
+    DATABASE_URL: str | None = None
+    MINIO_ENDPOINT: str | None = None
+    MINIO_ACCESS_KEY: str | None = None
+    MINIO_SECRET_KEY: str | None = None
+    MINIO_BUCKET_NAME: str | None = None
+    MINIO_SECURE: bool = False
     # "auto" uses the first CUDA GPU when PyTorch can access one, otherwise CPU.
     # You can also force "cpu", "cuda", "cuda:0", "0", etc.
     INFERENCE_DEVICE: str = "auto"
@@ -30,7 +36,6 @@ class Settings(BaseSettings):
     VIDEO_MIN_CLEAR_PERSON_ASPECT_RATIO: float = 1.20
     VIDEO_POSTURE_HEIGHT_DROP_RATIO: float = 0.70
     VIDEO_POSTURE_HISTORY_MIN_FRAMES: int = 3
-    VIOLATION_DB_PATH: str = "storage/violations.sqlite3"
     SNAPSHOT_DIR: str = "storage/snapshots"
     ALLOWED_ORIGINS: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
 

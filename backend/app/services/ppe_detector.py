@@ -1,3 +1,4 @@
+import logging
 import math
 import statistics
 import time
@@ -9,23 +10,23 @@ import numpy as np
 from PIL import Image
 
 from app.core.config import BACKEND_DIR, settings
-from app.models.schemas import (
+from app.schemas.detection import (
     BoundingBox,
     Detection,
     DetectionResponse,
     EquipmentStatus,
     PersonResult,
-    PersonTrackFrame,
     Summary,
+    TrackingOverlay,
+    TrackingOverlayFrame,
     VideoProcessingResponse,
     VideoSummary,
+)
+from app.schemas.violation import (
     ViolationReport,
     ZoneViolation,
 )
-from app.services.violation_store import (
-    SNAPSHOT_DIR,
-    save_violation,
-)
+from app.services.ppe_violation_service import open_ppe_violation_service
 from app.services.zone_service import (
     COORD_SCALE,
     load_zones,
@@ -33,6 +34,9 @@ from app.services.zone_service import (
     check_zone_incursion,
     record_zone_violation,
 )
+from app.storage.local_paths import SNAPSHOT_DIR
+
+logger = logging.getLogger(__name__)
 
 COMPLIANT_COLOR = "#22c55e"
 VIOLATION_COLOR = "#ef4444"
@@ -62,8 +66,8 @@ class WorkerState:
     reported_missing: set[str] | None = None
     reported: bool = False
     status: str = "unknown"
-    zone_dwell: dict[int, float] | None = None  # zone_id -> seconds
-    reported_zones: set[int] | None = None  # zone_ids
+    zone_dwell: dict[int, float] | None = None  # camera_zone_view_id -> seconds
+    reported_zones: set[int] | None = None  # camera_zone_view_ids
 
     def __post_init__(self) -> None:
         if self.missing_counts is None:
@@ -127,7 +131,6 @@ def _select_inference_device(preferred_device: str) -> str:
     if device_index >= device_count:
         return "cpu"
 
-    device_name = torch.cuda.get_device_name(device_index)
     device = f"cuda:{device_index}"
     return device
 
@@ -159,10 +162,27 @@ class PPEDetector:
             return self._mock_predict(image)
         return self._real_predict(image)
 
-    def process_video(self, video_path: Path, video_name: str) -> VideoProcessingResponse:
+    def process_video(
+        self,
+        video_path: Path,
+        video_name: str,
+        *,
+        enable_ppe: bool = True,
+        enable_zone: bool = True,
+    ) -> VideoProcessingResponse:
         if self.model is None:
-            return self._mock_process_video(video_path, video_name)
-        return self._real_process_video(video_path, video_name)
+            return self._mock_process_video(
+                video_path,
+                video_name,
+                enable_ppe=enable_ppe,
+                enable_zone=enable_zone,
+            )
+        return self._real_process_video(
+            video_path,
+            video_name,
+            enable_ppe=enable_ppe,
+            enable_zone=enable_zone,
+        )
 
     def _real_predict(self, image: Image.Image) -> DetectionResponse:
         start = time.perf_counter()
@@ -186,7 +206,14 @@ class PPEDetector:
         elapsed_ms = (time.perf_counter() - start) * 1000
         return _build_response(persons, helmets, vests, elapsed_ms)
 
-    def _real_process_video(self, video_path: Path, video_name: str) -> VideoProcessingResponse:
+    def _real_process_video(
+        self,
+        video_path: Path,
+        video_name: str,
+        *,
+        enable_ppe: bool = True,
+        enable_zone: bool = True,
+    ) -> VideoProcessingResponse:
         fps, total_frames = _video_metadata(video_path)
         start = time.perf_counter()
         stride = max(1, settings.VIDEO_FRAME_STRIDE)
@@ -194,13 +221,14 @@ class PPEDetector:
         cases: list[ViolationCase] = []
         workers: list[WorkerState] = []
         zone_violations_list: list[ZoneViolation] = []
-        tracking_frames_list: list[PersonTrackFrame] = []
         confirmed_aspect_ratios: list[float] = []
         candidate_violations = 0
         processed_frames = 0
+        frame_width: int | None = None
+        frame_height: int | None = None
+        overlay_frames: list[TrackingOverlayFrame] = []
 
-        # Load zones
-        zones = load_zones(video_name)
+        zones = load_zones(video_name) if enable_zone else []
 
         results = self.model.track(
             source=str(video_path),
@@ -221,6 +249,7 @@ class PPEDetector:
             frame = result.orig_img.copy()
             frame_height, frame_width = frame.shape[:2]
             used_worker_ids: set[int] = set()
+            overlay_person_ids: set[tuple[str, int]] = set()
 
             for person in response.persons:
                 decision = _update_worker_status(
@@ -233,29 +262,46 @@ class PPEDetector:
                     used_worker_ids=used_worker_ids,
                 )
                 worker = decision["worker"]
-                candidate_violations += int(decision["candidate"])
+                if enable_ppe:
+                    candidate_violations += int(decision["candidate"])
 
                 # Check Zone Incursions
-                track_zone_id: int | None = None
+                track_camera_zone_view_id: int | None = None
+                track_physical_zone_id: int | None = None
                 track_zone_name: str | None = None
                 track_zone_type: str | None = None
 
                 if zones:
-                    test_point = get_person_foot_point(person, frame_width, frame_height)
+                    test_point = get_person_foot_point(
+                        person, frame_width, frame_height
+                    )
                     incursion_zones = check_zone_incursion(zones, test_point)
-                    incursion_zone_ids = {z.zone_id for z in incursion_zones}
+                    incursion_camera_zone_view_ids = {
+                        z.camera_zone_view_id for z in incursion_zones
+                    }
 
                     for zone in zones:
-                        in_zone = zone.zone_id in incursion_zone_ids
+                        camera_zone_view_id = zone.camera_zone_view_id
+                        in_zone = (
+                            camera_zone_view_id in incursion_camera_zone_view_ids
+                        )
 
                         if zone.zone_type == "WALKWAY":
                             if in_zone:
-                                # Person is safely inside walkway — reset outside-dwell counter
-                                worker.zone_dwell[zone.zone_id] = 0
+                                # Person is safely inside walkway; reset outside-dwell counter.
+                                worker.zone_dwell[camera_zone_view_id] = 0
                             else:
-                                # Person has left the walkway — accumulate violation dwell
-                                worker.zone_dwell[zone.zone_id] = worker.zone_dwell.get(zone.zone_id, 0) + (stride / fps)
-                                if worker.zone_dwell[zone.zone_id] > zone.threshold and zone.zone_id not in worker.reported_zones:
+                                # Person has left the walkway; accumulate violation dwell.
+                                worker.zone_dwell[camera_zone_view_id] = (
+                                    worker.zone_dwell.get(camera_zone_view_id, 0)
+                                    + (stride / fps)
+                                )
+                                if (
+                                    worker.zone_dwell[camera_zone_view_id]
+                                    > zone.threshold
+                                    and camera_zone_view_id
+                                    not in worker.reported_zones
+                                ):
                                     zv = record_zone_violation(
                                         worker_state=worker,
                                         zone=zone,
@@ -270,8 +316,16 @@ class PPEDetector:
                         else:
                             # RESTRICTED: violation when person is inside
                             if in_zone:
-                                worker.zone_dwell[zone.zone_id] = worker.zone_dwell.get(zone.zone_id, 0) + (stride / fps)
-                                if worker.zone_dwell[zone.zone_id] > zone.threshold and zone.zone_id not in worker.reported_zones:
+                                worker.zone_dwell[camera_zone_view_id] = (
+                                    worker.zone_dwell.get(camera_zone_view_id, 0)
+                                    + (stride / fps)
+                                )
+                                if (
+                                    worker.zone_dwell[camera_zone_view_id]
+                                    > zone.threshold
+                                    and camera_zone_view_id
+                                    not in worker.reported_zones
+                                ):
                                     zv = record_zone_violation(
                                         worker_state=worker,
                                         zone=zone,
@@ -287,35 +341,38 @@ class PPEDetector:
                     # Determine the most critical zone status for tracking overlay display
                     for zone in incursion_zones:
                         if zone.zone_type == "RESTRICTED":
-                            track_zone_id = zone.zone_id
+                            track_camera_zone_view_id = zone.camera_zone_view_id
+                            track_physical_zone_id = zone.physical_zone_id
                             track_zone_name = zone.zone_name
                             track_zone_type = "RESTRICTED"
                             break
                     if track_zone_type is None:
                         walkway_zones = [z for z in zones if z.zone_type == "WALKWAY"]
-                        if walkway_zones and not any(z.zone_id in incursion_zone_ids for z in walkway_zones):
+                        if walkway_zones and not any(
+                            z.camera_zone_view_id in incursion_camera_zone_view_ids
+                            for z in walkway_zones
+                        ):
                             wz = walkway_zones[0]
-                            track_zone_id = wz.zone_id
+                            track_camera_zone_view_id = wz.camera_zone_view_id
+                            track_physical_zone_id = wz.physical_zone_id
                             track_zone_name = wz.zone_name
                             track_zone_type = "WALKWAY"
 
-                # Collect per-frame tracking data for live overlay
-                tracking_frames_list.append(PersonTrackFrame(
+                _append_tracking_overlay_frame(
+                    overlay_frames=overlay_frames,
+                    seen_person_ids=overlay_person_ids,
+                    person=person,
+                    decision=decision,
                     frame_index=frame_index,
-                    track_id=person.track_id or 0,
-                    bbox=BoundingBox(
-                        x1=person.bbox.x1 / frame_width,
-                        y1=person.bbox.y1 / frame_height,
-                        x2=person.bbox.x2 / frame_width,
-                        y2=person.bbox.y2 / frame_height,
-                    ),
-                    zone_id=track_zone_id,
+                    fps=fps,
+                    camera_zone_view_id=track_camera_zone_view_id,
+                    physical_zone_id=track_physical_zone_id,
                     zone_name=track_zone_name,
                     zone_type=track_zone_type,
-                ))
+                )
 
                 missing_to_report = decision["missing_to_report"]
-                if not missing_to_report:
+                if not enable_ppe or not missing_to_report:
                     continue
 
                 _record_violation_case(
@@ -346,7 +403,13 @@ class PPEDetector:
             ),
             reports=reports,
             zone_violations=zone_violations_list,
-            tracking_frames=tracking_frames_list,
+            tracking_overlay=TrackingOverlay(
+                fps=round(fps, 2),
+                stride=stride,
+                frame_width=frame_width,
+                frame_height=frame_height,
+                frames=overlay_frames,
+            ),
         )
 
     def _mock_predict(self, image: Image.Image) -> DetectionResponse:
@@ -369,7 +432,14 @@ class PPEDetector:
         elapsed_ms = (time.perf_counter() - start) * 1000
         return _build_response(persons, helmets, vests, elapsed_ms)
 
-    def _mock_process_video(self, video_path: Path, video_name: str) -> VideoProcessingResponse:
+    def _mock_process_video(
+        self,
+        video_path: Path,
+        video_name: str,
+        *,
+        enable_ppe: bool = True,
+        enable_zone: bool = True,
+    ) -> VideoProcessingResponse:
         import cv2
 
         fps, total_frames = _video_metadata(video_path)
@@ -385,6 +455,10 @@ class PPEDetector:
         workers: list[WorkerState] = []
         confirmed_aspect_ratios: list[float] = []
         candidate_violations = 0
+        frame_width: int | None = None
+        frame_height: int | None = None
+        overlay_frames: list[TrackingOverlayFrame] = []
+        zones = load_zones(video_name) if enable_zone else []
 
         while True:
             ok, frame = cap.read()
@@ -399,6 +473,7 @@ class PPEDetector:
             response = self._mock_predict(Image.fromarray(rgb))
             frame_height, frame_width = frame.shape[:2]
             used_worker_ids: set[int] = set()
+            overlay_person_ids: set[tuple[str, int]] = set()
 
             for person in response.persons:
                 track_id = person.person_id
@@ -412,9 +487,50 @@ class PPEDetector:
                     frame_height=frame_height,
                     used_worker_ids=used_worker_ids,
                 )
-                candidate_violations += int(decision["candidate"])
+                if enable_ppe:
+                    candidate_violations += int(decision["candidate"])
+
+                track_zone_id: int | None = None
+                track_zone_name: str | None = None
+                track_zone_type: str | None = None
+
+                if zones:
+                    test_point = get_person_foot_point(
+                        person, frame_width, frame_height
+                    )
+                    incursion_zones = check_zone_incursion(zones, test_point)
+                    incursion_zone_ids = {z.zone_id for z in incursion_zones}
+
+                    for zone in incursion_zones:
+                        if zone.zone_type == "RESTRICTED":
+                            track_zone_id = zone.zone_id
+                            track_zone_name = zone.zone_name
+                            track_zone_type = "RESTRICTED"
+                            break
+                    if track_zone_type is None:
+                        walkway_zones = [z for z in zones if z.zone_type == "WALKWAY"]
+                        if walkway_zones and not any(
+                            z.zone_id in incursion_zone_ids for z in walkway_zones
+                        ):
+                            wz = walkway_zones[0]
+                            track_zone_id = wz.zone_id
+                            track_zone_name = wz.zone_name
+                            track_zone_type = "WALKWAY"
+
+                _append_tracking_overlay_frame(
+                    overlay_frames=overlay_frames,
+                    seen_person_ids=overlay_person_ids,
+                    person=person,
+                    decision=decision,
+                    frame_index=frame_index,
+                    fps=fps,
+                    include_ppe=enable_ppe,
+                    physical_zone_id=track_zone_id,
+                    zone_name=track_zone_name,
+                    zone_type=track_zone_type,
+                )
                 missing_to_report = decision["missing_to_report"]
-                if not missing_to_report:
+                if not enable_ppe or not missing_to_report:
                     continue
 
                 _record_violation_case(
@@ -447,7 +563,78 @@ class PPEDetector:
                 inference_ms=round(elapsed_ms, 2),
             ),
             reports=reports,
+            tracking_overlay=TrackingOverlay(
+                fps=round(fps, 2),
+                stride=stride,
+                frame_width=frame_width,
+                frame_height=frame_height,
+                frames=overlay_frames,
+            ),
         )
+
+
+def _append_tracking_overlay_frame(
+    *,
+    include_ppe: bool = True,
+    overlay_frames: list[TrackingOverlayFrame],
+    seen_person_ids: set[tuple[str, int]],
+    person: PersonResult,
+    decision: dict,
+    frame_index: int,
+    fps: float,
+    camera_zone_view_id: int | None = None,
+    physical_zone_id: int | None = None,
+    zone_name: str | None = None,
+    zone_type: str | None = None,
+) -> None:
+    person_key = (
+        ("track", person.track_id)
+        if person.track_id is not None
+        else ("person", person.person_id)
+    )
+    if person_key in seen_person_ids:
+        return
+    seen_person_ids.add(person_key)
+
+    missing_equipment = (
+        [
+            equipment.label
+            for equipment in person.equipment
+            if equipment.status == "violation"
+        ]
+        if include_ppe
+        else []
+    )
+    has_zone_violation = zone_type in {"RESTRICTED", "WALKWAY"}
+    worker = decision.get("worker")
+    worker_status = getattr(worker, "status", "unknown")
+    if missing_equipment or has_zone_violation:
+        status = "violation"
+    elif decision.get("unknown") or worker_status == "unknown":
+        status = "unknown"
+    elif person.compliant or not include_ppe:
+        status = "compliant"
+    else:
+        status = "unknown"
+
+    overlay_frames.append(
+        TrackingOverlayFrame(
+            frame_index=frame_index,
+            time_seconds=frame_index / fps if fps > 0 else 0.0,
+            track_id=person.track_id,
+            person_id=person.person_id,
+            bbox=person.bbox,
+            confidence=person.confidence,
+            compliant=person.compliant and not has_zone_violation,
+            missing_equipment=missing_equipment,
+            status=status,
+            zone_id=camera_zone_view_id,
+            camera_zone_view_id=camera_zone_view_id,
+            physical_zone_id=physical_zone_id,
+            zone_name=zone_name,
+            zone_type=zone_type,
+        )
+    )
 
 
 def _update_worker_status(
@@ -461,7 +648,6 @@ def _update_worker_status(
     used_worker_ids: set[int],
 ) -> dict:
     worker = _find_or_create_worker(workers, person, frame_index, used_worker_ids)
-    reported_before_update = worker.reported
     _merge_worker_observation(worker, person, frame_index)
 
     present = _present_equipment(person)
@@ -483,8 +669,14 @@ def _update_worker_status(
         }
 
     raw_missing = _missing_equipment(person)
-    judgeable = _is_worker_judgeable(worker, frame_index, fps, frame_width, frame_height)
-    reason = "" if judgeable else _unknown_reason(worker, frame_index, fps, frame_width, frame_height)
+    judgeable = _is_worker_judgeable(
+        worker, frame_index, fps, frame_width, frame_height
+    )
+    reason = (
+        ""
+        if judgeable
+        else _unknown_reason(worker, frame_index, fps, frame_width, frame_height)
+    )
 
     if not judgeable:
         if worker.status != "violation":
@@ -519,7 +711,9 @@ def _update_worker_status(
     for label in ("Helmet", "Vest"):
         if worker.missing_counts is None:
             worker.missing_counts = {"Helmet": 0, "Vest": 0}
-        worker.missing_counts[label] = worker.missing_counts.get(label, 0) + 1 if label in missing else 0
+        worker.missing_counts[label] = (
+            worker.missing_counts.get(label, 0) + 1 if label in missing else 0
+        )
 
     confirmed_missing = [
         label
@@ -616,7 +810,9 @@ def _find_existing_worker(
     return None
 
 
-def _find_spatial_worker_match(workers: list[WorkerState], person: PersonResult) -> WorkerState | None:
+def _find_spatial_worker_match(
+    workers: list[WorkerState], person: PersonResult
+) -> WorkerState | None:
     best_worker: WorkerState | None = None
     best_iou = 0.0
     for worker in workers:
@@ -629,13 +825,18 @@ def _find_spatial_worker_match(workers: list[WorkerState], person: PersonResult)
         return best_worker
 
     for worker in workers:
-        if _center_distance_ratio(person.bbox, worker.last_bbox) <= settings.VIDEO_CASE_CENTER_DISTANCE_RATIO:
+        if (
+            _center_distance_ratio(person.bbox, worker.last_bbox)
+            <= settings.VIDEO_CASE_CENTER_DISTANCE_RATIO
+        ):
             return worker
 
     return None
 
 
-def _merge_worker_observation(worker: WorkerState, person: PersonResult, frame_index: int) -> None:
+def _merge_worker_observation(
+    worker: WorkerState, person: PersonResult, frame_index: int
+) -> None:
     if person.track_id is not None:
         worker.track_ids.add(person.track_id)
     worker.last_frame = frame_index
@@ -658,7 +859,10 @@ def _is_worker_judgeable(
         return False
     if _is_near_frame_edge(worker.last_bbox, frame_width, frame_height):
         return False
-    if _bbox_height_ratio(worker.last_bbox, frame_height) < settings.VIDEO_MIN_PERSON_HEIGHT_RATIO:
+    if (
+        _bbox_height_ratio(worker.last_bbox, frame_height)
+        < settings.VIDEO_MIN_PERSON_HEIGHT_RATIO
+    ):
         return False
     if not _is_bbox_stable(worker.recent_bboxes):
         return False
@@ -679,7 +883,10 @@ def _unknown_reason(
         return "new_track_grace"
     if _is_near_frame_edge(worker.last_bbox, frame_width, frame_height):
         return "near_frame_edge"
-    if _bbox_height_ratio(worker.last_bbox, frame_height) < settings.VIDEO_MIN_PERSON_HEIGHT_RATIO:
+    if (
+        _bbox_height_ratio(worker.last_bbox, frame_height)
+        < settings.VIDEO_MIN_PERSON_HEIGHT_RATIO
+    ):
         return "person_too_small"
     if not _is_bbox_stable(worker.recent_bboxes):
         return "unstable_bbox"
@@ -730,7 +937,10 @@ def _has_unclear_posture(worker: WorkerState) -> bool:
     history_frames = max(0, settings.VIDEO_POSTURE_HISTORY_MIN_FRAMES)
     if len(recent_heights) >= history_frames and history_frames > 0:
         median_height = statistics.median(recent_heights)
-        if _bbox_height(current_bbox) < median_height * settings.VIDEO_POSTURE_HEIGHT_DROP_RATIO:
+        if (
+            _bbox_height(current_bbox)
+            < median_height * settings.VIDEO_POSTURE_HEIGHT_DROP_RATIO
+        ):
             return True
 
     return False
@@ -745,7 +955,9 @@ def _suppress_recently_seen_ppe(
     memory_frames = _seconds_to_frames(settings.VIDEO_RECENT_PPE_MEMORY_SECONDS, fps)
     filtered: list[str] = []
     for label in missing:
-        seen_frame = worker.helmet_seen_frame if label == "Helmet" else worker.vest_seen_frame
+        seen_frame = (
+            worker.helmet_seen_frame if label == "Helmet" else worker.vest_seen_frame
+        )
         if seen_frame is not None and frame_index - seen_frame <= memory_frames:
             continue
         filtered.append(label)
@@ -779,42 +991,61 @@ def _record_violation_case(
     if worker.reported:
         return
 
-    # Force a new violation case on every confirmed incident. Do not group.
-    case, match_reason = None, "new"
-
+    case, match_reason = _find_existing_case_match(cases, person, frame_index)
     missing_set = set(missing)
     violation_type = _violation_type(missing)
     timestamp = datetime.now(timezone.utc).isoformat()
+    _log_confirmed_incident(
+        timestamp=timestamp,
+        video_name=video_name,
+        frame_index=frame_index,
+        person=person,
+        worker=worker,
+        case=case,
+        violation_type=violation_type,
+        action="create" if case is None else "match_existing_immutable",
+        match_reason=match_reason,
+    )
 
     if confirmed_aspect_ratios is not None:
         confirmed_aspect_ratios.append(_bbox_aspect_ratio(person.bbox))
 
-    snapshot_filename = _save_violation_snapshot(
-        frame=frame,
-        person=person,
-        missing=missing,
-        video_stem=Path(video_name).stem,
-        frame_index=frame_index,
-    )
-    report = save_violation(
-        timestamp=timestamp,
-        violation_type=violation_type,
-        details=_violation_details(person, missing, frame_index),
-        snapshot_filename=snapshot_filename,
-        video_name=video_name,
-        frame_index=frame_index,
-        track_id=person.track_id,
-    )
-    cases.append(
-        ViolationCase(
-            report=report,
-            missing=missing_set,
-            track_ids={person.track_id} if person.track_id is not None else set(),
-            last_bbox=person.bbox,
-            first_frame=frame_index,
-            last_frame=frame_index,
+    if case is None:
+        snapshot_filename = _save_violation_snapshot(
+            frame=frame,
+            person=person,
+            missing=missing,
+            video_stem=Path(video_name).stem,
+            frame_index=frame_index,
         )
-    )
+        report = save_violation(
+            timestamp=timestamp,
+            violation_type=violation_type,
+            details=_violation_details(person, missing, frame_index),
+            snapshot_filename=snapshot_filename,
+            video_name=video_name,
+            frame_index=frame_index,
+            track_id=person.track_id,
+            person_index=person.person_id,
+            missing_equipment=missing,
+            bounding_box=person.bbox.model_dump(),
+            confidence=person.confidence,
+        )
+        cases.append(
+            ViolationCase(
+                report=report,
+                missing=missing_set,
+                track_ids={person.track_id} if person.track_id is not None else set(),
+                last_bbox=person.bbox,
+                first_frame=frame_index,
+                last_frame=frame_index,
+            )
+        )
+    else:
+        case.last_bbox = person.bbox
+        case.last_frame = frame_index
+        if person.track_id is not None:
+            case.track_ids.add(person.track_id)
     worker.reported = True
     worker.status = "violation"
 
@@ -856,7 +1087,10 @@ def _find_existing_case_match(
         return best_case, "iou"
 
     for case in fresh_cases:
-        if _center_distance_ratio(person.bbox, case.last_bbox) <= settings.VIDEO_CASE_CENTER_DISTANCE_RATIO:
+        if (
+            _center_distance_ratio(person.bbox, case.last_bbox)
+            <= settings.VIDEO_CASE_CENTER_DISTANCE_RATIO
+        ):
             return case, "center"
 
     return None, "new"
@@ -892,6 +1126,53 @@ def _bbox_height(box: BoundingBox) -> float:
 def _bbox_aspect_ratio(box: BoundingBox) -> float:
     width = max(_bbox_width(box), 1.0)
     return _bbox_height(box) / width
+
+
+def _format_track_ids(track_ids: set[int]) -> str:
+    if not track_ids:
+        return "-"
+    return ",".join(str(track_id) for track_id in sorted(track_ids))
+
+
+def _log_confirmed_incident(
+    *,
+    timestamp: str,
+    video_name: str,
+    frame_index: int,
+    person: PersonResult,
+    worker: WorkerState,
+    case: ViolationCase | None,
+    violation_type: str,
+    action: str,
+    match_reason: str,
+) -> None:
+    bbox = person.bbox
+    logger.info(
+        "ppe_incident_confirmed timestamp=%s video=%s frame_index=%s track_id=%s "
+        "worker_id=%s worker_reported_before_record=%s violation_type=%s action=%s "
+        "match_reason=%s case_track_ids=%s case_first_frame=%s case_last_frame=%s "
+        "bbox=(%.1f,%.1f,%.1f,%.1f) bbox_width=%.1f bbox_height=%.1f "
+        "aspect_ratio=%.3f",
+        timestamp,
+        video_name,
+        frame_index,
+        person.track_id,
+        id(worker),
+        worker.reported,
+        violation_type,
+        action,
+        match_reason,
+        _format_track_ids(case.track_ids if case is not None else set()),
+        case.first_frame if case is not None else None,
+        case.last_frame if case is not None else None,
+        bbox.x1,
+        bbox.y1,
+        bbox.x2,
+        bbox.y2,
+        _bbox_width(bbox),
+        _bbox_height(bbox),
+        _bbox_aspect_ratio(bbox),
+    )
 
 
 def _bbox_diagonal(box: BoundingBox) -> float:
@@ -1028,7 +1309,9 @@ def _build_response(
     )
 
 
-def _best_equipment_by_person(equipment: list[dict], assignments: list[int | None]) -> dict[int, dict]:
+def _best_equipment_by_person(
+    equipment: list[dict], assignments: list[int | None]
+) -> dict[int, dict]:
     best: dict[int, dict] = {}
     for eq, person_idx in zip(equipment, assignments):
         if person_idx is None:
@@ -1083,7 +1366,11 @@ def _append_unmatched_equipment(
     assignments: list[int | None],
     label: str,
 ) -> int:
-    matched = {id(eq) for eq, person_idx in zip(equipment, assignments) if person_idx is not None}
+    matched = {
+        id(eq)
+        for eq, person_idx in zip(equipment, assignments)
+        if person_idx is not None
+    }
     for eq in equipment:
         if id(eq) in matched:
             continue
@@ -1116,8 +1403,14 @@ def _violation_type(missing: list[str]) -> str:
     return "ppe_violation"
 
 
-def _violation_details(person: PersonResult, missing: list[str], frame_index: int) -> str:
-    subject = f"track {person.track_id}" if person.track_id is not None else f"person {person.person_id}"
+def _violation_details(
+    person: PersonResult, missing: list[str], frame_index: int
+) -> str:
+    subject = (
+        f"track {person.track_id}"
+        if person.track_id is not None
+        else f"person {person.person_id}"
+    )
     return f"{subject} missing {', '.join(missing)} at frame {frame_index}"
 
 
@@ -1134,7 +1427,9 @@ def _save_violation_snapshot(
     import cv2
 
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-    safe_stem = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in video_stem)
+    safe_stem = "".join(
+        ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in video_stem
+    )
     track_label = person.track_id if person.track_id is not None else person.person_id
     filename = f"{safe_stem}_frame_{frame_index}_track_{track_label}_{int(time.time() * 1000)}.jpg"
     path = SNAPSHOT_DIR / filename
@@ -1142,29 +1437,22 @@ def _save_violation_snapshot(
     snapshot = frame.copy()
     frame_height, frame_width = snapshot.shape[:2]
 
-    # Draw Zone Polygon if provided
     if polygon:
-        # Determine color based on zone type (BGR format for OpenCV)
-        # Walkway: Green (0, 255, 0), Restricted: Red (0, 0, 255)
         color = (34, 197, 94) if zone_type == "WALKWAY" else (0, 0, 255)
-        
-        # Polygon points are scaled to COORD_SCALE (1000)
         pts = np.array(
             [
-                [int(p[0] * frame_width / COORD_SCALE), int(p[1] * frame_height / COORD_SCALE)]
+                [
+                    int(p[0] * frame_width / COORD_SCALE),
+                    int(p[1] * frame_height / COORD_SCALE),
+                ]
                 for p in polygon
             ],
             np.int32,
-        )
-        pts = pts.reshape((-1, 1, 2))
+        ).reshape((-1, 1, 2))
 
-        # Draw semi-transparent fill
         overlay = snapshot.copy()
         cv2.fillPoly(overlay, [pts], color=color)
-        alpha = 0.3  # Transparency factor
-        cv2.addWeighted(overlay, alpha, snapshot, 1 - alpha, 0, snapshot)
-
-        # Draw solid border
+        cv2.addWeighted(overlay, 0.3, snapshot, 0.7, 0, snapshot)
         cv2.polylines(snapshot, [pts], isClosed=True, color=color, thickness=2)
 
     x1 = int(max(0, person.bbox.x1))
@@ -1186,6 +1474,37 @@ def _save_violation_snapshot(
     return filename
 
 
+def save_violation(
+    *,
+    timestamp: str,
+    violation_type: str,
+    details: str,
+    snapshot_filename: str,
+    video_name: str | None,
+    frame_index: int | None,
+    track_id: int | None,
+    person_index: int | None,
+    missing_equipment: list[str],
+    bounding_box: dict[str, float] | None,
+    confidence: float | None,
+) -> ViolationReport:
+    local_snapshot_path = SNAPSHOT_DIR / snapshot_filename
+    with open_ppe_violation_service() as service:
+        return service.persist_violation(
+            timestamp=timestamp,
+            violation_type=violation_type,
+            details=details,
+            local_snapshot_path=str(local_snapshot_path),
+            video_name=video_name,
+            frame_index=frame_index,
+            track_id=track_id,
+            person_index=person_index,
+            missing_equipment=missing_equipment,
+            bounding_box=bounding_box,
+            confidence=confidence,
+        )
+
+
 def _video_metadata(video_path: Path) -> tuple[float, int]:
     import cv2
 
@@ -1197,7 +1516,9 @@ def _video_metadata(video_path: Path) -> tuple[float, int]:
     ret, frame = cap.read()
     if not ret or frame is None:
         cap.release()
-        raise ValueError("Video file opened but frames could not be read. The codec might be unsupported by the server.")
+        raise ValueError(
+            "Video file opened but frames could not be read. The codec might be unsupported by the server."
+        )
 
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)

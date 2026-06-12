@@ -1,93 +1,83 @@
 # Project Context: De Heus PPE Safety Monitor
 
-## 1. Project Overview
-The **De Heus PPE Safety Monitor** is an industrial safety system designed to monitor factory floor compliance with Personal Protective Equipment (PPE) standards using computer vision. It identifies workers and their equipment (helmets, vests) and analyzes spatial violations based on configurable safety zones.
+## Overview
 
-## 2. Technical Stack
-### Backend (FastAPI)
-- **Framework:** FastAPI (Python 3.11+)
-- **Computer Vision:** YOLOv8 (Ultralytics) for detection and tracking.
-- **Tracking:** BoT-SORT / ByteTrack (YOLOv8 defaults) for maintaining worker identity across frames.
-- **Inference Device:** Supports CPU, CUDA (Auto-detection), and a "Mock Mode" for GPU-less development.
-- **Database:** SQLite (SQLModel/SQLAlchemy) for persistence.
-- **Image Processing:** OpenCV (cv2) for spatial logic, drawing, and snapshot generation.
+The application detects PPE compliance (helmets and vests) and monitors configurable safety zones in uploaded images and videos. It is designed for smart factory safety monitoring.
 
-### Frontend (Next.js)
-- **Framework:** Next.js 14 (App Router, TypeScript)
-- **Styling:** Tailwind CSS
-- **Interactive Canvas:** Fabric.js (v5) for drawing safety zones and rendering detections.
-- **API Client:** Standard `fetch` API wrapped in `lib/api.ts`.
+## Architecture
 
-## 3. Core Domain Logic
+### Backend
 
-### 3.1 Spatial Incursion Engine
-The system maps perspective camera views to a logical coordinate system for accurate spatial testing.
-- **Coordinate System:** All spatial logic operates on a **1000x1000 normalized grid**.
-- **Normalization:** Points are stored as `0.0 to 1.0` in the database and UI, then scaled to `1000` for OpenCV processing.
-- **Worker Foot-Point:** To determine if a person is "in" a zone, the system calculates the bottom-center of their bounding box: `( (x1 + x2) / 2, y2 )`.
-- **Zone Types & Behavior:**
-    - **RESTRICTED:** A violation is triggered if a person's foot-point enters the zone for longer than the `dwell_threshold`.
-    - **WALKWAY:** A violation is triggered if a person's foot-point stays *outside* the zone for longer than the `dwell_threshold`.
+- **Framework:** FastAPI provides the REST API.
+- **Detection & Tracking:** YOLOv8 (via `ultralytics` library) performs person, helmet, and vest detection. It also handles object tracking for video processing.
+- **Database:** PostgreSQL with SQLModel (SQLAlchemy) stores cameras, zones, and violation history.
+- **Storage:** MinIO is used for persistent evidence storage (snapshots). Local storage is used for temporary snapshots during processing.
+- **Inference Logic:**
+    - **PPE Detection:** Checks overlap between person and equipment (helmet/vest) detections.
+    - **Zone Monitoring:** Performs point-in-polygon checks using a normalized 1000x1000 grid. Foot points of tracked persons are used for incursion detection.
+    - **Dwell Threshold:** Violations are triggered when a person stays in a restricted zone (or outside a walkway) longer than a configured threshold.
 
-### 3.2 PPE Compliance Logic
-- **Overlap Check:** Equipment (Helmet/Vest) is assigned to a person if it significantly overlaps their bounding box (calculated via IoU and relative area).
-- **Stability Window:** To prevent flickering, violations are only reported if missing PPE is confirmed over multiple frames (defined by `VIDEO_VIOLATION_CONFIRM_SECONDS`).
-- **Memory:** The system "remembers" recently seen PPE to avoid false violations during brief occlusions.
+### Frontend
 
-## 4. Database Schema (SQLite)
+- **Framework:** Next.js (App Router) with TypeScript.
+- **Styling:** Tailwind CSS (v4).
+- **Icons:** Lucide React.
+- **Zone Drawing:** Custom SVG overlay on the video element for drawing and displaying polygons. Supports advanced interactions like vertex dragging, edge-click point insertion, and synchronized sidebar configuration.
+- **Dashboard:** A single-page dashboard (`DashboardShell`) that manages camera feeds, violation logs, and safety rules.
 
-### `violations` (PPE breaches)
-- `id`: Primary Key
-- `timestamp`: ISO-8601 string
-- `violation_type`: Enum (`missing_helmet`, `missing_vest`, `missing_helmet_and_vest`)
-- `details`: Text description
-- `snapshot_path`: Filename of the generated evidence image
-- `video_name`: Source file name
-- `frame_index`: Frame where violation was confirmed
-- `track_id`: YOLOv8 tracker ID
+## Data Model
 
-### `zones` (Safety Area Configuration)
-- `id`: Primary Key
-- `video_name`: Associated video source
-- `zone_name`: User-defined label
-- `zone_type`: Enum (`RESTRICTED`, `WALKWAY`)
-- `dwell_threshold_seconds`: Time allowed before breach is recorded
-- `is_active`: Boolean toggle
-- `ui_shape_data`: Raw Fabric.js JSON for UI reconstruction
-- `flattened_coordinates`: JSON array of normalized `[x, y]` points for backend processing
+- **Camera:** Represents a video source (often identified by filename in this demo).
+- **Zone:** Configuration for a safety zone (RESTRICTED or WALKWAY). Includes `dwell_threshold_seconds`, `ui_shape_data`, and `normalized_coordinates`.
+- **PPEViolation:** Recorded incident of missing PPE.
+- **PPEViolationSubject:** Specific person in a PPE violation, listing missing equipment.
+- **ZoneViolation:** Recorded incident of a zone incursion.
 
-### `zone_violations` (Spatial breaches)
-- `id`: Primary Key
-- `zone_id`: Link to `zones`
-- `zone_name`, `zone_type`: Denormalized for reporting
-- `track_id`: ID of the worker
-- `timestamp`: ISO-8601 string
-- `video_name`, `frame_index`: Context
-- `snapshot_path`: Evidence image with zone polygon overlay
+## Folder Structure
 
-## 5. Key Architecture & File Roles
+### Backend (`/backend`)
+- `app/main.py`: Application entry point and router inclusion.
+- `app/core/config.py`: Configuration and environment settings.
+- `app/models/`: SQLModel table definitions (`camera.py`, `zone.py`, `ppe_violation.py`, `zone_violation.py`).
+- `app/repositories/`: Database abstraction layer (CRUD).
+- `app/routers/`: API endpoints (`detection.py`, `zones.py`, `testing.py`).
+- `app/schemas/`: Pydantic models for API requests/responses.
+- `app/services/`:
+    - `ppe_detector.py`: YOLOv8 inference and tracking logic.
+    - `zone_service.py`: Zone management and incursion detection.
+    - `ppe_violation_service.py` / `zone_violation_service.py`: Violation persistence logic.
+    - `spatial.py`: Geometric utilities (point-in-polygon).
+- `app/storage/`: Evidence storage handling (MinIO).
 
-### Backend Services (`/backend/app/services`)
-- `ppe_detector.py`: The "Brain". Manages the YOLOv8 tracking loop, integrates PPE checks, and calls `zone_service`.
-- `zone_service.py`: Encapsulates zone loading, foot-point calculation, and incursion testing.
-- `violation_store.py`: Handles all SQLite CRUD operations and directory management for snapshots.
-- `spatial.py`: Low-level OpenCV utilities (Point-in-Polygon).
+### Frontend (`/frontend`)
+- `src/app/`: Next.js App Router pages and layout.
+- `src/components/`:
+    - `dashboard/`: `DashboardShell.tsx` (main UI) and data constants.
+    - `ppe/`: UI components for detection results, video overlays, and file uploads.
+- `src/lib/ppe-api.ts`: API client for communicating with the backend.
+- `src/types/`: TypeScript interfaces for detection and zone data.
 
-### Backend Routers (`/backend/app/routers`)
-- `detection.py`: Endpoints for single image (`/predict`) and video (`/predict-video`) processing.
-- `zones.py`: CRUD endpoints for safety zones and fetching history.
+## Key Workflows
 
-### Frontend Components (`/frontend/components`)
-- `ZoneDrawingCanvas.tsx`: The complex Fabric.js editor for zones. Handles normalization and linearization of circles/paths.
-- `BoundingBoxCanvas.tsx`: Renders the "live" results of detection/monitoring.
-- `ViolationReportCard.tsx` / `ZoneViolationCard.tsx`: Display items for the unified history feed.
+1. **Zone Configuration:** Users can upload a video and define safety zones using a custom SVG tool.
+    - **Drawing:** Users click to define vertices for new polygon zones.
+    - **Modification:** Existing zones can be selected to move the entire shape or drag individual vertices.
+    - **Advanced Editing:** A specialized "Add Point" mode allows users to insert new vertices by clicking on polygon edges.
+    - **State Sync:** The configuration sidebar (name, type) is conditionally enabled and synchronized in real-time with the selected zone.
+    - **Persistence:** Configurations are stored in the backend and associated with specific video filenames.
+2. **Inference:**
+    - For images: A single-pass detection returns PPE status.
+    - For videos: Tracking-based inference monitors persons across frames, applying temporal filters to reduce false positives and detecting zone incursions based on dwell time.
+3. **Violation Reporting:** When a violation is confirmed, a snapshot is taken, annotated with the violation details, and saved to MinIO. The event is recorded in PostgreSQL.
 
-## 6. Snapshot Evidence Generation
-When a violation occurs, the system generates a `.jpg` snapshot:
-- **PPE Violation:** Draws a red box around the person and labels missing items.
-- **Zone Violation:** Draws the **semi-transparent colored polygon** of the breached zone (Red for Restricted, Green for Walkway) and a box around the person.
+## Commands
 
-## 7. Operational Commands
-- **Backend:** `uvicorn app.main:app --app-dir backend --reload --port 8000`
-- **Frontend:** `npm run dev` (Port 3000)
-- **Environment:** `MODEL_PATH`, `VIOLATION_DB_PATH`, and `SNAPSHOT_DIR` are configurable via `.env`.
+```bash
+# Backend
+uvicorn app.main:app --app-dir backend --reload --port 8000
+python -m pytest
+
+# Frontend
+cd frontend
+npm run dev
+```
