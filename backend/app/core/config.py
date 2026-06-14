@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     VIDEO_POSTURE_HISTORY_MIN_FRAMES: int = 3
     SNAPSHOT_DIR: str = "storage/snapshots"
     ALLOWED_ORIGINS: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    SIGN_MODEL_PATH: str = "weights/sign_model.pt"
+    SIGN_CONFIDENCE_THRESHOLD: float = 0.5
+    SIGN_ZONE_EXPAND_RATIO: float = 2.0
 
     class Config:
         env_file = str(BACKEND_DIR / ".env")

@@ -65,6 +65,8 @@ class PPEDetector:
         self.model = None
         self.device = _select_inference_device(settings.INFERENCE_DEVICE)
         self._load_model()
+        from app.services.detection.sign_detector import load_sign_model
+        load_sign_model()
 
     def _load_model(self) -> None:
         model_path = Path(settings.MODEL_PATH).expanduser()
