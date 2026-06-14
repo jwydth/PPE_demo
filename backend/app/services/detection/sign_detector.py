@@ -90,15 +90,13 @@ def signs_to_zone_records(
 
     for det in detections:
         b = det.bbox
-        w = b["x2"] - b["x1"]
-        h = b["y2"] - b["y1"]
-        pad_x = w * (ratio - 1) / 2
-        pad_y = h * (ratio - 1) / 2
+        sign_w = b["x2"] - b["x1"]
+        sign_h = b["y2"] - b["y1"]
 
-        ex1 = max(0.0, b["x1"] - pad_x)
-        ey1 = max(0.0, b["y1"] - pad_y)
-        ex2 = min(float(frame_width), b["x2"] + pad_x)
-        ey2 = min(float(frame_height), b["y2"] + pad_y)
+        ex1 = max(0.0, b["x1"] - sign_w * ratio)
+        ex2 = min(float(frame_width), b["x2"] + sign_w * ratio)
+        ey1 = max(0.0, b["y1"] - sign_h * 0.5)
+        ey2 = min(float(frame_height), b["y2"] + sign_h * ratio * 2.0)
 
         def _norm_x(x: float) -> float:
             return (x / frame_width) * COORD_SCALE
@@ -113,10 +111,14 @@ def signs_to_zone_records(
             (_norm_x(ex1), _norm_y(ey2)),
         ]
 
+        # Use a stable negative ID per sign class so each sign type tracks
+        # dwell and reported_zones independently. Negative values are never
+        # valid DB IDs, so ppe_detector routes these through the ephemeral
+        # recording path that passes camera_zone_view_id=None to the service.
         records.append(
             ZoneViolationRecord(
-                camera_zone_view_id=-1,
-                physical_zone_id=-1,
+                camera_zone_view_id=-det.class_id,
+                physical_zone_id=-det.class_id,
                 zone_name=det.label,
                 zone_type=SIGN_ZONE_TYPE_MAP[det.class_id],
                 poly=poly,

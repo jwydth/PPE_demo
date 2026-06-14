@@ -1,6 +1,9 @@
+import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
+import PIL.Image as _PILImage
 from PIL import Image
 
 from app.core.config import BACKEND_DIR, settings
@@ -19,10 +22,79 @@ from app.services.zone_service import (
     load_zones,
     record_zone_violation,
 )
+from app.services.zone_violation_service import open_zone_violation_service
+from app.storage.local_paths import SNAPSHOT_DIR
 from .detection.response_builder import _build_response
+from .detection.sign_detector import detect_signs, signs_to_zone_records
 from .detection.video_utils import _extract_result_boxes, _video_metadata
 from .detection.violation_recorder import ViolationCase, _record_violation_case, _save_violation_snapshot
 from .detection.worker_tracker import WorkerState, _update_worker_status
+
+
+logger = logging.getLogger(__name__)
+
+
+def _record_zone_violation_dispatch(
+    *,
+    worker_state,
+    zone,
+    frame,
+    person: PersonResult,
+    video_name: str,
+    frame_index: int,
+) -> ZoneViolation | None:
+    """Route zone violation recording.
+
+    DB-backed zones (positive camera_zone_view_id) use record_zone_violation
+    which passes the real FK to the service.  Ephemeral sign zones (negative
+    camera_zone_view_id) call persist_zone_violation directly with None IDs
+    to avoid the _optional_positive_id(-N) → ServiceValidationError crash.
+    """
+    if zone.camera_zone_view_id > 0:
+        return record_zone_violation(
+            worker_state=worker_state,
+            zone=zone,
+            frame=frame,
+            person=person,
+            video_name=video_name,
+            frame_index=frame_index,
+            save_snapshot_fn=_save_violation_snapshot,
+        )
+
+    # Ephemeral sign zone — persist without FK constraints
+    timestamp = datetime.now(timezone.utc).isoformat()
+    label = f"Entered Zone: {zone.zone_name}"
+    snapshot_filename = _save_violation_snapshot(
+        frame=frame,
+        person=person,
+        missing=[label],
+        video_stem=Path(video_name).stem,
+        frame_index=frame_index,
+        polygon=zone.poly,
+        zone_type=zone.zone_type,
+    )
+    local_snapshot_path = SNAPSHOT_DIR / snapshot_filename
+    try:
+        with open_zone_violation_service() as svc:
+            saved = svc.persist_zone_violation(
+                camera_zone_view_id=None,
+                physical_zone_id=None,
+                zone_name=zone.zone_name,
+                zone_type=zone.zone_type,
+                track_id=person.track_id or 0,
+                timestamp=timestamp,
+                video_name=video_name,
+                frame_index=frame_index,
+                local_snapshot_path=str(local_snapshot_path),
+            )
+        local_snapshot_path.unlink(missing_ok=True)
+        worker_state.reported_zones.add(zone.camera_zone_view_id)
+        return saved
+    except Exception:
+        logger.warning("Failed to persist sign zone violation", exc_info=True)
+        local_snapshot_path.unlink(missing_ok=True)
+        worker_state.reported_zones.add(zone.camera_zone_view_id)
+        return None
 
 
 def _select_inference_device(preferred_device: str) -> str:
@@ -167,6 +239,10 @@ class PPEDetector:
             response = _build_response(persons, helmets, vests, 0.0)
             frame = result.orig_img.copy()
             frame_height, frame_width = frame.shape[:2]
+            _pil_frame = _PILImage.fromarray(frame[..., ::-1])  # BGR → RGB
+            _sign_detections = detect_signs(_pil_frame)
+            _auto_zones = signs_to_zone_records(_sign_detections, frame_width, frame_height)
+            active_zones = zones + _auto_zones
             used_worker_ids: set[int] = set()
             overlay_person_ids: set[tuple[str, int]] = set()
 
@@ -189,14 +265,14 @@ class PPEDetector:
                 track_zone_name: str | None = None
                 track_zone_type: str | None = None
 
-                if zones:
+                if active_zones:
                     test_point = get_person_foot_point(person, frame_width, frame_height)
-                    incursion_zones = check_zone_incursion(zones, test_point)
+                    incursion_zones = check_zone_incursion(active_zones, test_point)
                     incursion_camera_zone_view_ids = {
                         z.camera_zone_view_id for z in incursion_zones
                     }
 
-                    for zone in zones:
+                    for zone in active_zones:
                         camera_zone_view_id = zone.camera_zone_view_id
                         in_zone = camera_zone_view_id in incursion_camera_zone_view_ids
 
@@ -212,14 +288,13 @@ class PPEDetector:
                                     worker.zone_dwell[camera_zone_view_id] > zone.threshold
                                     and camera_zone_view_id not in worker.reported_zones
                                 ):
-                                    zv = record_zone_violation(
+                                    zv = _record_zone_violation_dispatch(
                                         worker_state=worker,
                                         zone=zone,
                                         frame=frame,
                                         person=person,
                                         video_name=video_name,
                                         frame_index=frame_index,
-                                        save_snapshot_fn=_save_violation_snapshot,
                                     )
                                     if zv:
                                         zone_violations_list.append(zv)
@@ -233,14 +308,13 @@ class PPEDetector:
                                     worker.zone_dwell[camera_zone_view_id] > zone.threshold
                                     and camera_zone_view_id not in worker.reported_zones
                                 ):
-                                    zv = record_zone_violation(
+                                    zv = _record_zone_violation_dispatch(
                                         worker_state=worker,
                                         zone=zone,
                                         frame=frame,
                                         person=person,
                                         video_name=video_name,
                                         frame_index=frame_index,
-                                        save_snapshot_fn=_save_violation_snapshot,
                                     )
                                     if zv:
                                         zone_violations_list.append(zv)
@@ -253,7 +327,7 @@ class PPEDetector:
                             track_zone_type = "RESTRICTED"
                             break
                     if track_zone_type is None:
-                        walkway_zones = [z for z in zones if z.zone_type == "WALKWAY"]
+                        walkway_zones = [z for z in active_zones if z.zone_type == "WALKWAY"]
                         if walkway_zones and not any(
                             z.camera_zone_view_id in incursion_camera_zone_view_ids
                             for z in walkway_zones
@@ -378,6 +452,10 @@ class PPEDetector:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             response = self._mock_predict(Image.fromarray(rgb))
             frame_height, frame_width = frame.shape[:2]
+            _pil_frame = _PILImage.fromarray(rgb)
+            _sign_detections = detect_signs(_pil_frame)
+            _auto_zones = signs_to_zone_records(_sign_detections, frame_width, frame_height)
+            active_zones = zones + _auto_zones
             used_worker_ids: set[int] = set()
             overlay_person_ids: set[tuple[str, int]] = set()
 
@@ -400,24 +478,24 @@ class PPEDetector:
                 track_zone_name: str | None = None
                 track_zone_type: str | None = None
 
-                if zones:
+                if active_zones:
                     test_point = get_person_foot_point(person, frame_width, frame_height)
-                    incursion_zones = check_zone_incursion(zones, test_point)
-                    incursion_zone_ids = {z.zone_id for z in incursion_zones}
+                    incursion_zones = check_zone_incursion(active_zones, test_point)
+                    incursion_zone_ids = {z.camera_zone_view_id for z in incursion_zones}
 
                     for zone in incursion_zones:
                         if zone.zone_type == "RESTRICTED":
-                            track_zone_id = zone.zone_id
+                            track_zone_id = zone.camera_zone_view_id
                             track_zone_name = zone.zone_name
                             track_zone_type = "RESTRICTED"
                             break
                     if track_zone_type is None:
-                        walkway_zones = [z for z in zones if z.zone_type == "WALKWAY"]
+                        walkway_zones = [z for z in active_zones if z.zone_type == "WALKWAY"]
                         if walkway_zones and not any(
-                            z.zone_id in incursion_zone_ids for z in walkway_zones
+                            z.camera_zone_view_id in incursion_zone_ids for z in walkway_zones
                         ):
                             wz = walkway_zones[0]
-                            track_zone_id = wz.zone_id
+                            track_zone_id = wz.camera_zone_view_id
                             track_zone_name = wz.zone_name
                             track_zone_type = "WALKWAY"
 
