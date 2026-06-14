@@ -14,6 +14,7 @@ from app.schemas.detection import (
     TrackingOverlayFrame,
     VideoProcessingResponse,
     VideoSummary,
+    ZonePolygon,
 )
 from app.schemas.violation import ZoneViolation
 from app.services.zone_service import (
@@ -218,6 +219,7 @@ class PPEDetector:
         frame_width: int | None = None
         frame_height: int | None = None
         overlay_frames: list[TrackingOverlayFrame] = []
+        collected_zones: dict[str, ZonePolygon] = {}
 
         zones = load_zones(video_name) if enable_zone else []
 
@@ -243,6 +245,27 @@ class PPEDetector:
             _sign_detections = detect_signs(_pil_frame)
             _auto_zones = signs_to_zone_records(_sign_detections, frame_width, frame_height)
             active_zones = zones + _auto_zones
+            logger.info("Frame %d: %d sign(s) detected", frame_index, len(_sign_detections))
+
+            for z in zones:
+                key = f"saved:{z.zone_name}"
+                if key not in collected_zones:
+                    collected_zones[key] = ZonePolygon(
+                        zone_name=z.zone_name,
+                        zone_type=z.zone_type,
+                        source="saved",
+                        points=list(z.poly),
+                    )
+            for z in _auto_zones:
+                key = f"sign:{z.zone_name}"
+                if key not in collected_zones:
+                    collected_zones[key] = ZonePolygon(
+                        zone_name=z.zone_name,
+                        zone_type=z.zone_type,
+                        source="sign",
+                        points=list(z.poly),
+                    )
+
             used_worker_ids: set[int] = set()
             overlay_person_ids: set[tuple[str, int]] = set()
 
@@ -389,6 +412,7 @@ class PPEDetector:
                 frame_width=frame_width,
                 frame_height=frame_height,
                 frames=overlay_frames,
+                zones=list(collected_zones.values()),
             ),
         )
 
@@ -438,6 +462,7 @@ class PPEDetector:
         frame_width: int | None = None
         frame_height: int | None = None
         overlay_frames: list[TrackingOverlayFrame] = []
+        collected_zones: dict[str, ZonePolygon] = {}
         zones = load_zones(video_name) if enable_zone else []
 
         while True:
@@ -456,6 +481,27 @@ class PPEDetector:
             _sign_detections = detect_signs(_pil_frame)
             _auto_zones = signs_to_zone_records(_sign_detections, frame_width, frame_height)
             active_zones = zones + _auto_zones
+            logger.info("Frame %d: %d sign(s) detected", frame_index, len(_sign_detections))
+
+            for z in zones:
+                key = f"saved:{z.zone_name}"
+                if key not in collected_zones:
+                    collected_zones[key] = ZonePolygon(
+                        zone_name=z.zone_name,
+                        zone_type=z.zone_type,
+                        source="saved",
+                        points=list(z.poly),
+                    )
+            for z in _auto_zones:
+                key = f"sign:{z.zone_name}"
+                if key not in collected_zones:
+                    collected_zones[key] = ZonePolygon(
+                        zone_name=z.zone_name,
+                        zone_type=z.zone_type,
+                        source="sign",
+                        points=list(z.poly),
+                    )
+
             used_worker_ids: set[int] = set()
             overlay_person_ids: set[tuple[str, int]] = set()
 
@@ -551,6 +597,7 @@ class PPEDetector:
                 frame_width=frame_width,
                 frame_height=frame_height,
                 frames=overlay_frames,
+                zones=list(collected_zones.values()),
             ),
         )
 

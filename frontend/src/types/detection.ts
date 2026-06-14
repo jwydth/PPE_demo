@@ -84,12 +84,20 @@ export interface TrackingOverlayFrame {
   status: Category | "unknown";
 }
 
+export interface ZonePolygon {
+  zone_name: string;
+  zone_type: "RESTRICTED" | "WALKWAY";
+  source: "sign" | "saved";
+  points: [number, number][];
+}
+
 export interface TrackingOverlay {
   fps: number;
   stride: number;
   frame_width: number | null;
   frame_height: number | null;
   frames: TrackingOverlayFrame[];
+  zones?: ZonePolygon[];
 }
 
 export interface VideoProcessingResponse {

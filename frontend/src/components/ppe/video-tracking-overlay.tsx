@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { TrackingOverlay, TrackingOverlayFrame } from "@/types/detection";
+import { TrackingOverlay, TrackingOverlayFrame, ZonePolygon } from "@/types/detection";
 
 export function TrackingOverlayLayer({
   overlay,
@@ -13,17 +13,19 @@ export function TrackingOverlayLayer({
   const currentBoxes = useCurrentBoxes(overlay, currentTime);
   const frameWidth = overlay?.frame_width || 16;
   const frameHeight = overlay?.frame_height || 9;
+  const zones = overlay?.zones ?? [];
 
   if (!overlay) return null;
 
   return (
     <>
-      {currentBoxes.length > 0 ? (
+      {(currentBoxes.length > 0 || zones.length > 0) ? (
         <svg
           className="pointer-events-none absolute inset-0 h-full w-full"
           viewBox={`0 0 ${frameWidth} ${frameHeight}`}
           preserveAspectRatio="none"
         >
+          <ZonePolygons zones={zones} frameWidth={frameWidth} frameHeight={frameHeight} />
           <TrackingBoxes
             frames={currentBoxes}
             frameWidth={frameWidth}
@@ -51,6 +53,7 @@ export function VideoTrackingOverlay({
   const currentBoxes = useCurrentBoxes(overlay, currentTime);
   const frameWidth = overlay?.frame_width || 16;
   const frameHeight = overlay?.frame_height || 9;
+  const zones = overlay?.zones ?? [];
 
   useEffect(() => {
     return () => {
@@ -85,12 +88,13 @@ export function VideoTrackingOverlay({
         className="absolute inset-0 h-full w-full"
       />
 
-      {overlay && currentBoxes.length > 0 ? (
+      {overlay && (currentBoxes.length > 0 || zones.length > 0) ? (
         <svg
           className="pointer-events-none absolute inset-0 h-full w-full"
           viewBox={`0 0 ${frameWidth} ${frameHeight}`}
           preserveAspectRatio="none"
         >
+          <ZonePolygons zones={zones} frameWidth={frameWidth} frameHeight={frameHeight} />
           <TrackingBoxes
             frames={currentBoxes}
             frameWidth={frameWidth}
@@ -133,6 +137,54 @@ function useCurrentBoxes(overlay: TrackingOverlay | undefined, currentTime: numb
     return framesByIndex.get(nearestFrame) ?? [];
   }, [currentTime, framesByIndex, overlay, sortedFrameIndexes]);
   return currentBoxes;
+}
+
+function ZonePolygons({
+  zones,
+  frameWidth,
+  frameHeight,
+}: {
+  zones: ZonePolygon[];
+  frameWidth: number;
+  frameHeight: number;
+}) {
+  if (zones.length === 0) return null;
+  return (
+    <>
+      {zones.map((zone) => {
+        const pts = zone.points
+          .map(([nx, ny]) => `${(nx / 1000) * frameWidth},${(ny / 1000) * frameHeight}`)
+          .join(" ");
+        const isRestricted = zone.zone_type === "RESTRICTED";
+        const fill = isRestricted ? "rgba(239,68,68,0.20)" : "rgba(59,130,246,0.20)";
+        const stroke = isRestricted ? "#ef4444" : "#3b82f6";
+        const [lx, ly] = zone.points[0] ?? [0, 0];
+        const labelX = (lx / 1000) * frameWidth;
+        const labelY = (ly / 1000) * frameHeight;
+        return (
+          <g key={`${zone.zone_name}:${zone.zone_type}`}>
+            <polygon
+              points={pts}
+              fill={fill}
+              stroke={stroke}
+              strokeWidth={Math.max(frameWidth, frameHeight) * 0.003}
+              strokeLinejoin="round"
+            />
+            <text
+              x={labelX + frameWidth * 0.006}
+              y={labelY + frameHeight * 0.028}
+              fill={stroke}
+              fontSize={frameHeight * 0.022}
+              fontWeight={700}
+              style={{ textShadow: "0 0 4px rgba(0,0,0,0.8)" }}
+            >
+              {zone.zone_name}
+            </text>
+          </g>
+        );
+      })}
+    </>
+  );
 }
 
 function TrackingBoxes({

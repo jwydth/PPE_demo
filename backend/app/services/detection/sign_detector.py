@@ -37,8 +37,12 @@ def load_sign_model() -> None:
     try:
         from ultralytics import YOLO
         _sign_model = YOLO(str(model_path))
+        msg = f"[sign_detector] Sign model loaded OK — {model_path} (conf={settings.SIGN_CONFIDENCE_THRESHOLD})"
+        print(msg, flush=True)
+        logger.info(msg)
     except Exception:
         logger.warning("Failed to load sign model from %s", model_path, exc_info=True)
+        print(f"[sign_detector] FAILED to load sign model from {model_path}", flush=True)
 
 
 @dataclass
@@ -49,8 +53,15 @@ class SignDetection:
     bbox: dict  # {x1, y1, x2, y2} in pixel coords
 
 
+_sign_model_warned = False
+
+
 def detect_signs(image: Image.Image) -> list[SignDetection]:
+    global _sign_model_warned
     if _sign_model is None:
+        if not _sign_model_warned:
+            logger.warning("detect_signs called but sign model is not loaded — all frames will return 0 signs")
+            _sign_model_warned = True
         return []
 
     results = _sign_model(

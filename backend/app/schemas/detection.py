@@ -79,12 +79,20 @@ class TrackingOverlayFrame(BaseModel):
     zone_type: Literal["RESTRICTED", "WALKWAY"] | None = None
 
 
+class ZonePolygon(BaseModel):
+    zone_name: str
+    zone_type: Literal["RESTRICTED", "WALKWAY"]
+    source: Literal["sign", "saved"] = "saved"
+    points: list[tuple[float, float]]
+
+
 class TrackingOverlay(BaseModel):
     fps: float
     stride: int
     frame_width: int | None
     frame_height: int | None
     frames: list[TrackingOverlayFrame]
+    zones: list[ZonePolygon] = []
 
 
 class VideoProcessingResponse(BaseModel):
