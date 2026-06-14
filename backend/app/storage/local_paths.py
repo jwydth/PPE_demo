@@ -11,8 +11,14 @@ def _resolve_backend_path(value: str) -> Path:
 
 
 SNAPSHOT_DIR = _resolve_backend_path(settings.SNAPSHOT_DIR)
+UPLOAD_DIR = _resolve_backend_path(settings.UPLOAD_DIR)
 
 
 def ensure_snapshot_dir() -> Path:
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
     return SNAPSHOT_DIR
+
+
+def ensure_upload_dir() -> Path:
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    return UPLOAD_DIR

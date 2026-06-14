@@ -15,6 +15,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   analyzeImage,
   analyzeVideo,
+  uploadVideo,
+  toAbsoluteUrl,
+  API_URL,
   deleteZonesForVideo,
   deleteViolation,
   deleteZoneViolation,
@@ -265,6 +268,144 @@ function CameraPanel() {
   const [dwellThresholdSeconds, setDwellThresholdSeconds] = useState(1.5);
   const [status, setStatus] = useState("");
 
+  const [streamData, setStreamData] = useState<{
+    summary: any | null;
+    reports: ViolationReport[];
+    zone_violations: ZoneViolation[];
+    tracking_overlay: TrackingOverlay;
+  }>({
+    summary: null,
+    reports: [],
+    zone_violations: [],
+    tracking_overlay: {
+      fps: 30,
+      stride: 1,
+      frame_width: 1000,
+      frame_height: 1000,
+      frames: [],
+    },
+  });
+  const [isStreaming, setIsStreaming] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
+
+  useEffect(() => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          event: "update_settings",
+          data: {
+            enable_ppe: ppeEnabled,
+            enable_zone: zoneEnabled,
+          },
+        }),
+      );
+    }
+  }, [ppeEnabled, zoneEnabled]);
+
+  useEffect(() => {
+    return () => {
+      if (wsRef.current) wsRef.current.close();
+    };
+  }, []);
+
+  const startStreaming = async (videoFile: File) => {
+    try {
+      setPhase("loading");
+      setStatus("Uploading video...");
+      const { filename } = await uploadVideo(videoFile);
+      setStatus("Video uploaded. Initializing real-time stream...");
+
+      const wsUrlBase = API_URL.replace(/^http/, "ws");
+      const wsUrl = `${wsUrlBase}/ws/stream?video_name=${encodeURIComponent(
+        filename,
+      )}&enable_ppe=${ppeEnabled}&enable_zone=${zoneEnabled}`;
+
+      if (wsRef.current) wsRef.current.close();
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      setStreamData({
+        summary: null,
+        reports: [],
+        zone_violations: [],
+        tracking_overlay: {
+          fps: 30,
+          stride: 1,
+          frame_width: null,
+          frame_height: null,
+          frames: [],
+        },
+      });
+      setIsStreaming(true);
+
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        const { event: eventType, data, frame_index } = msg;
+
+        if (eventType === "start") {
+          setStreamData((prev) => ({
+            ...prev,
+            tracking_overlay: { ...prev.tracking_overlay, fps: data.fps },
+          }));
+          setStatus("Streaming active.");
+          // Play the video once stream starts
+          if (videoRef.current) videoRef.current.play();
+        } else if (eventType === "frame") {
+          setStreamData((prev) => ({
+            ...prev,
+            tracking_overlay: {
+              ...prev.tracking_overlay,
+              frames: [...prev.tracking_overlay.frames, ...data.frames],
+              frame_width: data.frame_width || prev.tracking_overlay.frame_width,
+              frame_height: data.frame_height || prev.tracking_overlay.frame_height,
+            },
+          }));
+        } else if (eventType === "violation") {
+          setStreamData((prev) => ({
+            ...prev,
+            reports: [
+              ...prev.reports,
+              {
+                ...data,
+                snapshot_url: toAbsoluteUrl(data.snapshot_url),
+              },
+            ],
+          }));
+        } else if (eventType === "zone_violation") {
+          setStreamData((prev) => ({
+            ...prev,
+            zone_violations: [
+              ...prev.zone_violations,
+              {
+                ...data,
+                snapshot_path: toAbsoluteUrl(data.snapshot_path),
+              },
+            ],
+          }));
+        } else if (eventType === "summary") {
+          setStreamData((prev) => ({ ...prev, summary: data }));
+          setPhase("done");
+        } else if (eventType === "error") {
+          setError(data.message);
+          setPhase("error");
+        } else if (eventType === "end") {
+          setStatus("Stream completed.");
+        }
+      };
+
+      ws.onclose = () => {
+        setIsStreaming(false);
+      };
+      ws.onerror = () => {
+        setError("WebSocket connection failed.");
+        setPhase("error");
+      };
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Streaming failed");
+      setPhase("error");
+    }
+  };
+
   useEffect(() => {
     setDwellThresholdSeconds(zoneType === "RESTRICTED" ? 1.5 : 3);
   }, [zoneType]);
@@ -310,18 +451,36 @@ function CameraPanel() {
   }, [isPlaying]);
 
   const currentIncidents = useMemo(
-    () => [
-      ...(ppeEnabled ? (videoResult?.reports ?? []) : []),
-      ...(zoneEnabled ? (videoResult?.zone_violations ?? []) : []),
+    () => {
+      const reports = isStreaming || streamData.summary ? streamData.reports : (videoResult?.reports ?? []);
+      const zoneViolations = isStreaming || streamData.summary ? streamData.zone_violations : (videoResult?.zone_violations ?? []);
+      
+      return [
+        ...(ppeEnabled ? reports : []),
+        ...(zoneEnabled ? zoneViolations : []),
+      ];
+    },
+    [
+      isStreaming,
+      ppeEnabled,
+      streamData.reports,
+      streamData.summary,
+      streamData.zone_violations,
+      videoResult?.reports,
+      videoResult?.zone_violations,
+      zoneEnabled,
     ],
-    [ppeEnabled, videoResult, zoneEnabled],
   );
   const visibleTrackingOverlay = useMemo(
-    () => filterTrackingOverlay(videoResult?.tracking_overlay, {
-      showPpe: ppeEnabled,
-      showZone: zoneEnabled,
-    }),
-    [ppeEnabled, videoResult?.tracking_overlay, zoneEnabled],
+    () =>
+      filterTrackingOverlay(
+        isStreaming || streamData.summary ? streamData.tracking_overlay : videoResult?.tracking_overlay,
+        {
+          showPpe: ppeEnabled,
+          showZone: zoneEnabled,
+        },
+      ),
+    [isStreaming, ppeEnabled, streamData.summary, streamData.tracking_overlay, videoResult?.tracking_overlay, zoneEnabled],
   );
   const isVideo = !!file?.type.startsWith("video/");
   const feedAspectRatio = visibleTrackingOverlay
@@ -379,10 +538,22 @@ function CameraPanel() {
     }
   };
 
-  const selectFile = (nextFile: File) => {
+  const selectFile = async (nextFile: File) => {
     setFile(nextFile);
     setImageResult(null);
     setVideoResult(null);
+    setStreamData({
+      summary: null,
+      reports: [],
+      zone_violations: [],
+      tracking_overlay: {
+        fps: 30,
+        stride: 1,
+        frame_width: 1000,
+        frame_height: 1000,
+        frames: [],
+      },
+    });
     setError("");
     setStatus("");
     setZonesForVideo([]);
@@ -391,8 +562,11 @@ function CameraPanel() {
     setPhase("idle");
     setIsDrawing(false);
     setCurrentVideoTime(0);
+    
     if (nextFile.type.startsWith("video/")) {
-      void loadSavedZones(nextFile.name);
+      await loadSavedZones(nextFile.name);
+      // Automatically trigger upload and streaming
+      void startStreaming(nextFile);
     }
   };
 
@@ -661,16 +835,11 @@ function CameraPanel() {
         if (zoneEnabled && zonesReadyToSave.length > 0) {
           await persistZones(zonesReadyToSave);
         }
-        setVideoResult(
-          await analyzeVideo(file, {
-            enablePpe: ppeEnabled,
-            enableZone: zoneEnabled,
-          }),
-        );
+        await startStreaming(file);
       } else {
         setImageResult(await analyzeImage(file));
+        setPhase("done");
       }
-      setPhase("done");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not analyze the uploaded file");
       setPhase("error");
@@ -681,13 +850,28 @@ function CameraPanel() {
     setFile(null);
     setImageResult(null);
     setVideoResult(null);
+    setStreamData({
+      summary: null,
+      reports: [],
+      zone_violations: [],
+      tracking_overlay: {
+        fps: 30,
+        stride: 1,
+        frame_width: 1000,
+        frame_height: 1000,
+        frames: [],
+      },
+    });
     setError("");
     setStatus("");
     setDraftPoints([]);
     setPhase("idle");
     setIsDrawing(false);
     setCurrentVideoTime(0);
+    if (wsRef.current) wsRef.current.close();
   };
+
+  const currentSummary = isStreaming || streamData.summary ? streamData.summary : videoResult?.summary;
 
   return (
     <section className="h-fit overflow-hidden rounded-md border border-slate-300 bg-slate-950 shadow-md">
@@ -1127,7 +1311,7 @@ function CameraPanel() {
           </div>
         ) : null}
 
-        {phase === "done" && videoResult ? (
+        {phase === "done" && (videoResult || streamData.summary) ? (
           <div className="grid h-fit content-start gap-3 rounded-md border border-slate-800 bg-slate-900 p-3">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
               <div>
@@ -1135,7 +1319,7 @@ function CameraPanel() {
                   Analysis Result
                 </p>
                 <h3 className="mt-1 text-base font-semibold text-white">
-                  {videoResult.summary.video_name}
+                  {currentSummary?.video_name}
                 </h3>
               </div>
               <span

@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     # "auto" uses the first CUDA GPU when PyTorch can access one, otherwise CPU.
     # You can also force "cpu", "cuda", "cuda:0", "0", etc.
     INFERENCE_DEVICE: str = "auto"
-    CONFIDENCE_THRESHOLD: float = 0.5
+    CONFIDENCE_THRESHOLD: float = 0.3
     # Minimum fraction of an equipment box that must overlap its person box
     # for the two to be considered associated (0.0 – 1.0)
     PPE_OVERLAP_THRESHOLD: float = 0.3
@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     VIDEO_CASE_MAX_FRAME_GAP: int = 90
     VIDEO_EDGE_MARGIN_RATIO: float = 0.05
     VIDEO_NEW_TRACK_GRACE_SECONDS: float = 0.5
-    VIDEO_VIOLATION_CONFIRM_SECONDS: float = 0.75
+    VIDEO_VIOLATION_CONFIRM_SECONDS: float = 0.2
     VIDEO_RECENT_PPE_MEMORY_SECONDS: float = 1.5
     VIDEO_MIN_PERSON_HEIGHT_RATIO: float = 0.10
     VIDEO_STABILITY_WINDOW_FRAMES: int = 5
@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     VIDEO_POSTURE_HEIGHT_DROP_RATIO: float = 0.70
     VIDEO_POSTURE_HISTORY_MIN_FRAMES: int = 3
     SNAPSHOT_DIR: str = "storage/snapshots"
+    UPLOAD_DIR: str = "storage/uploads"
     ALLOWED_ORIGINS: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
 
     class Config:

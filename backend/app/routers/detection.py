@@ -18,6 +18,7 @@ from app.services.zone_violation_service import (
     ZoneViolationService,
     get_zone_violation_service,
 )
+from app.storage.local_paths import UPLOAD_DIR, ensure_upload_dir
 
 router = APIRouter(tags=["detection"])
 logger = logging.getLogger(__name__)
@@ -92,6 +93,31 @@ async def predict_video(
         raise HTTPException(status_code=400, detail=str(exc))
     finally:
         _cleanup_temp_video(tmp_path)
+
+
+@router.post("/upload-video")
+async def upload_video(file: UploadFile = File(...)) -> dict:
+    if file.content_type not in _ALLOWED_VIDEO_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=(
+                f"Unsupported content type '{file.content_type}'. "
+                "Accepted: mp4, mpeg, mov, avi, mkv, webm."
+            ),
+        )
+
+    ensure_upload_dir()
+    filename = file.filename or "upload.mp4"
+    file_path = UPLOAD_DIR / filename
+
+    try:
+        with open(file_path, "wb") as f:
+            while chunk := await file.read(1024 * 1024):
+                f.write(chunk)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save video: {e}")
+
+    return {"filename": filename, "message": "Video uploaded successfully"}
 
 
 def _cleanup_temp_video(tmp_path: Path | None) -> None:

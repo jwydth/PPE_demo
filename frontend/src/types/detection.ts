@@ -98,3 +98,9 @@ export interface VideoProcessingResponse {
   zone_violations?: ZoneViolation[];
   tracking_overlay?: TrackingOverlay;
 }
+
+export interface StreamEvent {
+  event: "frame" | "violation" | "zone_violation" | "summary" | "error" | "start" | "end";
+  frame_index?: number;
+  data: any;
+}

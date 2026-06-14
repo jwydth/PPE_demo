@@ -128,7 +128,7 @@ function useCurrentBoxes(overlay: TrackingOverlay | undefined, currentTime: numb
     const nearestFrame = findNearestFrame(sortedFrameIndexes, currentFrame);
     if (nearestFrame === null) return [];
 
-    const tolerance = Math.max(overlay.stride || 1, 1) * 2;
+    const tolerance = Math.max(overlay.stride || 1, 1) * 30; // Increased tolerance for slow inference
     if (Math.abs(nearestFrame - currentFrame) > tolerance) return [];
     return framesByIndex.get(nearestFrame) ?? [];
   }, [currentTime, framesByIndex, overlay, sortedFrameIndexes]);

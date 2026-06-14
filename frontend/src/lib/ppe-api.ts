@@ -13,7 +13,7 @@ async function readError(res: Response, fallback: string): Promise<Error> {
   return new Error((body as { detail?: string }).detail ?? fallback);
 }
 
-function toAbsoluteUrl(url?: string): string | undefined {
+export function toAbsoluteUrl(url?: string): string | undefined {
   if (!url) return undefined;
   if (/^https?:\/\//i.test(url)) return url;
   return `${API_URL}${url.startsWith("/") ? url : `/${url}`}`;
@@ -30,6 +30,19 @@ export async function analyzeImage(file: File): Promise<DetectionResponse> {
 
   if (!res.ok) throw await readError(res, "Image inference request failed");
   return res.json() as Promise<DetectionResponse>;
+}
+
+export async function uploadVideo(file: File): Promise<{ filename: string; message: string }> {
+  const form = new FormData();
+  form.append("file", file);
+
+  const res = await fetch(`${API_URL}/upload-video`, {
+    method: "POST",
+    body: form,
+  });
+
+  if (!res.ok) throw await readError(res, "Video upload failed");
+  return res.json() as Promise<{ filename: string; message: string }>;
 }
 
 export async function analyzeVideo(
