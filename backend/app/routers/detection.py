@@ -1,15 +1,26 @@
 import io
+import logging
 import tempfile
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from PIL import Image
 
-from app.models.schemas import DetectionResponse, VideoProcessingResponse, ViolationReport
+from app.schemas.detection import DetectionResponse, VideoProcessingResponse
+from app.schemas.violation import ViolationReport
 from app.services.ppe_detector import PPEDetector
-from app.services.violation_store import list_violations
+from app.services.ppe_violation_service import (
+    PPEViolationService,
+    get_ppe_violation_service,
+)
+from app.services.zone_violation_service import (
+    ZoneViolationService,
+    get_zone_violation_service,
+)
 
 router = APIRouter(tags=["detection"])
+logger = logging.getLogger(__name__)
 
 _detector = PPEDetector()
 
@@ -40,13 +51,19 @@ async def predict(file: UploadFile = File(...)) -> DetectionResponse:
     try:
         image = Image.open(io.BytesIO(data)).convert("RGB")
     except Exception:
-        raise HTTPException(status_code=400, detail="Could not decode the uploaded image.")
+        raise HTTPException(
+            status_code=400, detail="Could not decode the uploaded image."
+        )
 
     return _detector.predict(image)
 
 
 @router.post("/predict-video", response_model=VideoProcessingResponse)
-async def predict_video(file: UploadFile = File(...)) -> VideoProcessingResponse:
+async def predict_video(
+    file: UploadFile = File(...),
+    enable_ppe: bool = Form(True),
+    enable_zone: bool = Form(True),
+) -> VideoProcessingResponse:
     if file.content_type not in _ALLOWED_VIDEO_TYPES:
         raise HTTPException(
             status_code=415,
@@ -65,14 +82,86 @@ async def predict_video(file: UploadFile = File(...)) -> VideoProcessingResponse
             while chunk := await file.read(1024 * 1024):
                 tmp.write(chunk)
 
-        return _detector.process_video(tmp_path, file.filename or tmp_path.name)
+        return _detector.process_video(
+            tmp_path,
+            file.filename or tmp_path.name,
+            enable_ppe=enable_ppe,
+            enable_zone=enable_zone,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     finally:
-        if tmp_path is not None and tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
+        _cleanup_temp_video(tmp_path)
+
+
+def _cleanup_temp_video(tmp_path: Path | None) -> None:
+    if tmp_path is None:
+        return
+    try:
+        tmp_path.unlink(missing_ok=True)
+    except PermissionError:
+        logger.warning(
+            "Could not delete temporary video file because it is still in use: %s",
+            tmp_path,
+        )
 
 
 @router.get("/violations", response_model=list[ViolationReport])
-async def violations(limit: int = Query(default=100, ge=1, le=500)) -> list[ViolationReport]:
-    return list_violations(limit=limit)
+async def violations(
+    service: Annotated[
+        PPEViolationService,
+        Depends(get_ppe_violation_service),
+    ],
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[ViolationReport]:
+    return service.get_recent_violations(limit=limit)
+
+@router.delete("/violations")
+async def delete_all_incidents(
+    service: Annotated[
+        PPEViolationService,
+        Depends(get_ppe_violation_service),
+    ],
+    zone_service: Annotated[
+        ZoneViolationService,
+        Depends(get_zone_violation_service),
+    ],
+) -> dict[str, int]:
+    """Delete all PPE and zone violations from the database."""
+    ppe_count = service.delete_all_violations()
+    zone_count = zone_service.delete_all_zone_violations()
+    return {
+        "ppe_violations_deleted": ppe_count,
+        "zone_violations_deleted": zone_count,
+        "total_deleted": ppe_count + zone_count,
+    }
+
+
+@router.delete("/violations/{violation_id}")
+async def delete_single_violation(
+    violation_id: int,
+    service: Annotated[
+        PPEViolationService,
+        Depends(get_ppe_violation_service),
+    ],
+) -> dict[str, bool]:
+    """Delete a single PPE violation by ID."""
+    success = service.delete_violation(violation_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Violation not found")
+    return {"success": success}
+
+
+@router.delete("/zone-violations/{zone_violation_id}")
+async def delete_single_zone_violation(
+    zone_violation_id: int,
+    service: Annotated[
+        ZoneViolationService,
+        Depends(get_zone_violation_service),
+    ],
+) -> dict[str, bool]:
+    """Delete a single zone violation by ID."""
+    success = service.delete_zone_violation(zone_violation_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Zone violation not found")
+    return {"success": success}
