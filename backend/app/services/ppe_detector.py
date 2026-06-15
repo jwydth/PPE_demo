@@ -71,6 +71,7 @@ class WorkerState:
     status: str = "unknown"
     zone_dwell: dict[int, float] | None = None  # camera_zone_view_id -> seconds
     reported_zones: set[int] | None = None  # camera_zone_view_ids
+    zone_last_in: dict[int, bool] | None = None  # camera_zone_view_id -> was inside zone at last detection
 
     def __post_init__(self) -> None:
         if self.missing_counts is None:
@@ -81,6 +82,8 @@ class WorkerState:
             self.zone_dwell = {}
         if self.reported_zones is None:
             self.reported_zones = set()
+        if self.zone_last_in is None:
+            self.zone_last_in = {}
 
 
 def _area(b: dict) -> float:
@@ -317,6 +320,7 @@ class PPEDetector:
         processed_frames = 0
         frame_width: int | None = None
         frame_height: int | None = None
+        prev_zone_enabled = enable_zone  # track zone toggle to trigger retroactive check
 
         # Rolling window of foot-point history: track_id → [(frame_index, foot_point)]
         # Used to retroactively check newly-accepted zones against recent worker positions.
@@ -330,17 +334,34 @@ class PPEDetector:
             return enable_ppe, enable_zone
 
         def _retroactive_zone_check(new_zones, current_frame_index):
-            """Check foot-point history against newly loaded zones and emit any missed violations."""
+            """Check foot-point history against zones and emit any missed violations.
+
+            Uses max-continuous-dwell so the result matches real-time behaviour:
+            a person who dips in briefly twice doesn't accumulate dwell across
+            the two separate visits.
+            """
             violations = []
+            frame_duration = stride / fps if fps > 0 else 1 / 30
             for zone in new_zones:
                 cv_id = zone.camera_zone_view_id
                 for track_id, history in foot_history.items():
                     worker = next((w for w in workers if track_id in w.track_ids), None)
                     if worker is None or cv_id in worker.reported_zones:
                         continue
-                    dwell = sum(stride / fps for _, fp in history if zone.point_in_zone(fp))
-                    if dwell > zone.threshold:
-                        logger.info(f"[ZONE] Retroactive violation: worker {track_id} was in '{zone.zone_name}' for {dwell:.2f}s")
+                    # Compute the longest unbroken streak of in-zone frames
+                    max_dwell = 0.0
+                    current_dwell = 0.0
+                    for _, fp in history:
+                        if zone.point_in_zone(fp):
+                            current_dwell += frame_duration
+                            max_dwell = max(max_dwell, current_dwell)
+                        else:
+                            current_dwell = 0.0
+                    if max_dwell > zone.threshold:
+                        logger.info(
+                            f"[ZONE] Retroactive violation: worker {track_id} "
+                            f"was in '{zone.zone_name}' for {max_dwell:.2f}s (threshold={zone.threshold}s)"
+                        )
                         violations.append((worker, zone, track_id))
             return violations
 
@@ -370,15 +391,45 @@ class PPEDetector:
             frame_index = (processed_frames - 1) * stride
             curr_ppe, curr_zone = get_flags()
 
+            # Detect zone being toggled ON mid-stream and retroactively check foot history
+            zone_just_enabled = curr_zone and not prev_zone_enabled
+            prev_zone_enabled = curr_zone
+
             if settings_state and settings_state.pop("reload_zones", False):
                 zones = load_zones(video_name)
                 logger.info(f"[ZONE] Hot-reloaded {len(zones)} zone(s): {[(z.zone_name, z.zone_type) for z in zones]}")
+                zone_just_enabled = True  # treat reload same as fresh enable
+
+            if zone_just_enabled and zones and foot_history:
+                logger.info(f"[ZONE] Zone enabled/reloaded at frame {frame_index} — running retroactive check over {len(foot_history)} track(s)")
+                persons_this_frame, _, _ = _extract_result_boxes(result)
+                temp_response = _build_response(persons_this_frame, [], [], 0.0)
+                retroactively_reported_workers: set[int] = set()
                 for worker, zone, track_id in _retroactive_zone_check(zones, frame_index):
                     cv_id = zone.camera_zone_view_id
                     if cv_id not in worker.reported_zones:
-                        zv = record_zone_violation(worker, zone, result.orig_img.copy(), next((p for p in response.persons if p.track_id == track_id), None) or response.persons[0], video_name, frame_index, _save_violation_snapshot)
+                        matched_person = next((p for p in temp_response.persons if p.track_id == track_id), None)
+                        if matched_person is None:
+                            # Person not visible in this frame — build a stand-in from worker's last known state
+                            matched_person = PersonResult(
+                                person_id=track_id or 0,
+                                track_id=track_id,
+                                bbox=worker.last_bbox,
+                                confidence=1.0,
+                                equipment=[],
+                                compliant=True,
+                            )
+                        zv = record_zone_violation(worker, zone, result.orig_img.copy(), matched_person, video_name, frame_index, _save_violation_snapshot)
                         if zv:
+                            retroactively_reported_workers.add(id(worker))
                             yield StreamEvent(event="zone_violation", frame_index=frame_index, data=zv.model_dump())
+                # Reset zone state for workers that just had a retroactive violation saved so
+                # their ongoing live presence is treated as a fresh entry from this point forward.
+                for worker in workers:
+                    if id(worker) in retroactively_reported_workers:
+                        worker.reported_zones = set()
+                        worker.zone_dwell = {}
+                        worker.zone_last_in = {}
             
             if processed_frames % 60 == 1:
                 logger.info(f" [PIPELINE] Frame {frame_index} active state: ppe={curr_ppe}, zone={curr_zone}")
@@ -435,9 +486,12 @@ class PPEDetector:
                     for zone in zones:
                         cv_id = zone.camera_zone_view_id
                         in_z = cv_id in incursion_ids
+                        worker.zone_last_in[cv_id] = in_z  # always record last known position
                         if zone.zone_type == "WALKWAY":
                             if in_z:
+                                # Worker back inside walkway — reset so a future exit can trigger a new incident
                                 worker.zone_dwell[cv_id] = 0
+                                worker.reported_zones.discard(cv_id)
                             else:
                                 worker.zone_dwell[cv_id] = worker.zone_dwell.get(cv_id, 0) + (stride / fps)
                                 dwell = worker.zone_dwell[cv_id]
@@ -460,6 +514,10 @@ class PPEDetector:
                                     logger.info(f"[ZONE] record_zone_violation returned: {zv}")
                                     if zv:
                                         yield StreamEvent(event="zone_violation", frame_index=frame_index, data=zv.model_dump())
+                            else:
+                                # Worker exited the restricted zone — reset so re-entry triggers a new incident
+                                worker.reported_zones.discard(cv_id)
+                                worker.zone_dwell[cv_id] = 0
 
                     for zone in incursion_zones:
                         if zone.zone_type == "RESTRICTED":
@@ -918,7 +976,7 @@ def _update_worker_status(
     used_worker_ids: set[int],
 ) -> dict:
     worker = _find_or_create_worker(workers, person, frame_index, used_worker_ids)
-    _merge_worker_observation(worker, person, frame_index)
+    _merge_worker_observation(worker, person, frame_index, fps)
 
     present = _present_equipment(person)
     if "Helmet" in present:
@@ -965,9 +1023,9 @@ def _update_worker_status(
     missing = _suppress_recently_seen_ppe(worker, raw_missing, frame_index, fps)
     if worker.reported_missing:
         missing = [label for label in missing if label not in worker.reported_missing]
-    
+
     confirm_frames = _seconds_to_frames(settings.VIDEO_VIOLATION_CONFIRM_SECONDS, fps)
-    
+
     if not missing:
         if worker.status != "violation":
             worker.status = "compliant"
@@ -998,6 +1056,7 @@ def _update_worker_status(
             and (worker.reported_missing is None or label not in worker.reported_missing)
         )
     ]
+
     if not confirmed_missing:
         if worker.status != "violation":
             worker.status = "unknown"
@@ -1068,10 +1127,7 @@ def _find_existing_worker(
     ]
 
     reported_candidates = [worker for worker in fresh_workers if worker.reported]
-    reported_worker = _find_spatial_worker_match(
-        reported_candidates,
-        person,
-    )
+    reported_worker = _find_spatial_worker_match(reported_candidates, person)
     if reported_worker is not None:
         return reported_worker
 
@@ -1108,8 +1164,19 @@ def _find_spatial_worker_match(
 
 
 def _merge_worker_observation(
-    worker: WorkerState, person: PersonResult, frame_index: int
+    worker: WorkerState, person: PersonResult, frame_index: int, fps: float
 ) -> None:
+    effective_fps = fps if fps > 0 else 30.0
+    gap_seconds = (frame_index - worker.last_frame) / effective_fps
+    if gap_seconds >= settings.VIDEO_ZONE_REENTRY_GAP_SECONDS:
+        # Only reset zones where the person was last seen OUTSIDE the zone.
+        # If they were inside when the tracker dropped (e.g. occluded by a sign),
+        # keep the zone state so we don't fire a duplicate violation on reappearance.
+        for cv_id in list(worker.reported_zones):
+            if not worker.zone_last_in.get(cv_id, False):
+                worker.reported_zones.discard(cv_id)
+                worker.zone_dwell[cv_id] = 0
+
     if person.track_id is not None:
         worker.track_ids.add(person.track_id)
     worker.last_frame = frame_index
@@ -1127,15 +1194,14 @@ def _is_worker_judgeable(
     frame_width: int,
     frame_height: int,
 ) -> bool:
-    # Nuclear Lenience: making it very easy to pass these checks
-    grace_frames = _seconds_to_frames(0.05, fps) 
+    grace_frames = _seconds_to_frames(settings.VIDEO_NEW_TRACK_GRACE_SECONDS, fps)
     if frame_index - worker.first_frame < grace_frames:
         return False
-        
-    # Margin check: very small margin (1%)
-    margin_x = frame_width * 0.01
-    margin_y = frame_height * 0.01
-    if (worker.last_bbox.x1 <= margin_x or worker.last_bbox.y1 <= margin_y or 
+
+    # Edge margin: use the configured ratio so corner-entry workers aren't judged too early
+    margin_x = frame_width * settings.VIDEO_EDGE_MARGIN_RATIO
+    margin_y = frame_height * settings.VIDEO_EDGE_MARGIN_RATIO
+    if (worker.last_bbox.x1 <= margin_x or worker.last_bbox.y1 <= margin_y or
         worker.last_bbox.x2 >= frame_width - margin_x or worker.last_bbox.y2 >= frame_height - margin_y):
         return False
         
@@ -1156,13 +1222,13 @@ def _unknown_reason(
     frame_width: int,
     frame_height: int,
 ) -> str:
-    grace_frames = _seconds_to_frames(0.05, fps)
+    grace_frames = _seconds_to_frames(settings.VIDEO_NEW_TRACK_GRACE_SECONDS, fps)
     if frame_index - worker.first_frame < grace_frames:
         return f"grace_period_failed({frame_index - worker.first_frame}<{grace_frames})"
-        
-    margin_x = frame_width * 0.01
-    margin_y = frame_height * 0.01
-    if (worker.last_bbox.x1 <= margin_x or worker.last_bbox.y1 <= margin_y or 
+
+    margin_x = frame_width * settings.VIDEO_EDGE_MARGIN_RATIO
+    margin_y = frame_height * settings.VIDEO_EDGE_MARGIN_RATIO
+    if (worker.last_bbox.x1 <= margin_x or worker.last_bbox.y1 <= margin_y or
         worker.last_bbox.x2 >= frame_width - margin_x or worker.last_bbox.y2 >= frame_height - margin_y):
         return "near_edge"
         

@@ -93,6 +93,95 @@ When the user clicks Accept:
 
 ---
 
+## Bug fixes & improvements (post-initial implementation)
+
+### PPE false positives on corner entry
+**Problem:** Workers entering from the edge of the frame were incorrectly flagged for missing a helmet because the model couldn't see the helmet during the first few frames.
+
+**Root cause:** `_is_worker_judgeable` had a hardcoded 0.05 s grace period (1–2 frames) and a 1% edge margin — both far too lenient.
+
+**Fix:** Now uses `VIDEO_NEW_TRACK_GRACE_SECONDS` (default `0.5 s`) and `VIDEO_EDGE_MARGIN_RATIO` (default `5%`) from config, consistent with the rest of the system.
+
+---
+
+### Zone re-entry not triggering a new incident
+**Problem:** After a worker was flagged for entering a restricted zone and then walked back out and in again, no second incident was recorded.
+
+**Root cause:** `reported_zones` and `zone_dwell` were never cleared when the worker exited a zone — they persisted for the lifetime of the `WorkerState`.
+
+**Fix:** Added explicit exit-reset for both zone types:
+- **RESTRICTED:** when person is detected *outside* the zone, `zone_dwell` resets to 0 and the zone is removed from `reported_zones`.
+- **WALKWAY:** when person is detected *back inside* the walkway, same reset fires.
+
+---
+
+### Tracker gap while inside zone causing duplicate violations
+**Problem:** If the tracker dropped a person briefly (e.g. sign occlusion, ~1 s) while they were still physically inside a restricted zone, the gap-based zone reset fired and the person accumulated dwell from zero again — triggering a duplicate violation for the same continuous incursion.
+
+**Root cause:** The gap-based reset in `_merge_worker_observation` was unconditional — it reset all zone state for any gap ≥ `VIDEO_ZONE_REENTRY_GAP_SECONDS`, even if the person was inside the zone when the tracker dropped them.
+
+**Fix:** Added `zone_last_in: dict[int, bool]` to `WorkerState`. Updated every frame the worker is detected in any zone. The gap-based reset now only fires for zones where `zone_last_in[cv_id]` was `False` (person was last seen *outside*). Workers occluded while inside a zone keep their accumulated dwell and `reported_zones` intact.
+
+---
+
+### Retroactive check never fired on zone toggle (only on hot-reload)
+**Problem:** The retroactive foot-history check only ran when a zone was drawn mid-stream (`reload_zones` signal). If zones were already loaded but zone detection was toggled from disabled → enabled, all foot history accumulated during the disabled period was ignored.
+
+**Fix:** Added `prev_zone_enabled` tracking in the pipeline loop. When `curr_zone` transitions `False → True`, the retroactive check now fires against all existing zones and the current `foot_history`.
+
+---
+
+### Retroactive dwell calculation summed all in-zone frames ever
+**Problem:** The old retroactive dwell was `sum(stride/fps for each in-zone frame)`, which accumulated across multiple separate visits. A person who entered briefly twice could exceed the threshold even if neither visit was long enough individually.
+
+**Fix:** Replaced with a **max-continuous-streak** calculation — only the longest unbroken sequence of in-zone frames counts. Matches real-time dwell behaviour exactly.
+
+---
+
+### Retroactive check used stale `response` from previous frame
+**Problem:** `_build_response` was called later in the loop body, so `response.persons` used inside the retroactive block was one frame behind.
+
+**Fix:** The retroactive block now calls `_extract_result_boxes` and `_build_response` itself on the current frame before looking up persons.
+
+---
+
+### Retroactive check silently skipped workers not visible in current frame
+**Problem:** The retroactive violation required `matched_person` to be in the current frame. Workers who were no longer on screen when the zone was enabled were silently skipped with `continue`.
+
+**Fix:** When `matched_person` is `None`, a synthetic `PersonResult` is constructed from the worker's `last_bbox` and `track_id`. The violation is recorded using this stand-in so the snapshot and DB entry are still created.
+
+---
+
+### Ongoing live presence blocked after retroactive violation
+**Problem:** After a retroactive violation was saved, `record_zone_violation` added the zone's `cv_id` to `worker.reported_zones`. When the same worker (same `WorkerState`) continued walking in the zone in real-time, `already_reported=True` from the very first frame — the current live entry was permanently blocked.
+
+**Fix:** After all retroactive violations are saved, zone state (`reported_zones`, `zone_dwell`, `zone_last_in`) is reset for every worker that had a retroactive violation fired. This lets real-time zone detection start fresh from that point and capture the current live incursion as a separate incident.
+
+---
+
+## New config settings added
+
+```python
+VIDEO_ZONE_REENTRY_GAP_SECONDS: float = 1.0   # tracker-drop gap treated as zone exit
+```
+
+---
+
+## New files added
+
+| File | Purpose |
+|---|---|
+| `backend/scripts/test_sign_detection.py` | Stand-alone script to test `sign_model.pt` on a single image — draws bounding boxes, prints class/confidence/coords, saves annotated result |
+
+Usage:
+```bash
+# from backend/ directory
+python scripts/test_sign_detection.py path/to/image.jpg
+python scripts/test_sign_detection.py path/to/image.jpg --conf 0.2 --out result.jpg
+```
+
+---
+
 ## What still needs work / known gaps
 
 - [ ] **Accept during streaming**: if the worker passes through the zone in the window between sign detection and the user clicking Accept, the retroactive check covers ~30 s of history — but if the passage happened earlier it will be missed. Consider lowering `AUTO_ZONE_CONFIRM_FRAMES` so suggestions appear faster.

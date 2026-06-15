@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     SIGN_PASS_FRAME_INTERVAL: int = 15
     AUTO_ZONE_CONFIRM_FRAMES: int = 3
     AUTO_ZONE_DEDUPE_GRID: float = 0.05
+    # Gap in seconds without a detection that is treated as the worker having exited any zone
+    VIDEO_ZONE_REENTRY_GAP_SECONDS: float = 1.0
 
     @model_validator(mode="after")
     def _coerce_sign_dict_keys(self) -> "Settings":
