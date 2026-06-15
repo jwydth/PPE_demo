@@ -8,6 +8,15 @@ from app.schemas.violation import ViolationReport
 from app.services import ppe_detector as ppe
 
 
+def _empty_counts() -> dict[str, int]:
+    return {
+        "Helmet": 0,
+        "Vest": 0,
+        "Cleaning Coverall": 0,
+        "Role Uniform": 0,
+    }
+
+
 def _person(
     *,
     track_id: int,
@@ -25,6 +34,80 @@ def _person(
             for label in missing
         ],
         compliant=False,
+    )
+
+
+def _tracked_person(
+    *,
+    track_id: int,
+    bbox: BoundingBox,
+    equipment: list[EquipmentStatus],
+    role: str | None = None,
+    uniform_type: str | None = None,
+    compliant: bool = False,
+    person_id: int = 1,
+) -> PersonResult:
+    return PersonResult(
+        person_id=person_id,
+        track_id=track_id,
+        bbox=bbox,
+        confidence=0.95,
+        role=role,
+        uniform_type=uniform_type,
+        equipment=equipment,
+        compliant=compliant,
+    )
+
+
+def _helmet_only_unknown(track_id: int = 1) -> PersonResult:
+    return _tracked_person(
+        track_id=track_id,
+        bbox=_clear_bbox(),
+        equipment=[
+            EquipmentStatus(label="Helmet", status="compliant", confidence=0.9),
+            EquipmentStatus(label="Role Uniform", status="violation"),
+        ],
+    )
+
+
+def _person_only_unknown(track_id: int = 1) -> PersonResult:
+    return _tracked_person(
+        track_id=track_id,
+        bbox=_clear_bbox(),
+        equipment=[
+            EquipmentStatus(label="Helmet", status="violation"),
+            EquipmentStatus(label="Role Uniform", status="violation"),
+        ],
+    )
+
+
+def _compliant_worker(track_id: int = 1) -> PersonResult:
+    return _tracked_person(
+        track_id=track_id,
+        bbox=_clear_bbox(),
+        role="worker",
+        uniform_type="vest",
+        compliant=True,
+        equipment=[
+            EquipmentStatus(label="Helmet", status="compliant", confidence=0.9),
+            EquipmentStatus(label="Vest", status="compliant", confidence=0.9),
+        ],
+    )
+
+
+def _compliant_janitor(track_id: int = 1) -> PersonResult:
+    return _tracked_person(
+        track_id=track_id,
+        bbox=_clear_bbox(),
+        role="janitor",
+        uniform_type="cleaning_coverall",
+        compliant=True,
+        equipment=[
+            EquipmentStatus(label="Helmet", status="compliant", confidence=0.9),
+            EquipmentStatus(
+                label="Cleaning Coverall", status="compliant", confidence=0.9
+            ),
+        ],
     )
 
 
@@ -64,7 +147,9 @@ def _update(
     )
 
 
-def _record(monkeypatch, cases: list[ppe.ViolationCase], decision: dict, person: PersonResult) -> None:
+def _record(
+    monkeypatch, cases: list[ppe.ViolationCase], decision: dict, person: PersonResult
+) -> None:
     monkeypatch.setattr(ppe, "_save_violation_snapshot", lambda **_: "snapshot.jpg")
     monkeypatch.setattr(
         ppe,
@@ -100,7 +185,7 @@ def test_unclear_posture_worker_does_not_report_or_accumulate_counts(monkeypatch
 
     assert decision["reason"] == "unclear_posture"
     assert decision["missing_to_report"] == []
-    assert workers[0].missing_counts == {"Helmet": 0, "Vest": 0}
+    assert workers[0].missing_counts == _empty_counts()
     assert workers[0].reported is False
 
 
@@ -108,11 +193,71 @@ def test_clear_worker_can_report_after_confirmation(monkeypatch):
     _configure_video_thresholds(monkeypatch)
     workers: list[ppe.WorkerState] = []
 
-    assert _update(workers, _person(track_id=1, bbox=_clear_bbox()), 0)["missing_to_report"] == []
-    assert _update(workers, _person(track_id=1, bbox=_clear_bbox()), 1)["missing_to_report"] == []
+    assert (
+        _update(workers, _person(track_id=1, bbox=_clear_bbox()), 0)[
+            "missing_to_report"
+        ]
+        == []
+    )
+    assert (
+        _update(workers, _person(track_id=1, bbox=_clear_bbox()), 1)[
+            "missing_to_report"
+        ]
+        == []
+    )
     decision = _update(workers, _person(track_id=1, bbox=_clear_bbox()), 2)
 
     assert decision["missing_to_report"] == ["Vest"]
+
+
+def test_unknown_helmet_only_reports_missing_role_uniform_after_confirmation(
+    monkeypatch,
+):
+    _configure_video_thresholds(monkeypatch)
+    workers: list[ppe.WorkerState] = []
+
+    assert _update(workers, _helmet_only_unknown(), 0)["missing_to_report"] == []
+    assert _update(workers, _helmet_only_unknown(), 1)["missing_to_report"] == []
+    decision = _update(workers, _helmet_only_unknown(), 2)
+
+    assert decision["missing_to_report"] == ["Role Uniform"]
+
+
+def test_unknown_person_only_reports_missing_helmet_and_role_uniform(monkeypatch):
+    _configure_video_thresholds(monkeypatch)
+    workers: list[ppe.WorkerState] = []
+
+    _update(workers, _person_only_unknown(), 0)
+    _update(workers, _person_only_unknown(), 1)
+    decision = _update(workers, _person_only_unknown(), 2)
+
+    assert decision["missing_to_report"] == ["Helmet", "Role Uniform"]
+
+
+def test_established_worker_reports_missing_vest_when_uniform_disappears(monkeypatch):
+    _configure_video_thresholds(monkeypatch)
+    workers: list[ppe.WorkerState] = []
+
+    _update(workers, _compliant_worker(), 0)
+    _update(workers, _helmet_only_unknown(), 1)
+    _update(workers, _helmet_only_unknown(), 2)
+    decision = _update(workers, _helmet_only_unknown(), 3)
+
+    assert workers[0].role == "worker"
+    assert decision["missing_to_report"] == ["Vest"]
+
+
+def test_established_janitor_reports_missing_cleaning_coverall(monkeypatch):
+    _configure_video_thresholds(monkeypatch)
+    workers: list[ppe.WorkerState] = []
+
+    _update(workers, _compliant_janitor(), 0)
+    _update(workers, _helmet_only_unknown(), 1)
+    _update(workers, _helmet_only_unknown(), 2)
+    decision = _update(workers, _helmet_only_unknown(), 3)
+
+    assert workers[0].role == "janitor"
+    assert decision["missing_to_report"] == ["Cleaning Coverall"]
 
 
 def test_reported_worker_with_same_track_does_not_report_again(monkeypatch):
@@ -129,15 +274,19 @@ def test_reported_worker_with_same_track_does_not_report_again(monkeypatch):
         )
     ]
 
-    decision = _update(workers, _person(track_id=1, bbox=_clear_bbox(), missing=("Helmet", "Vest")), 5)
+    decision = _update(
+        workers, _person(track_id=1, bbox=_clear_bbox(), missing=("Helmet", "Vest")), 5
+    )
 
     assert decision["reason"] == "already_reported"
     assert decision["missing_to_report"] == []
     assert workers[0].status == "violation"
-    assert workers[0].missing_counts == {"Helmet": 0, "Vest": 0}
+    assert workers[0].missing_counts == _empty_counts()
 
 
-def test_reported_worker_with_new_track_reconnects_and_does_not_report_again(monkeypatch):
+def test_reported_worker_with_new_track_reconnects_and_does_not_report_again(
+    monkeypatch,
+):
     _configure_video_thresholds(monkeypatch)
     workers = [
         ppe.WorkerState(
@@ -151,7 +300,11 @@ def test_reported_worker_with_new_track_reconnects_and_does_not_report_again(mon
         )
     ]
 
-    decision = _update(workers, _person(track_id=99, bbox=_clear_bbox(2), missing=("Helmet", "Vest")), 5)
+    decision = _update(
+        workers,
+        _person(track_id=99, bbox=_clear_bbox(2), missing=("Helmet", "Vest")),
+        5,
+    )
 
     assert len(workers) == 1
     assert workers[0].track_ids == {1, 99}
@@ -176,7 +329,7 @@ def test_new_worker_in_same_frame_can_still_report(monkeypatch):
         last_frame=9,
         last_bbox=_clear_bbox(500),
         recent_bboxes=[_clear_bbox(500), _clear_bbox(500)],
-        missing_counts={"Helmet": 0, "Vest": 1},
+        missing_counts={**_empty_counts(), "Vest": 1},
     )
     workers = [reported_worker, unreported_worker]
     used_worker_ids: set[int] = set()
@@ -210,3 +363,115 @@ def test_recorded_confirmed_violation_marks_worker_reported(monkeypatch):
 
     assert workers[0].reported is True
     assert len(cases) == 1
+
+
+def test_reported_worker_preserves_missing_in_decision(monkeypatch):
+    """
+    After a worker is marked as reported, subsequent _update_worker_status() calls
+    should return the worker's reported_missing in missing_to_report for overlay display.
+
+    This prevents the "PPE status pending" overlay mismatch after violation confirmation.
+    """
+    _configure_video_thresholds(monkeypatch)
+    workers: list[ppe.WorkerState] = []
+
+    # Frame 0-2: Accumulate missing helmet counts to reach confirmation threshold
+    _update(workers, _person(track_id=1, bbox=_clear_bbox(), missing=("Helmet",)), 0)
+    _update(workers, _person(track_id=1, bbox=_clear_bbox(), missing=("Helmet",)), 1)
+    decision_confirmed = _update(
+        workers, _person(track_id=1, bbox=_clear_bbox(), missing=("Helmet",)), 2
+    )
+
+    # Verify violation is confirmed at frame 2
+    assert decision_confirmed["missing_to_report"] == ["Helmet"]
+    assert workers[0].status == "violation"
+    assert workers[0].reported_missing == {"Helmet"}
+
+    # Simulate _record_violation_case() marking worker as reported
+    workers[0].reported = True
+
+    # Frame 3: Same worker, should preserve reported_missing in decision
+    decision_after_report = _update(
+        workers, _person(track_id=1, bbox=_clear_bbox(), missing=("Helmet",)), 3
+    )
+
+    # With the fix, missing_to_report should contain the reported_missing
+    assert decision_after_report["missing_to_report"] == ["Helmet"]
+    assert decision_after_report["reason"] == "already_reported"
+    assert decision_after_report["worker"].status == "violation"
+
+
+def test_no_duplicate_violation_recorded_for_reported_worker(monkeypatch):
+    """
+    Verify that after a violation is recorded and worker.reported=True,
+    subsequent frames do NOT create duplicate violation records even though
+    missing_to_report is now populated for overlay display.
+
+    This relies on _record_violation_case() checking worker.reported at entry.
+    """
+    _configure_video_thresholds(monkeypatch)
+    workers: list[ppe.WorkerState] = []
+    cases: list[ppe.ViolationCase] = []
+
+    # Frames 0-2: Confirm violation
+    _update(workers, _person(track_id=1, bbox=_clear_bbox(), missing=("Helmet",)), 0)
+    _update(workers, _person(track_id=1, bbox=_clear_bbox(), missing=("Helmet",)), 1)
+    decision = _update(
+        workers, _person(track_id=1, bbox=_clear_bbox(), missing=("Helmet",)), 2
+    )
+
+    # Record the violation (this sets worker.reported = True)
+    _record(monkeypatch, cases, decision, _person(track_id=1, bbox=_clear_bbox()))
+    assert len(cases) == 1
+    assert workers[0].reported is True
+
+    # Frame 3: Same worker detected again
+    # With fix, missing_to_report is non-empty, but _record_violation_case should not create duplicate
+    decision_frame3 = _update(
+        workers, _person(track_id=1, bbox=_clear_bbox(), missing=("Helmet",)), 3
+    )
+
+    # The decision now has missing_to_report populated
+    assert decision_frame3["missing_to_report"] == ["Helmet"]
+
+    # But calling _record again should not create duplicate (checks worker.reported first)
+    _record(
+        monkeypatch, cases, decision_frame3, _person(track_id=1, bbox=_clear_bbox())
+    )
+    assert len(cases) == 1  # Still only 1 case, no duplicate
+
+
+def test_reported_worker_with_different_missing_still_single_record(monkeypatch):
+    """
+    If for some reason a reported worker is seen with different missing equipment,
+    the violation record should not be duplicated. The worker.reported flag prevents
+    duplicate recording regardless of what equipment is currently missing.
+    """
+    _configure_video_thresholds(monkeypatch)
+    workers: list[ppe.WorkerState] = []
+    cases: list[ppe.ViolationCase] = []
+
+    # Frames 0-2: Confirm missing helmet violation
+    _update(workers, _person(track_id=1, bbox=_clear_bbox(), missing=("Helmet",)), 0)
+    _update(workers, _person(track_id=1, bbox=_clear_bbox(), missing=("Helmet",)), 1)
+    decision = _update(
+        workers, _person(track_id=1, bbox=_clear_bbox(), missing=("Helmet",)), 2
+    )
+
+    _record(monkeypatch, cases, decision, _person(track_id=1, bbox=_clear_bbox()))
+    assert len(cases) == 1
+    assert workers[0].reported_missing == {"Helmet"}
+
+    # Frame 3: Worker now missing Vest too (or only Vest now visible)
+    # But still reported, so no new record
+    decision_frame3 = _update(
+        workers, _person(track_id=1, bbox=_clear_bbox(), missing=("Vest",)), 3
+    )
+
+    assert decision_frame3["missing_to_report"] == [
+        "Helmet"
+    ]  # Still shows original reported missing
+    _record(
+        monkeypatch, cases, decision_frame3, _person(track_id=1, bbox=_clear_bbox())
+    )
+    assert len(cases) == 1  # Still no duplicate

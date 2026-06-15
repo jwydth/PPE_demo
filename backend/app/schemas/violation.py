@@ -1,6 +1,6 @@
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ViolationReport(BaseModel):
@@ -8,6 +8,7 @@ class ViolationReport(BaseModel):
     timestamp: str
     violation_type: str
     details: str
+    missing_equipment: list[str] = Field(default_factory=list)
     snapshot_url: Optional[str] = None
     video_name: Optional[str] = None
     frame_index: Optional[int] = None

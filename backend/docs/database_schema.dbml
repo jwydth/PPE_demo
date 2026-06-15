@@ -109,7 +109,7 @@ Table ppe_violation_subjects {
   ppe_violation_id bigint [not null]
   tracker_id bigint [note: "Nullable tracker ID."]
   person_index integer [note: "Nullable and nonnegative when present."]
-  missing_equipment jsonb [not null, note: "JSON array such as [\"Helmet\", \"Vest\"]."]
+  missing_equipment jsonb [not null, note: "JSON array such as [\"Helmet\", \"Vest\"], [\"Cleaning Coverall\"], or [\"Role Uniform\"]."]
   bounding_box jsonb [note: "Nullable object with x1, y1, x2, and y2."]
   confidence float [note: "Nullable value from 0 to 1."]
   created_at timestamptz [not null, default: `now()`]

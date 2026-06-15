@@ -94,6 +94,7 @@ class PPEViolationService:
         report = _to_report(
             violation,
             track_id=track_id,
+            missing_equipment=missing_equipment,
             snapshot_url=stored_object.object_url,
         )
         _cleanup_local_snapshot(Path(local_snapshot_path))
@@ -138,9 +139,11 @@ class PPEViolationService:
             )
         subjects = self.repository.get_subjects(normalized_id)
         track_id = subjects[0].tracker_id if subjects else None
+        missing_equipment = list(subjects[0].missing_equipment) if subjects else []
         return _to_report(
             violation,
             track_id=track_id,
+            missing_equipment=missing_equipment,
             snapshot_url=self._snapshot_url(violation.snapshot_path),
         )
 
@@ -155,10 +158,12 @@ class PPEViolationService:
                 )
             subjects = self.repository.get_subjects(violation.id)
             track_id = subjects[0].tracker_id if subjects else None
+            missing_equipment = list(subjects[0].missing_equipment) if subjects else []
             reports.append(
                 _to_report(
                     violation,
                     track_id=track_id,
+                    missing_equipment=missing_equipment,
                     snapshot_url=self._snapshot_url(
                         violation.snapshot_path
                     ),
@@ -243,6 +248,7 @@ def _to_report(
     violation: PPEViolation,
     *,
     track_id: int | None = None,
+    missing_equipment: list[str] | None = None,
     snapshot_url: str | None = None,
 ) -> ViolationReport:
     if violation.id is None:
@@ -252,6 +258,7 @@ def _to_report(
         timestamp=_timestamp_iso(violation.occurred_at),
         violation_type=violation.violation_type,
         details=violation.details,
+        missing_equipment=missing_equipment or [],
         snapshot_url=(
             snapshot_url
             if snapshot_url is not None

@@ -41,6 +41,16 @@ logger = logging.getLogger(__name__)
 COMPLIANT_COLOR = "#22c55e"
 VIOLATION_COLOR = "#ef4444"
 PERSON_COLOR = "#f97316"
+HELMET_LABEL = "Helmet"
+VEST_LABEL = "Vest"
+CLEANING_COVERALL_LABEL = "Cleaning Coverall"
+ROLE_UNIFORM_LABEL = "Role Uniform"
+MISSING_LABEL_ORDER = (
+    HELMET_LABEL,
+    VEST_LABEL,
+    CLEANING_COVERALL_LABEL,
+    ROLE_UNIFORM_LABEL,
+)
 
 
 @dataclass
@@ -60,8 +70,11 @@ class WorkerState:
     last_frame: int
     last_bbox: BoundingBox
     recent_bboxes: list[BoundingBox]
+    role: str | None = None
+    uniform_type: str | None = None
     helmet_seen_frame: int | None = None
     vest_seen_frame: int | None = None
+    cleaning_coverall_seen_frame: int | None = None
     missing_counts: dict[str, int] | None = None
     reported_missing: set[str] | None = None
     reported: bool = False
@@ -71,7 +84,7 @@ class WorkerState:
 
     def __post_init__(self) -> None:
         if self.missing_counts is None:
-            self.missing_counts = {"Helmet": 0, "Vest": 0}
+            self.missing_counts = _empty_missing_counts()
         if self.reported_missing is None:
             self.reported_missing = set()
         if self.zone_dwell is None:
@@ -196,15 +209,28 @@ class PPEDetector:
         persons: list[dict] = []
         helmets: list[dict] = []
         vests: list[dict] = []
+        cleaning_coveralls: list[dict] = []
 
         for result in results:
-            frame_persons, frame_helmets, frame_vests = _extract_result_boxes(result)
+            (
+                frame_persons,
+                frame_helmets,
+                frame_vests,
+                frame_cleaning_coveralls,
+            ) = _extract_result_boxes(result)
             persons.extend(frame_persons)
             helmets.extend(frame_helmets)
             vests.extend(frame_vests)
+            cleaning_coveralls.extend(frame_cleaning_coveralls)
 
         elapsed_ms = (time.perf_counter() - start) * 1000
-        return _build_response(persons, helmets, vests, elapsed_ms)
+        return _build_response(
+            persons,
+            helmets,
+            vests,
+            cleaning_coveralls,
+            elapsed_ms,
+        )
 
     def _real_process_video(
         self,
@@ -236,7 +262,7 @@ class PPEDetector:
             persist=True,
             conf=settings.CONFIDENCE_THRESHOLD,
             tracker=settings.VIDEO_TRACKER,
-            classes=[0, 1, 2],
+            classes=[0, 1, 2, 3],
             vid_stride=stride,
             device=self.device,
             verbose=False,
@@ -244,8 +270,14 @@ class PPEDetector:
 
         for processed_frames, result in enumerate(results, start=1):
             frame_index = (processed_frames - 1) * stride
-            persons, helmets, vests = _extract_result_boxes(result)
-            response = _build_response(persons, helmets, vests, 0.0)
+            persons, helmets, vests, cleaning_coveralls = _extract_result_boxes(result)
+            response = _build_response(
+                persons,
+                helmets,
+                vests,
+                cleaning_coveralls,
+                0.0,
+            )
             frame = result.orig_img.copy()
             frame_height, frame_width = frame.shape[:2]
             used_worker_ids: set[int] = set()
@@ -282,9 +314,7 @@ class PPEDetector:
 
                     for zone in zones:
                         camera_zone_view_id = zone.camera_zone_view_id
-                        in_zone = (
-                            camera_zone_view_id in incursion_camera_zone_view_ids
-                        )
+                        in_zone = camera_zone_view_id in incursion_camera_zone_view_ids
 
                         if zone.zone_type == "WALKWAY":
                             if in_zone:
@@ -299,8 +329,7 @@ class PPEDetector:
                                 if (
                                     worker.zone_dwell[camera_zone_view_id]
                                     > zone.threshold
-                                    and camera_zone_view_id
-                                    not in worker.reported_zones
+                                    and camera_zone_view_id not in worker.reported_zones
                                 ):
                                     zv = record_zone_violation(
                                         worker_state=worker,
@@ -323,8 +352,7 @@ class PPEDetector:
                                 if (
                                     worker.zone_dwell[camera_zone_view_id]
                                     > zone.threshold
-                                    and camera_zone_view_id
-                                    not in worker.reported_zones
+                                    and camera_zone_view_id not in worker.reported_zones
                                 ):
                                     zv = record_zone_violation(
                                         worker_state=worker,
@@ -428,9 +456,16 @@ class PPEDetector:
         ]
         helmets = [{**px((0.10, 0.03, 0.35, 0.20)), "conf": 0.94}]
         vests = [{**px((0.08, 0.22, 0.38, 0.68)), "conf": 0.89}]
+        cleaning_coveralls: list[dict] = []
 
         elapsed_ms = (time.perf_counter() - start) * 1000
-        return _build_response(persons, helmets, vests, elapsed_ms)
+        return _build_response(
+            persons,
+            helmets,
+            vests,
+            cleaning_coveralls,
+            elapsed_ms,
+        )
 
     def _mock_process_video(
         self,
@@ -596,22 +631,10 @@ def _append_tracking_overlay_frame(
         return
     seen_person_ids.add(person_key)
 
-    missing_equipment = (
-        [
-            equipment.label
-            for equipment in person.equipment
-            if equipment.status == "violation"
-        ]
-        if include_ppe
-        else []
-    )
+    missing_equipment = decision.get("missing_to_report", []) if include_ppe else []
     has_zone_violation = zone_type in {"RESTRICTED", "WALKWAY"}
-    worker = decision.get("worker")
-    worker_status = getattr(worker, "status", "unknown")
     if missing_equipment or has_zone_violation:
         status = "violation"
-    elif decision.get("unknown") or worker_status == "unknown":
-        status = "unknown"
     elif person.compliant or not include_ppe:
         status = "compliant"
     else:
@@ -625,6 +648,8 @@ def _append_tracking_overlay_frame(
             person_id=person.person_id,
             bbox=person.bbox,
             confidence=person.confidence,
+            role=person.role,
+            uniform_type=person.uniform_type,
             compliant=person.compliant and not has_zone_violation,
             missing_equipment=missing_equipment,
             status=status,
@@ -649,12 +674,16 @@ def _update_worker_status(
 ) -> dict:
     worker = _find_or_create_worker(workers, person, frame_index, used_worker_ids)
     _merge_worker_observation(worker, person, frame_index)
+    _update_worker_role(worker, person)
+    _apply_worker_role_to_person(worker, person)
 
     present = _present_equipment(person)
-    if "Helmet" in present:
+    if HELMET_LABEL in present:
         worker.helmet_seen_frame = frame_index
-    if "Vest" in present:
+    if VEST_LABEL in present:
         worker.vest_seen_frame = frame_index
+    if CLEANING_COVERALL_LABEL in present:
+        worker.cleaning_coverall_seen_frame = frame_index
 
     if worker.reported:
         worker.status = "violation"
@@ -665,10 +694,13 @@ def _update_worker_status(
             "reason": "already_reported",
             "missing": [],
             "worker": worker,
-            "missing_to_report": [],
+            "missing_to_report": _ordered_missing(worker.reported_missing)
+            if worker.reported_missing
+            else [],
         }
 
     raw_missing = _missing_equipment(person)
+    relevant_labels = _relevant_missing_labels(person)
     judgeable = _is_worker_judgeable(
         worker, frame_index, fps, frame_width, frame_height
     )
@@ -708,16 +740,18 @@ def _update_worker_status(
         }
 
     confirm_frames = _seconds_to_frames(settings.VIDEO_VIOLATION_CONFIRM_SECONDS, fps)
-    for label in ("Helmet", "Vest"):
-        if worker.missing_counts is None:
-            worker.missing_counts = {"Helmet": 0, "Vest": 0}
+    if worker.missing_counts is None:
+        worker.missing_counts = _empty_missing_counts()
+    for label in MISSING_LABEL_ORDER:
+        if label not in worker.missing_counts:
+            worker.missing_counts[label] = 0
         worker.missing_counts[label] = (
             worker.missing_counts.get(label, 0) + 1 if label in missing else 0
         )
 
     confirmed_missing = [
         label
-        for label in ("Helmet", "Vest")
+        for label in relevant_labels
         if (
             worker.missing_counts
             and worker.missing_counts.get(label, 0) >= confirm_frames
@@ -955,9 +989,7 @@ def _suppress_recently_seen_ppe(
     memory_frames = _seconds_to_frames(settings.VIDEO_RECENT_PPE_MEMORY_SECONDS, fps)
     filtered: list[str] = []
     for label in missing:
-        seen_frame = (
-            worker.helmet_seen_frame if label == "Helmet" else worker.vest_seen_frame
-        )
+        seen_frame = _last_seen_frame(worker, label)
         if seen_frame is not None and frame_index - seen_frame <= memory_frames:
             continue
         filtered.append(label)
@@ -968,8 +1000,61 @@ def _present_equipment(person: PersonResult) -> set[str]:
     return {eq.label for eq in person.equipment if eq.status == "compliant"}
 
 
+def _update_worker_role(worker: WorkerState, person: PersonResult) -> None:
+    if person.role is None:
+        return
+    worker.role = person.role
+    worker.uniform_type = person.uniform_type
+
+
+def _apply_worker_role_to_person(worker: WorkerState, person: PersonResult) -> None:
+    if person.role is not None or worker.role is None:
+        return
+
+    helmet_status = _equipment_status_for_label(person, HELMET_LABEL)
+    if worker.role == "janitor":
+        uniform_status = _equipment_status_for_label(
+            person,
+            CLEANING_COVERALL_LABEL,
+        )
+        person.role = "janitor"
+        person.uniform_type = "cleaning_coverall"
+    else:
+        uniform_status = _equipment_status_for_label(person, VEST_LABEL)
+        person.role = "worker"
+        person.uniform_type = "vest"
+
+    person.equipment = [helmet_status, uniform_status]
+    person.compliant = all(eq.status == "compliant" for eq in person.equipment)
+
+
+def _equipment_status_for_label(person: PersonResult, label: str) -> EquipmentStatus:
+    for equipment in person.equipment:
+        if equipment.label == label and equipment.status == "compliant":
+            return equipment
+    return EquipmentStatus(label=label, status="violation")
+
+
+def _relevant_missing_labels(person: PersonResult) -> tuple[str, ...]:
+    return tuple(equipment.label for equipment in person.equipment)
+
+
+def _last_seen_frame(worker: WorkerState, label: str) -> int | None:
+    if label == HELMET_LABEL:
+        return worker.helmet_seen_frame
+    if label == VEST_LABEL:
+        return worker.vest_seen_frame
+    if label == CLEANING_COVERALL_LABEL:
+        return worker.cleaning_coverall_seen_frame
+    return None
+
+
+def _empty_missing_counts() -> dict[str, int]:
+    return {label: 0 for label in MISSING_LABEL_ORDER}
+
+
 def _reset_missing_counts(worker: WorkerState) -> None:
-    worker.missing_counts = {"Helmet": 0, "Vest": 0}
+    worker.missing_counts = _empty_missing_counts()
 
 
 def _seconds_to_frames(seconds: float, fps: float) -> int:
@@ -1180,16 +1265,19 @@ def _bbox_diagonal(box: BoundingBox) -> float:
 
 
 def _ordered_missing(missing: set[str]) -> list[str]:
-    return [label for label in ("Helmet", "Vest") if label in missing]
+    return [label for label in MISSING_LABEL_ORDER if label in missing]
 
 
-def _extract_result_boxes(result) -> tuple[list[dict], list[dict], list[dict]]:
+def _extract_result_boxes(
+    result,
+) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
     persons: list[dict] = []
     helmets: list[dict] = []
     vests: list[dict] = []
+    cleaning_coveralls: list[dict] = []
 
     if result.boxes is None:
-        return persons, helmets, vests
+        return persons, helmets, vests, cleaning_coveralls
 
     for box in result.boxes:
         cls_id = int(box.cls[0])
@@ -1206,8 +1294,10 @@ def _extract_result_boxes(result) -> tuple[list[dict], list[dict], list[dict]]:
             helmets.append(entry)
         elif cls_id == 2:
             vests.append(entry)
+        elif cls_id == 3:
+            cleaning_coveralls.append(entry)
 
-    return persons, helmets, vests
+    return persons, helmets, vests, cleaning_coveralls
 
 
 def _box_track_id(box) -> int | None:
@@ -1224,6 +1314,7 @@ def _build_response(
     persons: list[dict],
     helmets: list[dict],
     vests: list[dict],
+    cleaning_coveralls: list[dict],
     elapsed_ms: float,
 ) -> DetectionResponse:
     threshold = settings.PPE_OVERLAP_THRESHOLD
@@ -1243,9 +1334,14 @@ def _build_response(
 
     helmet_assignments = best_match(helmets)
     vest_assignments = best_match(vests)
+    cleaning_coverall_assignments = best_match(cleaning_coveralls)
 
     person_helmets = _best_equipment_by_person(helmets, helmet_assignments)
     person_vests = _best_equipment_by_person(vests, vest_assignments)
+    person_cleaning_coveralls = _best_equipment_by_person(
+        cleaning_coveralls,
+        cleaning_coverall_assignments,
+    )
 
     person_results: list[PersonResult] = []
     flat_detections: list[Detection] = []
@@ -1266,29 +1362,30 @@ def _build_response(
         )
         det_id += 1
 
-        equipment_statuses: list[EquipmentStatus] = []
-        det_id = _append_equipment_status(
-            equipment_statuses,
-            flat_detections,
-            det_id,
-            "Helmet",
-            person_helmets.get(i),
+        role, uniform_type = _infer_role(
+            vest=person_vests.get(i),
+            cleaning_coverall=person_cleaning_coveralls.get(i),
         )
-        det_id = _append_equipment_status(
-            equipment_statuses,
+        equipment_statuses, det_id = _build_equipment_statuses_for_role(
             flat_detections,
             det_id,
-            "Vest",
-            person_vests.get(i),
+            role=role,
+            helmet=person_helmets.get(i),
+            vest=person_vests.get(i),
+            cleaning_coverall=person_cleaning_coveralls.get(i),
         )
 
-        is_compliant = all(eq.status == "compliant" for eq in equipment_statuses)
+        is_compliant = role is not None and all(
+            eq.status == "compliant" for eq in equipment_statuses
+        )
         person_results.append(
             PersonResult(
                 person_id=i + 1,
                 track_id=p.get("track_id"),
                 bbox=p_bbox,
                 confidence=round(p["conf"], 4),
+                role=role,
+                uniform_type=uniform_type,
                 equipment=equipment_statuses,
                 compliant=is_compliant,
             )
@@ -1319,6 +1416,56 @@ def _best_equipment_by_person(
         if person_idx not in best or best[person_idx]["conf"] < eq["conf"]:
             best[person_idx] = eq
     return best
+
+
+def _infer_role(
+    *,
+    vest: dict | None,
+    cleaning_coverall: dict | None,
+) -> tuple[str | None, str | None]:
+    if cleaning_coverall is not None:
+        return "janitor", "cleaning_coverall"
+    if vest is not None:
+        return "worker", "vest"
+    return None, None
+
+
+def _build_equipment_statuses_for_role(
+    detections: list[Detection],
+    det_id: int,
+    *,
+    role: str | None,
+    helmet: dict | None,
+    vest: dict | None,
+    cleaning_coverall: dict | None,
+) -> tuple[list[EquipmentStatus], int]:
+    statuses: list[EquipmentStatus] = []
+    det_id = _append_equipment_status(
+        statuses,
+        detections,
+        det_id,
+        HELMET_LABEL,
+        helmet,
+    )
+    if role == "janitor":
+        det_id = _append_equipment_status(
+            statuses,
+            detections,
+            det_id,
+            CLEANING_COVERALL_LABEL,
+            cleaning_coverall,
+        )
+    elif role == "worker":
+        det_id = _append_equipment_status(
+            statuses,
+            detections,
+            det_id,
+            VEST_LABEL,
+            vest,
+        )
+    else:
+        statuses.append(EquipmentStatus(label=ROLE_UNIFORM_LABEL, status="violation"))
+    return statuses, det_id
 
 
 def _append_equipment_status(
@@ -1393,13 +1540,21 @@ def _missing_equipment(person: PersonResult) -> list[str]:
 
 
 def _violation_type(missing: list[str]) -> str:
-    normalized = [item.lower() for item in missing]
-    if "helmet" in normalized and "vest" in normalized:
+    missing_set = set(missing)
+    if {HELMET_LABEL, VEST_LABEL}.issubset(missing_set):
         return "missing_helmet_and_vest"
-    if "helmet" in normalized:
+    if {HELMET_LABEL, CLEANING_COVERALL_LABEL}.issubset(missing_set):
+        return "missing_helmet_and_cleaning_coverall"
+    if {HELMET_LABEL, ROLE_UNIFORM_LABEL}.issubset(missing_set):
+        return "missing_helmet_and_role_uniform"
+    if HELMET_LABEL in missing_set:
         return "missing_helmet"
-    if "vest" in normalized:
+    if VEST_LABEL in missing_set:
         return "missing_vest"
+    if CLEANING_COVERALL_LABEL in missing_set:
+        return "missing_cleaning_coverall"
+    if ROLE_UNIFORM_LABEL in missing_set:
+        return "missing_role_uniform"
     return "ppe_violation"
 
 

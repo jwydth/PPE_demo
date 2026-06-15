@@ -81,6 +81,7 @@ def test_ppe_service_maps_tracker_id_to_track_id():
     assert stored.tracker_id == 42
     assert created.track_id == 42
     assert service.get_violation(10).track_id == 42
+    assert service.get_violation(10).missing_equipment == ["Helmet"]
     assert service.get_subjects(10)[0].track_id == 42
 
 

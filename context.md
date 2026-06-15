@@ -2,18 +2,18 @@
 
 ## Overview
 
-The application detects PPE compliance (helmets and vests) and monitors configurable safety zones in uploaded images and videos. It is designed for smart factory safety monitoring.
+The application detects PPE compliance (helmets and role-identifying uniforms) and monitors configurable safety zones in uploaded images and videos. It is designed for smart factory safety monitoring.
 
 ## Architecture
 
 ### Backend
 
 - **Framework:** FastAPI provides the REST API.
-- **Detection & Tracking:** YOLOv8 (via `ultralytics` library) performs person, helmet, and vest detection. It also handles object tracking for video processing.
+- **Detection & Tracking:** YOLOv8 (via `ultralytics` library) performs person, helmet, vest, and cleaning-coverall detection. It also handles object tracking for video processing.
 - **Database:** PostgreSQL with SQLModel (SQLAlchemy) stores cameras, zones, and violation history.
 - **Storage:** MinIO is used for persistent evidence storage (snapshots). Local storage is used for temporary snapshots during processing.
 - **Inference Logic:**
-    - **PPE Detection:** Checks overlap between person and equipment (helmet/vest) detections.
+    - **PPE Detection:** Checks overlap between person and equipment detections, infers worker or janitor role from uniform, and applies role-specific PPE rules.
     - **Zone Monitoring:** Performs point-in-polygon checks using a normalized 1000x1000 grid. Foot points of tracked persons are used for incursion detection.
     - **Dwell Threshold:** Violations are triggered when a person stays in a restricted zone (or outside a walkway) longer than a configured threshold.
 

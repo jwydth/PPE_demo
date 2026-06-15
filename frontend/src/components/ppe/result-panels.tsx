@@ -8,7 +8,7 @@ export function DetectionSummary({ result }: { result: DetectionResponse }) {
   const { summary } = result;
   return (
     <div className="grid gap-3 sm:grid-cols-4">
-      <Metric label="Workers" value={summary.total_persons} />
+      <Metric label="People" value={summary.total_persons} />
       <Metric label="Compliant" value={summary.compliant} tone="green" />
       <Metric label="Violations" value={summary.violations} tone={summary.violations > 0 ? "red" : "green"} />
       <Metric label="Inference" value={`${summary.inference_ms.toFixed(0)}ms`} />
@@ -18,7 +18,7 @@ export function DetectionSummary({ result }: { result: DetectionResponse }) {
 
 export function PeopleResults({ persons }: { persons: PersonResult[] }) {
   if (persons.length === 0) {
-    return <EmptyState text="No workers were detected in this frame." />;
+    return <EmptyState text="No people were detected in this frame." />;
   }
 
   return (
@@ -27,7 +27,9 @@ export function PeopleResults({ persons }: { persons: PersonResult[] }) {
         <article key={`${person.person_id}-${person.track_id ?? "single"}`} className="rounded-md border border-slate-200 bg-white p-3">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <p className="text-sm font-semibold text-slate-950">Worker {person.person_id}</p>
+              <p className="text-sm font-semibold text-slate-950">
+                {formatPersonRole(person)} {person.person_id}
+              </p>
               <p className="text-xs text-slate-500">Confidence {Math.round(person.confidence * 100)}%</p>
             </div>
             <span className={`rounded px-2 py-1 text-xs font-semibold ring-1 ${person.compliant ? "bg-emerald-50 text-emerald-700 ring-emerald-200" : "bg-red-50 text-red-700 ring-red-200"}`}>
@@ -39,7 +41,7 @@ export function PeopleResults({ persons }: { persons: PersonResult[] }) {
               <div key={item.label} className="flex items-center justify-between rounded bg-slate-50 px-3 py-2 text-sm">
                 <span className="flex items-center gap-2 text-slate-700">
                   <HardHat className="size-4 text-green-900" aria-hidden="true" />
-                  {item.label}
+                  {formatEquipmentLabel(item.label)}
                 </span>
                 <span className={item.status === "compliant" ? "text-emerald-700" : "text-red-700"}>
                   {item.status}
@@ -163,10 +165,25 @@ function formatIncidentType(type: string): string {
     missing_helmet: "Missing Safety Helmet",
     missing_vest: "Missing Safety Vest",
     missing_helmet_and_vest: "Missing Helmet and Vest",
+    missing_cleaning_coverall: "Missing Cleaning Coverall",
+    missing_helmet_and_cleaning_coverall: "Missing Helmet and Cleaning Coverall",
+    missing_role_uniform: "Missing Role Uniform",
+    missing_helmet_and_role_uniform: "Missing Helmet and Role Uniform",
     proximity_violation: "Proximity Violation",
     zone_incursion: "Zone Incursion",
   };
   return labels[type] ?? type.replaceAll("_", " ");
+}
+
+function formatPersonRole(person: PersonResult): string {
+  if (person.role === "worker") return "Worker";
+  if (person.role === "janitor") return "Janitor";
+  return "Unknown role";
+}
+
+function formatEquipmentLabel(label: string): string {
+  if (label === "Role Uniform") return "Role Uniform (Vest or Cleaning Coverall)";
+  return label;
 }
 
 function formatZoneType(type?: string, name?: string): string {

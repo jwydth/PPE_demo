@@ -733,7 +733,7 @@ function CameraPanel() {
             <div className="grid gap-2 sm:grid-cols-2">
               <ModelToggle
                 label="PPE Detection"
-                description="Helmet and vest compliance"
+                description="Helmet and role-uniform compliance"
                 enabled={ppeEnabled}
                 onToggle={() => setPpeEnabled((current) => !current)}
               />

@@ -47,7 +47,7 @@ export const safetyMetrics: SafetyMetric[] = [
   {
     label: "PPE Compliance",
     value: "98.2%",
-    helper: "Helmets and high-vis detected",
+    helper: "Helmets and role uniforms detected",
     trend: "+2.4% today",
     icon: HardHat,
     tone: "green",
@@ -80,7 +80,7 @@ export const safetyMetrics: SafetyMetric[] = [
 
 export const incidents: Incident[] = [
   {
-    title: "Vest not detected near palletizer",
+    title: "Role uniform not detected near palletizer",
     zone: "Packaging Line 1",
     time: "2 min ago",
     severity: "medium",

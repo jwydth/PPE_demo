@@ -64,6 +64,7 @@ def test_ppe_persistence_uploads_snapshot_and_creates_records(
         "timestamp": "2026-06-05T12:00:00+00:00",
         "violation_type": "missing_helmet",
         "details": "track 42 missing Helmet at frame 20",
+        "missing_equipment": ["Helmet"],
         "snapshot_url": (
             "http://localhost:9000/safety-monitoring-evidence/"
             "ppe-violations/2026/06/05/evidence.jpg?signature=test"
@@ -142,6 +143,7 @@ def test_violations_endpoint_preserves_response_shape(session):
             "timestamp": "2026-06-05T12:00:00+00:00",
             "violation_type": "missing_vest",
             "details": "track 7 missing Vest at frame 30",
+            "missing_equipment": ["Vest"],
             "snapshot_url": "http://minio/read-url",
             "video_name": "warehouse.mp4",
             "frame_index": 30,
