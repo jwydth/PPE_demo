@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -39,6 +40,21 @@ class Settings(BaseSettings):
     SNAPSHOT_DIR: str = "storage/snapshots"
     UPLOAD_DIR: str = "storage/uploads"
     ALLOWED_ORIGINS: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    # Sign-detection / auto-zone settings
+    SIGN_MODEL_PATH: str = "weights/sign_model.pt"
+    SIGN_CONFIDENCE_THRESHOLD: float = 0.35
+    SIGN_CLASS_ZONE_MAP: dict[int, str] = {2: "RESTRICTED", 3: "RESTRICTED"}
+    SIGN_CLASS_NAMES: dict[int, str] = {2: "P004_NoThoroughfare", 3: "W011_Slippery"}
+    AUTO_ZONE_BUFFER_RATIO: float = 0.25
+    SIGN_PASS_FRAME_INTERVAL: int = 15
+    AUTO_ZONE_CONFIRM_FRAMES: int = 3
+    AUTO_ZONE_DEDUPE_GRID: float = 0.05
+
+    @model_validator(mode="after")
+    def _coerce_sign_dict_keys(self) -> "Settings":
+        self.SIGN_CLASS_ZONE_MAP = {int(k): v for k, v in self.SIGN_CLASS_ZONE_MAP.items()}
+        self.SIGN_CLASS_NAMES = {int(k): v for k, v in self.SIGN_CLASS_NAMES.items()}
+        return self
 
     class Config:
         env_file = str(BACKEND_DIR / ".env")

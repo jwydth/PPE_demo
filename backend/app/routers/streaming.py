@@ -23,7 +23,9 @@ async def stream_video_ws(
     # Dynamic settings state
     settings_state = {
         "enable_ppe": enable_ppe,
-        "enable_zone": enable_zone
+        "enable_zone": enable_zone,
+        "dismissed_signatures": [],
+        "reload_zones": False,
     }
     
     # Resolve the video path
@@ -54,6 +56,14 @@ async def stream_video_ws(
                         if "enable_zone" in new_settings:
                             settings_state["enable_zone"] = bool(new_settings["enable_zone"])
                         logger.info(f" [SIGNAL] Received dynamic settings update: {settings_state}")
+                    elif data.get("event") == "dismiss_suggestion":
+                        sig = data.get("data", {}).get("suggestion_id")
+                        if sig:
+                            settings_state["dismissed_signatures"].append(sig)
+                            logger.info(f" [SIGNAL] Queued dismissal for suggestion: {sig}")
+                    elif data.get("event") == "reload_zones":
+                        settings_state["reload_zones"] = True
+                        logger.info(" [SIGNAL] Zone reload requested by client")
                 except Exception as e:
                     # Could be parse error or websocket issues
                     logger.warning(f" [SIGNAL] Error receiving settings: {e}")

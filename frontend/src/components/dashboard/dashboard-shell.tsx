@@ -27,7 +27,7 @@ import {
 } from "@/lib/ppe-api";
 import { BoundingBoxView } from "@/components/ppe/bounding-box-view";
 import { FileUpload } from "@/components/ppe/file-upload";
-import { TrackingOverlayLayer } from "@/components/ppe/video-tracking-overlay";
+import { SuggestionOverlayLayer, TrackingOverlayLayer } from "@/components/ppe/video-tracking-overlay";
 import {
   DetectionSummary,
   EmptyState,
@@ -43,7 +43,7 @@ import {
   VideoProcessingResponse,
   ViolationReport,
 } from "@/types/detection";
-import { Point2D, ZoneConfiguration, ZoneType, ZoneViolation } from "@/types/zone";
+import { Point2D, ZoneConfiguration, ZoneSuggestion, ZoneType, ZoneViolation } from "@/types/zone";
 import {
   appActions,
   navigation,
@@ -286,6 +286,7 @@ function CameraPanel() {
     },
   });
   const [isStreaming, setIsStreaming] = useState(false);
+  const [zoneSuggestions, setZoneSuggestions] = useState<Record<string, ZoneSuggestion>>({});
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -336,6 +337,7 @@ function CameraPanel() {
           frames: [],
         },
       });
+      setZoneSuggestions({});
       setIsStreaming(true);
 
       ws.onmessage = (event) => {
@@ -347,9 +349,8 @@ function CameraPanel() {
             ...prev,
             tracking_overlay: { ...prev.tracking_overlay, fps: data.fps },
           }));
-          setStatus("Streaming active.");
-          // Play the video once stream starts
-          if (videoRef.current) videoRef.current.play();
+          setStatus("Buffering inference…");
+          // Don't play yet — wait until inference has built a lead (see buffer effect below)
         } else if (eventType === "frame") {
           setStreamData((prev) => ({
             ...prev,
@@ -382,6 +383,8 @@ function CameraPanel() {
               },
             ],
           }));
+        } else if (eventType === "zone_suggestion") {
+          setZoneSuggestions((prev) => ({ ...prev, [data.suggestion_id]: data as ZoneSuggestion }));
         } else if (eventType === "summary") {
           setStreamData((prev) => ({ ...prev, summary: data }));
           setPhase("done");
@@ -449,6 +452,42 @@ function CameraPanel() {
     frameId = requestAnimationFrame(syncTime);
     return () => cancelAnimationFrame(frameId);
   }, [isPlaying]);
+
+  // Buffer-then-sync: wait until inference has a lead before starting playback,
+  // then keep the video paused whenever it gets more than 15 frames ahead of inference.
+  useEffect(() => {
+    if (!isStreaming || !videoRef.current) return;
+
+    const overlay = streamData.tracking_overlay;
+    const fps = overlay.fps || 30;
+    const stride = overlay.stride || 1;
+    const frames = overlay.frames;
+    if (frames.length === 0) return;
+
+    const latestProcessedFrame = frames[frames.length - 1].frame_index;
+    const currentFrame = Math.round(currentVideoTime * fps);
+    const lag = currentFrame - latestProcessedFrame; // positive = video ahead of inference
+
+    const video = videoRef.current;
+
+    // Phase 1 – buffering: don't play until inference has processed at least 2 s worth of frames
+    const bufferFrames = Math.ceil(fps * 2 / stride);
+    if (latestProcessedFrame < bufferFrames) {
+      setStatus(`Buffering… ${Math.round((latestProcessedFrame / bufferFrames) * 100)}%`);
+      return;
+    }
+
+    // Phase 2 – playing: start (once) and keep video within 15 frames of inference
+    if (video.paused && isPlaying) {
+      setStatus("Streaming active.");
+      void video.play();
+    }
+    if (lag > 15 && !video.paused) {
+      video.pause();
+    } else if (lag <= 5 && video.paused && isPlaying) {
+      void video.play();
+    }
+  }, [streamData.tracking_overlay.frames, currentVideoTime, isStreaming, isPlaying, streamData.tracking_overlay]);
 
   const currentIncidents = useMemo(
     () => {
@@ -559,10 +598,11 @@ function CameraPanel() {
     setZonesForVideo([]);
     setDraftPoints([]);
     setSelectedZoneId(null);
+    setZoneSuggestions({});
     setPhase("idle");
     setIsDrawing(false);
     setCurrentVideoTime(0);
-    
+
     if (nextFile.type.startsWith("video/")) {
       await loadSavedZones(nextFile.name);
       // Automatically trigger upload and streaming
@@ -623,6 +663,39 @@ function CameraPanel() {
     );
     setDraftPoints([]);
     setStatus(`Saved ${zonesToPersist.length} zone(s) for this camera video.`);
+  };
+
+  const handleDismissSuggestion = (suggestion: ZoneSuggestion) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({ event: "dismiss_suggestion", data: { suggestion_id: suggestion.suggestion_id } }),
+      );
+    }
+    setZoneSuggestions(({ [suggestion.suggestion_id]: _, ...rest }) => rest);
+  };
+
+  const handleAcceptSuggestion = async (suggestion: ZoneSuggestion, name: string) => {
+    if (!file) return;
+    // Remove from UI immediately so the popup closes regardless of save outcome
+    setZoneSuggestions(({ [suggestion.suggestion_id]: _, ...rest }) => rest);
+    const draft: DraftZone = {
+      id: crypto.randomUUID(),
+      name,
+      type: suggestion.zone_type,
+      // RESTRICTED: fire after any brief entry (0.5 s). WALKWAY: worker must leave for 3 s.
+      dwellThresholdSeconds: suggestion.zone_type === "RESTRICTED" ? 0.5 : 3,
+      points: suggestion.normalized_coordinates,
+    };
+    try {
+      await saveZone(toBackendZone(draft, file.name));
+      await loadSavedZones(file.name);
+      // Signal the running pipeline to reload zones so it enforces the new zone immediately
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ event: "reload_zones" }));
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save suggested zone");
+    }
   };
 
   const clearSavedZones = async () => {
@@ -865,6 +938,7 @@ function CameraPanel() {
     setError("");
     setStatus("");
     setDraftPoints([]);
+    setZoneSuggestions({});
     setPhase("idle");
     setIsDrawing(false);
     setCurrentVideoTime(0);
@@ -1080,6 +1154,11 @@ function CameraPanel() {
                         currentTime={currentVideoTime}
                       />
                     ) : null}
+                    <SuggestionOverlayLayer
+                      suggestions={Object.values(zoneSuggestions)}
+                      onAccept={(s, name) => void handleAcceptSuggestion(s, name)}
+                      onDismiss={handleDismissSuggestion}
+                    />
                   </div>
                   {isDrawing ? (
                     <p className="mt-2 text-xs text-slate-400">

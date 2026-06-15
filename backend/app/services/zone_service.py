@@ -322,39 +322,53 @@ def record_zone_violation(
     video_name: str,
     frame_index: int,
     save_snapshot_fn,
-) -> ZoneViolation:
+) -> ZoneViolation | None:
     """Record a zone violation for a person"""
+    import logging
+    _log = logging.getLogger(__name__)
+
     timestamp = datetime.now(timezone.utc).isoformat()
     if zone.zone_type == "WALKWAY":
         label = f"Left Walkway: {zone.zone_name}"
     else:
         label = f"Entered Zone: {zone.zone_name}"
 
-    snapshot_filename = save_snapshot_fn(
-        frame=frame,
-        person=person,
-        missing=[label],
-        video_stem=Path(video_name).stem,
-        frame_index=frame_index,
-        polygon=zone.poly,
-        zone_type=zone.zone_type,
-    )
+    try:
+        snapshot_filename = save_snapshot_fn(
+            frame=frame,
+            person=person,
+            missing=[label],
+            video_stem=Path(video_name).stem,
+            frame_index=frame_index,
+            polygon=zone.poly,
+            zone_type=zone.zone_type,
+        )
+    except Exception as exc:
+        _log.error(f"[ZONE] Snapshot save failed for zone '{zone.zone_name}': {exc}", exc_info=True)
+        return None
 
     local_snapshot_path = SNAPSHOT_DIR / snapshot_filename
-    with open_zone_violation_service() as service:
-        saved = service.persist_zone_violation(
-            camera_zone_view_id=zone.camera_zone_view_id,
-            physical_zone_id=zone.physical_zone_id,
-            zone_name=zone.zone_name,
-            zone_type=zone.zone_type,
-            track_id=person.track_id or 0,
-            timestamp=timestamp,
-            video_name=video_name,
-            frame_index=frame_index,
-            local_snapshot_path=str(local_snapshot_path),
-        )
-    local_snapshot_path.unlink(missing_ok=True)
+    try:
+        with open_zone_violation_service() as service:
+            saved = service.persist_zone_violation(
+                camera_zone_view_id=zone.camera_zone_view_id,
+                physical_zone_id=zone.physical_zone_id,
+                zone_name=zone.zone_name,
+                zone_type=zone.zone_type,
+                track_id=person.track_id or 0,
+                timestamp=timestamp,
+                video_name=video_name,
+                frame_index=frame_index,
+                local_snapshot_path=str(local_snapshot_path),
+            )
+    except Exception as exc:
+        _log.error(f"[ZONE] DB persist failed for zone '{zone.zone_name}': {exc}", exc_info=True)
+        return None
+    finally:
+        local_snapshot_path.unlink(missing_ok=True)
+
     worker_state.reported_zones.add(zone.camera_zone_view_id)
+    _log.info(f"[ZONE] Violation persisted: zone='{zone.zone_name}' type={zone.zone_type} track={person.track_id} frame={frame_index}")
     return saved
 
 

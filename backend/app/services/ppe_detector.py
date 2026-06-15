@@ -28,6 +28,7 @@ from app.schemas.violation import (
     ViolationReport,
     ZoneViolation,
 )
+from app.services.auto_zone import SignZoneRegistry, extract_signs
 from app.services.ppe_violation_service import open_ppe_violation_service
 from app.services.zone_service import (
     COORD_SCALE,
@@ -138,10 +139,15 @@ def _select_inference_device(preferred_device: str) -> str:
 
 
 class PPEDetector:
+    model = None
+    sign_model = None  # set by _load_sign_model; stays None when weights are absent
+
     def __init__(self) -> None:
         self.model = None
+        self.sign_model = None
         self.device = _select_inference_device(settings.INFERENCE_DEVICE)
         self._load_model()
+        self._load_sign_model()
 
     def _load_model(self) -> None:
         model_path = Path(settings.MODEL_PATH).expanduser()
@@ -155,10 +161,32 @@ class PPEDetector:
 
         try:
             from ultralytics import YOLO
+            import numpy as np
 
             self.model = YOLO(str(model_path))
+            # Warm up: one dummy inference so the CUDA context is ready before the first video
+            dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+            self.model.predict(dummy, device=self.device, verbose=False)
+            logger.info(f"PPE model loaded and warmed up on {self.device}")
         except Exception as e:
             logger.error(f"Failed to load YOLO model: {e}", exc_info=True)
+
+    def _load_sign_model(self) -> None:
+        sign_path = Path(settings.SIGN_MODEL_PATH).expanduser()
+        if not sign_path.is_absolute():
+            sign_path = BACKEND_DIR / sign_path
+        sign_path = sign_path.resolve()
+
+        if not sign_path.exists():
+            logger.info(f"Sign model not found at {sign_path}; auto-zone feature disabled.")
+            return
+
+        try:
+            from ultralytics import YOLO
+
+            self.sign_model = YOLO(str(sign_path))
+        except Exception as e:
+            logger.error(f"Failed to load sign model: {e}", exc_info=True)
 
     def predict(self, image: Image.Image) -> DetectionResponse:
         if self.model is None:
@@ -255,8 +283,6 @@ class PPEDetector:
                 yield event
             return
 
-        fps, _ = _video_metadata(video_path)
-        start_wall_time = time.perf_counter()
         stride = max(1, settings.VIDEO_FRAME_STRIDE)
 
         for event in self._real_video_pipeline(
@@ -268,15 +294,7 @@ class PPEDetector:
             settings_state=settings_state,
         ):
             if event.event == "frame":
-                frame_index = event.frame_index or 0
-                elapsed_processing = time.perf_counter() - start_wall_time
-                expected_elapsed = frame_index / fps if fps > 0 else 0
-                wait_time = expected_elapsed - elapsed_processing
-                if wait_time > 0:
-                    await asyncio.sleep(wait_time)
-                else:
-                    # Give other tasks (like settings listener) a chance even if inference is slow
-                    await asyncio.sleep(0.01)
+                await asyncio.sleep(0)  # yield to event loop (settings listener etc.) without throttling
             yield event
 
     def _real_video_pipeline(
@@ -300,13 +318,36 @@ class PPEDetector:
         frame_width: int | None = None
         frame_height: int | None = None
 
+        # Rolling window of foot-point history: track_id → [(frame_index, foot_point)]
+        # Used to retroactively check newly-accepted zones against recent worker positions.
+        _FOOT_HISTORY_FRAMES = int(fps * 30) if fps > 0 else 900  # last 30 s
+        foot_history: dict[int, list[tuple[int, tuple]]] = {}
+
         # Helper to get current flags
         def get_flags():
             if settings_state:
                 return settings_state.get("enable_ppe", enable_ppe), settings_state.get("enable_zone", enable_zone)
             return enable_ppe, enable_zone
 
-        zones = load_zones(video_name) # Always load zones, we'll toggle checking in the loop
+        def _retroactive_zone_check(new_zones, current_frame_index):
+            """Check foot-point history against newly loaded zones and emit any missed violations."""
+            violations = []
+            for zone in new_zones:
+                cv_id = zone.camera_zone_view_id
+                for track_id, history in foot_history.items():
+                    worker = next((w for w in workers if track_id in w.track_ids), None)
+                    if worker is None or cv_id in worker.reported_zones:
+                        continue
+                    dwell = sum(stride / fps for _, fp in history if zone.point_in_zone(fp))
+                    if dwell > zone.threshold:
+                        logger.info(f"[ZONE] Retroactive violation: worker {track_id} was in '{zone.zone_name}' for {dwell:.2f}s")
+                        violations.append((worker, zone, track_id))
+            return violations
+
+        zones = load_zones(video_name)
+        logger.info(f"[ZONE] Loaded {len(zones)} zone(s) for '{video_name}': {[(z.zone_name, z.zone_type, z.camera_zone_view_id) for z in zones]}")
+        sign_registry = SignZoneRegistry()
+        sign_classes = list(settings.SIGN_CLASS_ZONE_MAP)
 
         yield StreamEvent(
             event="start",
@@ -328,6 +369,16 @@ class PPEDetector:
         for processed_frames, result in enumerate(results, start=1):
             frame_index = (processed_frames - 1) * stride
             curr_ppe, curr_zone = get_flags()
+
+            if settings_state and settings_state.pop("reload_zones", False):
+                zones = load_zones(video_name)
+                logger.info(f"[ZONE] Hot-reloaded {len(zones)} zone(s): {[(z.zone_name, z.zone_type) for z in zones]}")
+                for worker, zone, track_id in _retroactive_zone_check(zones, frame_index):
+                    cv_id = zone.camera_zone_view_id
+                    if cv_id not in worker.reported_zones:
+                        zv = record_zone_violation(worker, zone, result.orig_img.copy(), next((p for p in response.persons if p.track_id == track_id), None) or response.persons[0], video_name, frame_index, _save_violation_snapshot)
+                        if zv:
+                            yield StreamEvent(event="zone_violation", frame_index=frame_index, data=zv.model_dump())
             
             if processed_frames % 60 == 1:
                 logger.info(f" [PIPELINE] Frame {frame_index} active state: ppe={curr_ppe}, zone={curr_zone}")
@@ -360,10 +411,26 @@ class PPEDetector:
                 track_zone_name = None
                 track_zone_type = None
 
+                if person.track_id is not None:
+                    hist = foot_history.setdefault(person.track_id, [])
+                    fp_for_history = get_person_foot_point(person, frame_width, frame_height)
+                    hist.append((frame_index, fp_for_history))
+                    if len(hist) > _FOOT_HISTORY_FRAMES:
+                        del hist[0]
+
                 if zones and curr_zone:
                     test_point = get_person_foot_point(person, frame_width, frame_height)
                     incursion_zones = check_zone_incursion(zones, test_point)
                     incursion_ids = {z.camera_zone_view_id for z in incursion_zones}
+
+                    # Log every 30 frames so we can see whether foot point ever hits the zone
+                    if frame_index % 30 == 0:
+                        logger.info(
+                            f"[ZONE] Frame {frame_index} worker {person.track_id}: "
+                            f"foot={test_point} zones_loaded={len(zones)} in_zones={[(z.zone_name, z.zone_type) for z in incursion_zones]}"
+                        )
+                        for z in zones:
+                            logger.info(f"[ZONE]   zone '{z.zone_name}' poly={z.poly[:2]}...  threshold={z.threshold}s")
 
                     for zone in zones:
                         cv_id = zone.camera_zone_view_id
@@ -373,15 +440,24 @@ class PPEDetector:
                                 worker.zone_dwell[cv_id] = 0
                             else:
                                 worker.zone_dwell[cv_id] = worker.zone_dwell.get(cv_id, 0) + (stride / fps)
-                                if worker.zone_dwell[cv_id] > zone.threshold and cv_id not in worker.reported_zones:
+                                dwell = worker.zone_dwell[cv_id]
+                                if frame_index % 30 == 0:
+                                    logger.info(f"[ZONE] Frame {frame_index} worker {person.track_id}: WALKWAY '{zone.zone_name}' dwell={dwell:.2f}s / threshold={zone.threshold}s already_reported={cv_id in worker.reported_zones}")
+                                if dwell > zone.threshold and cv_id not in worker.reported_zones:
+                                    logger.info(f"[ZONE] Frame {frame_index} worker {person.track_id}: WALKWAY threshold crossed — recording violation")
                                     zv = record_zone_violation(worker, zone, frame, person, video_name, frame_index, _save_violation_snapshot)
+                                    logger.info(f"[ZONE] record_zone_violation returned: {zv}")
                                     if zv:
                                         yield StreamEvent(event="zone_violation", frame_index=frame_index, data=zv.model_dump())
                         else:
                             if in_z:
                                 worker.zone_dwell[cv_id] = worker.zone_dwell.get(cv_id, 0) + (stride / fps)
-                                if worker.zone_dwell[cv_id] > zone.threshold and cv_id not in worker.reported_zones:
+                                dwell = worker.zone_dwell[cv_id]
+                                logger.info(f"[ZONE] Frame {frame_index} worker {person.track_id}: RESTRICTED '{zone.zone_name}' dwell={dwell:.2f}s / threshold={zone.threshold}s already_reported={cv_id in worker.reported_zones}")
+                                if dwell > zone.threshold and cv_id not in worker.reported_zones:
+                                    logger.info(f"[ZONE] Frame {frame_index} worker {person.track_id}: RESTRICTED threshold crossed — recording violation")
                                     zv = record_zone_violation(worker, zone, frame, person, video_name, frame_index, _save_violation_snapshot)
+                                    logger.info(f"[ZONE] record_zone_violation returned: {zv}")
                                     if zv:
                                         yield StreamEvent(event="zone_violation", frame_index=frame_index, data=zv.model_dump())
 
@@ -415,6 +491,25 @@ class PPEDetector:
                     _record_violation_case(cases=cases, frame=frame, person=person, worker=worker, missing=missing_to_report, video_name=video_name, frame_index=frame_index, confirmed_aspect_ratios=confirmed_aspect_ratios)
                     if len(cases) > old_case_count:
                         yield StreamEvent(event="violation", frame_index=frame_index, data=cases[-1].report.model_dump())
+
+            if self.sign_model is not None and frame_width and frame_height and frame_index % settings.SIGN_PASS_FRAME_INTERVAL == 0:
+                if settings_state:
+                    pending = settings_state.get("dismissed_signatures", [])
+                    if pending:
+                        settings_state["dismissed_signatures"] = []
+                        for sig in pending:
+                            sign_registry.dismiss(sig)
+                sign_results = self.sign_model.predict(
+                    frame,
+                    conf=settings.SIGN_CONFIDENCE_THRESHOLD,
+                    classes=sign_classes,
+                    device=self.device,
+                    verbose=False,
+                )
+                if sign_results:
+                    signs = extract_signs(sign_results[0])
+                    for suggestion in sign_registry.update(signs, frame_width, frame_height, frame_index):
+                        yield StreamEvent(event="zone_suggestion", frame_index=frame_index, data=suggestion.model_dump())
 
             yield StreamEvent(event="frame", frame_index=frame_index, data={"frames": [f.model_dump() for f in current_frame_overlay], "processed_frames": processed_frames, "frame_width": frame_width, "frame_height": frame_height})
 

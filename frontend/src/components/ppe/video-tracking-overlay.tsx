@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { TrackingOverlay, TrackingOverlayFrame } from "@/types/detection";
+import { ZoneSuggestion } from "@/types/zone";
 
 export function TrackingOverlayLayer({
   overlay,
@@ -246,6 +247,122 @@ function labelColor(label: string, fallback: string): string {
   if (label.startsWith("Zone:")) return fallback;
   if (label.startsWith("Track")) return "#cbd5e1";
   return fallback;
+}
+
+const SIGN_HUMAN_NAMES: Record<string, string> = {
+  P004_NoThoroughfare: "No Thoroughfare",
+  W011_Slippery: "Slippery",
+};
+
+export function SuggestionOverlayLayer({
+  suggestions,
+  onAccept,
+  onDismiss,
+}: {
+  suggestions: ZoneSuggestion[];
+  onAccept: (suggestion: ZoneSuggestion, name: string) => void;
+  onDismiss: (suggestion: ZoneSuggestion) => void;
+}) {
+  const [editableNames, setEditableNames] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    setEditableNames((prev) => {
+      const next = { ...prev };
+      for (const s of suggestions) {
+        if (!(s.suggestion_id in next)) {
+          next[s.suggestion_id] = SIGN_HUMAN_NAMES[s.source_class] ?? s.source_class;
+        }
+      }
+      return next;
+    });
+  }, [suggestions]);
+
+  if (suggestions.length === 0) return null;
+
+  return (
+    <>
+      <svg
+        className="pointer-events-none absolute inset-0 h-full w-full"
+        viewBox="0 0 1 1"
+        preserveAspectRatio="none"
+      >
+        {suggestions.map((s) => {
+          const pts = s.normalized_coordinates;
+          if (pts.length < 3) return null;
+          const d =
+            `M ${pts[0].x} ${pts[0].y} ` +
+            pts.slice(1).map((p) => `L ${p.x} ${p.y}`).join(" ") +
+            " Z";
+          return (
+            <path
+              key={s.suggestion_id}
+              d={d}
+              fill="rgba(251,146,60,0.15)"
+              stroke="#f97316"
+              strokeWidth={0.005}
+              strokeDasharray="0.02 0.01"
+            />
+          );
+        })}
+      </svg>
+
+      {suggestions.map((s) => {
+        const pts = s.normalized_coordinates;
+        if (pts.length < 3) return null;
+        const minX = Math.min(...pts.map((p) => p.x));
+        const minY = Math.min(...pts.map((p) => p.y));
+        const maxX = Math.max(...pts.map((p) => p.x));
+        const maxY = Math.max(...pts.map((p) => p.y));
+        const centerX = (minX + maxX) / 2;
+        // Place label above the polygon; if too close to top, place it below instead
+        const anchorY = minY > 0.12 ? minY : maxY;
+        const translateY = minY > 0.12 ? "-100%" : "0%";
+        const humanName = SIGN_HUMAN_NAMES[s.source_class] ?? s.source_class;
+        const editableName = editableNames[s.suggestion_id] ?? humanName;
+
+        return (
+          <div
+            key={s.suggestion_id}
+            className="pointer-events-auto absolute"
+            style={{
+              left: `${centerX * 100}%`,
+              top: `${anchorY * 100}%`,
+              transform: `translate(-50%, ${translateY})`,
+            }}
+          >
+            <div className="flex flex-col items-center gap-1 rounded-md border border-orange-400 bg-slate-950/90 px-2 py-1.5 text-xs shadow-lg">
+              <span className="whitespace-nowrap font-semibold text-orange-300">
+                ⚠ Suggested: {humanName}
+              </span>
+              <input
+                value={editableName}
+                onChange={(e) =>
+                  setEditableNames((prev) => ({ ...prev, [s.suggestion_id]: e.target.value }))
+                }
+                className="w-full rounded border border-slate-700 bg-slate-900 px-1.5 py-0.5 text-[10px] text-white outline-none focus:border-orange-400"
+              />
+              <div className="flex gap-1">
+                <button
+                  type="button"
+                  onClick={() => onAccept(s, editableName)}
+                  className="rounded bg-orange-500 px-2 py-0.5 text-[10px] font-bold text-white hover:bg-orange-400"
+                >
+                  Accept ✓
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onDismiss(s)}
+                  className="rounded border border-slate-600 px-2 py-0.5 text-[10px] font-bold text-slate-300 hover:bg-white/10"
+                >
+                  Dismiss ✕
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </>
+  );
 }
 
 function findNearestFrame(frameIndexes: number[], target: number): number | null {

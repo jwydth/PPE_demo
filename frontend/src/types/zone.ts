@@ -18,6 +18,15 @@ export interface ZoneConfiguration {
   flattened_coordinates: string;
 }
 
+export interface ZoneSuggestion {
+  suggestion_id: string;
+  zone_type: ZoneType;
+  source_class: string;
+  confidence: number;
+  normalized_coordinates: { x: number; y: number }[];
+  frame_index: number;
+}
+
 export interface ZoneViolation {
   id?: number;
   zone_id?: number;

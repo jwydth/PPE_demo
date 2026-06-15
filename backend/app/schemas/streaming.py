@@ -4,6 +4,6 @@ from app.schemas.detection import TrackingOverlayFrame, VideoSummary
 from app.schemas.violation import ViolationReport, ZoneViolation
 
 class StreamEvent(BaseModel):
-    event: Literal["frame", "violation", "zone_violation", "summary", "error", "start", "end"]
+    event: Literal["frame", "violation", "zone_violation", "zone_suggestion", "summary", "error", "start", "end"]
     frame_index: Optional[int] = None
     data: Any

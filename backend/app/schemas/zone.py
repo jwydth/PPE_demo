@@ -3,6 +3,15 @@ from typing import Literal, Optional
 from pydantic import BaseModel
 
 
+class ZoneSuggestion(BaseModel):
+    suggestion_id: str
+    zone_type: str
+    source_class: str
+    confidence: float
+    normalized_coordinates: list[dict]
+    frame_index: int
+
+
 class Zone(BaseModel):
     id: Optional[int] = None
     video_name: str
