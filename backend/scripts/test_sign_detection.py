@@ -24,13 +24,17 @@ from ultralytics import YOLO
 
 # Class IDs the sign model recognises (must match config.py)
 CLASS_NAMES: dict[int, str] = {
+    0: "M001_MustWearHardHat",
+    1: "M002_MustWearSafetyVest",
     2: "P004_NoThoroughfare",
     3: "W011_Slippery",
 }
 
 # Distinct colours per class (BGR)
 CLASS_COLORS: dict[int, tuple[int, int, int]] = {
-    2: (0, 0, 220),   # red  – no-thoroughfare
+    0: (0, 215, 255), # gold  – must wear hard hat
+    1: (0, 255, 180), # green – must wear safety vest
+    2: (0, 0, 220),   # red   – no-thoroughfare
     3: (0, 165, 255), # orange – slippery
 }
 DEFAULT_COLOR = (0, 255, 0)

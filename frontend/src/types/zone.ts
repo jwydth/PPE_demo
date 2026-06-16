@@ -27,6 +27,13 @@ export interface ZoneSuggestion {
   frame_index: number;
 }
 
+export interface PPESuggestion {
+  suggestion_id: string;
+  source_class: string;
+  confidence: number;
+  frame_index: number;
+}
+
 export interface ZoneViolation {
   id?: number;
   zone_id?: number;

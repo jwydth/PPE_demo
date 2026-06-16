@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { TrackingOverlay, TrackingOverlayFrame } from "@/types/detection";
-import { ZoneSuggestion } from "@/types/zone";
+import { PPESuggestion, ZoneSuggestion } from "@/types/zone";
 
 export function TrackingOverlayLayer({
   overlay,
@@ -250,6 +250,8 @@ function labelColor(label: string, fallback: string): string {
 }
 
 const SIGN_HUMAN_NAMES: Record<string, string> = {
+  M001_MustWearHardHat: "Must Wear Hard Hat",
+  M002_MustWearSafetyVest: "Must Wear Safety Vest",
   P004_NoThoroughfare: "No Thoroughfare",
   W011_Slippery: "Slippery",
 };
@@ -362,6 +364,52 @@ export function SuggestionOverlayLayer({
         );
       })}
     </>
+  );
+}
+
+export function PPESuggestionBanner({
+  suggestions,
+  onEnable,
+  onDismiss,
+}: {
+  suggestions: PPESuggestion[];
+  onEnable: (suggestion: PPESuggestion) => void;
+  onDismiss: (suggestion: PPESuggestion) => void;
+}) {
+  if (suggestions.length === 0) return null;
+
+  return (
+    <div className="pointer-events-auto absolute left-0 right-0 top-0 flex flex-col gap-1 p-2">
+      {suggestions.map((s) => {
+        const humanName = SIGN_HUMAN_NAMES[s.source_class] ?? s.source_class;
+        return (
+          <div
+            key={s.suggestion_id}
+            className="flex items-center justify-between gap-2 rounded-md border border-yellow-400/60 bg-slate-950/90 px-3 py-2 text-xs shadow-lg"
+          >
+            <span className="font-semibold text-yellow-300">
+              ⚠ Sign detected: <span className="text-white">{humanName}</span> — PPE monitoring required
+            </span>
+            <div className="flex shrink-0 gap-1.5">
+              <button
+                type="button"
+                onClick={() => onEnable(s)}
+                className="rounded bg-yellow-400 px-2 py-1 text-[10px] font-bold text-slate-950 hover:bg-yellow-300"
+              >
+                Enable PPE ✓
+              </button>
+              <button
+                type="button"
+                onClick={() => onDismiss(s)}
+                className="rounded border border-slate-600 px-2 py-1 text-[10px] font-bold text-slate-300 hover:bg-white/10"
+              >
+                Dismiss ✕
+              </button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

@@ -44,10 +44,18 @@ class Settings(BaseSettings):
     SIGN_MODEL_PATH: str = "weights/sign_model.pt"
     SIGN_CONFIDENCE_THRESHOLD: float = 0.35
     SIGN_CLASS_ZONE_MAP: dict[int, str] = {2: "RESTRICTED", 3: "RESTRICTED"}
-    SIGN_CLASS_NAMES: dict[int, str] = {2: "P004_NoThoroughfare", 3: "W011_Slippery"}
+    SIGN_CLASS_NAMES: dict[int, str] = {
+        0: "M001_MustWearHardHat",
+        1: "M002_MustWearSafetyVest",
+        2: "P004_NoThoroughfare",
+        3: "W011_Slippery",
+    }
+    # Sign classes that should trigger PPE detection (not zone creation)
+    SIGN_CLASS_PPE_TRIGGER: set[int] = {0, 1}
     AUTO_ZONE_BUFFER_RATIO: float = 0.25
     SIGN_PASS_FRAME_INTERVAL: int = 15
     AUTO_ZONE_CONFIRM_FRAMES: int = 3
+    AUTO_PPE_CONFIRM_FRAMES: int = 1
     AUTO_ZONE_DEDUPE_GRID: float = 0.05
     # Gap in seconds without a detection that is treated as the worker having exited any zone
     VIDEO_ZONE_REENTRY_GAP_SECONDS: float = 1.0
@@ -56,6 +64,7 @@ class Settings(BaseSettings):
     def _coerce_sign_dict_keys(self) -> "Settings":
         self.SIGN_CLASS_ZONE_MAP = {int(k): v for k, v in self.SIGN_CLASS_ZONE_MAP.items()}
         self.SIGN_CLASS_NAMES = {int(k): v for k, v in self.SIGN_CLASS_NAMES.items()}
+        self.SIGN_CLASS_PPE_TRIGGER = {int(k) for k in self.SIGN_CLASS_PPE_TRIGGER}
         return self
 
     class Config:

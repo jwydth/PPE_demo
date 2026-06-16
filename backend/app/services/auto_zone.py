@@ -3,7 +3,16 @@ from __future__ import annotations
 from enum import Enum, auto
 
 from app.core.config import settings
-from app.schemas.zone import ZoneSuggestion
+from app.schemas.zone import PPESuggestion, ZoneSuggestion
+
+
+_ALL_SIGN_CLASSES = None
+
+def _all_sign_classes() -> set[int]:
+    global _ALL_SIGN_CLASSES
+    if _ALL_SIGN_CLASSES is None:
+        _ALL_SIGN_CLASSES = {*settings.SIGN_CLASS_ZONE_MAP, *settings.SIGN_CLASS_PPE_TRIGGER}
+    return _ALL_SIGN_CLASSES
 
 
 def extract_signs(result) -> list[dict]:
@@ -13,7 +22,7 @@ def extract_signs(result) -> list[dict]:
         return signs
     for box in result.boxes:
         class_id = int(box.cls[0])
-        if class_id not in settings.SIGN_CLASS_ZONE_MAP:
+        if class_id not in _all_sign_classes():
             continue
         conf = float(box.conf[0])
         if conf < settings.SIGN_CONFIDENCE_THRESHOLD:
@@ -88,6 +97,8 @@ class SignZoneRegistry:
         suggestions: list[ZoneSuggestion] = []
         for sign in signs:
             class_id = int(sign["class_id"])
+            if class_id not in settings.SIGN_CLASS_ZONE_MAP:
+                continue
             bbox = sign["bbox"]
             sig = signature(class_id, bbox, frame_w, frame_h)
 
@@ -124,3 +135,43 @@ class SignZoneRegistry:
 
     def accept(self, sig: str) -> None:
         self._state[sig] = _State.ACCEPTED
+
+
+class SignPPERegistry:
+    """Tracks PPE-requirement sign detections and emits PPESuggestion once stable."""
+
+    def __init__(self) -> None:
+        self._hits: dict[str, int] = {}
+        self._state: dict[str, _State] = {}
+        self._last_sign: dict[str, dict] = {}
+
+    def update(self, signs: list[dict], frame_w: int, frame_h: int, frame_index: int) -> list[PPESuggestion]:
+        suggestions: list[PPESuggestion] = []
+        for sign in signs:
+            class_id = int(sign["class_id"])
+            if class_id not in settings.SIGN_CLASS_PPE_TRIGGER:
+                continue
+            bbox = sign["bbox"]
+            sig = signature(class_id, bbox, frame_w, frame_h)
+
+            state = self._state.get(sig, _State.COUNTING)
+            if state in _TERMINAL:
+                continue
+
+            self._hits[sig] = self._hits.get(sig, 0) + 1
+            self._last_sign[sig] = sign
+
+            if self._hits[sig] >= settings.AUTO_PPE_CONFIRM_FRAMES:
+                self._state[sig] = _State.EMITTED
+                suggestions.append(
+                    PPESuggestion(
+                        suggestion_id=sig,
+                        source_class=settings.SIGN_CLASS_NAMES.get(class_id, str(class_id)),
+                        confidence=sign["conf"],
+                        frame_index=frame_index,
+                    )
+                )
+        return suggestions
+
+    def dismiss(self, sig: str) -> None:
+        self._state[sig] = _State.DISMISSED

@@ -28,7 +28,7 @@ from app.schemas.violation import (
     ViolationReport,
     ZoneViolation,
 )
-from app.services.auto_zone import SignZoneRegistry, extract_signs
+from app.services.auto_zone import SignPPERegistry, SignZoneRegistry, extract_signs
 from app.services.ppe_violation_service import open_ppe_violation_service
 from app.services.zone_service import (
     COORD_SCALE,
@@ -368,7 +368,8 @@ class PPEDetector:
         zones = load_zones(video_name)
         logger.info(f"[ZONE] Loaded {len(zones)} zone(s) for '{video_name}': {[(z.zone_name, z.zone_type, z.camera_zone_view_id) for z in zones]}")
         sign_registry = SignZoneRegistry()
-        sign_classes = list(settings.SIGN_CLASS_ZONE_MAP)
+        ppe_sign_registry = SignPPERegistry()
+        sign_classes = list({*settings.SIGN_CLASS_ZONE_MAP, *settings.SIGN_CLASS_PPE_TRIGGER})
 
         yield StreamEvent(
             event="start",
@@ -552,11 +553,16 @@ class PPEDetector:
 
             if self.sign_model is not None and frame_width and frame_height and frame_index % settings.SIGN_PASS_FRAME_INTERVAL == 0:
                 if settings_state:
-                    pending = settings_state.get("dismissed_signatures", [])
-                    if pending:
+                    pending_zone = settings_state.get("dismissed_signatures", [])
+                    if pending_zone:
                         settings_state["dismissed_signatures"] = []
-                        for sig in pending:
+                        for sig in pending_zone:
                             sign_registry.dismiss(sig)
+                    pending_ppe = settings_state.get("dismissed_ppe_signatures", [])
+                    if pending_ppe:
+                        settings_state["dismissed_ppe_signatures"] = []
+                        for sig in pending_ppe:
+                            ppe_sign_registry.dismiss(sig)
                 sign_results = self.sign_model.predict(
                     frame,
                     conf=settings.SIGN_CONFIDENCE_THRESHOLD,
@@ -568,6 +574,8 @@ class PPEDetector:
                     signs = extract_signs(sign_results[0])
                     for suggestion in sign_registry.update(signs, frame_width, frame_height, frame_index):
                         yield StreamEvent(event="zone_suggestion", frame_index=frame_index, data=suggestion.model_dump())
+                    for suggestion in ppe_sign_registry.update(signs, frame_width, frame_height, frame_index):
+                        yield StreamEvent(event="ppe_suggestion", frame_index=frame_index, data=suggestion.model_dump())
 
             yield StreamEvent(event="frame", frame_index=frame_index, data={"frames": [f.model_dump() for f in current_frame_overlay], "processed_frames": processed_frames, "frame_width": frame_width, "frame_height": frame_height})
 

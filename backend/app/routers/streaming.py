@@ -25,6 +25,7 @@ async def stream_video_ws(
         "enable_ppe": enable_ppe,
         "enable_zone": enable_zone,
         "dismissed_signatures": [],
+        "dismissed_ppe_signatures": [],
         "reload_zones": False,
     }
     
@@ -61,6 +62,11 @@ async def stream_video_ws(
                         if sig:
                             settings_state["dismissed_signatures"].append(sig)
                             logger.info(f" [SIGNAL] Queued dismissal for suggestion: {sig}")
+                    elif data.get("event") == "dismiss_ppe_suggestion":
+                        sig = data.get("data", {}).get("suggestion_id")
+                        if sig:
+                            settings_state["dismissed_ppe_signatures"].append(sig)
+                            logger.info(f" [SIGNAL] Queued PPE suggestion dismissal: {sig}")
                     elif data.get("event") == "reload_zones":
                         settings_state["reload_zones"] = True
                         logger.info(" [SIGNAL] Zone reload requested by client")

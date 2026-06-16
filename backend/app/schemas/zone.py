@@ -12,6 +12,13 @@ class ZoneSuggestion(BaseModel):
     frame_index: int
 
 
+class PPESuggestion(BaseModel):
+    suggestion_id: str
+    source_class: str
+    confidence: float
+    frame_index: int
+
+
 class Zone(BaseModel):
     id: Optional[int] = None
     video_name: str

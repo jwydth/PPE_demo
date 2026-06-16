@@ -1,7 +1,7 @@
 # Auto-Zone from Sign Detection — Feature Summary
 
 Branch: `feature/camera-rtsp`  
-Last updated: 2026-06-15
+Last updated: 2026-06-16
 
 ---
 
@@ -184,8 +184,86 @@ python scripts/test_sign_detection.py path/to/image.jpg --conf 0.2 --out result.
 
 ## What still needs work / known gaps
 
-- [ ] **Accept during streaming**: if the worker passes through the zone in the window between sign detection and the user clicking Accept, the retroactive check covers ~30 s of history — but if the passage happened earlier it will be missed. Consider lowering `AUTO_ZONE_CONFIRM_FRAMES` so suggestions appear faster.
 - [ ] **No `accept_suggestion` WS message to backend**: the registry marks suggestions as EMITTED (terminal) so they won't re-fire, but the backend never explicitly transitions them to ACCEPTED. This is fine for now but means re-running the same video will re-emit suggestions for the same signs.
-- [ ] **Sign model classes**: currently classes 2 and 3 are mapped. Update `SIGN_CLASS_ZONE_MAP` and `SIGN_CLASS_NAMES` in `.env` to match actual class IDs in your `sign_model.pt`.
-- [ ] **Zone editing after accept**: accepted auto-zones appear in the saved zones list and can be edited/deleted via the existing zone UI.
 - [ ] **Tests for pipeline integration**: `backend/tests/test_auto_zone.py` covers the pure logic (22 tests pass). Pipeline-level tests for hot-reload and retroactive check are not yet written.
+- [ ] **PPE suggestion deduplication across sessions**: dismissed PPE signatures are only tracked for the current stream session. Re-running the same video will re-emit suggestions for the same mandatory signs.
+
+---
+
+## Session 2026-06-16 — Adjustable auto-zone polygon + PPE suggestion from signs
+
+### 1. Auto-zone → adjustable polygon before saving
+
+Accepted zone suggestions are no longer saved immediately. Instead they enter an unsaved "pending" state so the user can adjust the polygon using the existing modify-mode tools (drag vertices, add/remove points, curve edges) before clicking **Save zones**.
+
+**New state:** `pendingAutoZoneIds: Set<string>` in `dashboard-shell.tsx` tracks accepted-but-unsaved auto zones.
+
+**During streaming:** accepting a suggestion does NOT enter drawing mode — the video and tracking overlay stay uninterrupted. An amber banner in the sidebar reads *"N auto-zones accepted — open Configure zones to adjust, then save."*
+
+**Outside streaming:** accepting a suggestion auto-opens the zone config panel in modify mode with the new zone pre-selected.
+
+`persistZones` now also sends `reload_zones` to the WebSocket after saving, so the running pipeline enforces the zone immediately (previously only done in `handleAcceptSuggestion`).
+
+`clearSavedZones` now clears `pendingAutoZoneIds` so the badge count resets correctly.
+
+### 2. PPE suggestion from mandatory signs (classes 0 & 1)
+
+Two new sign classes trigger PPE detection instead of a zone:
+
+| Class | Name | Action |
+|---|---|---|
+| 0 | `M001_MustWearHardHat` | emit `ppe_suggestion` |
+| 1 | `M002_MustWearSafetyVest` | emit `ppe_suggestion` |
+
+**New config settings:**
+```python
+SIGN_CLASS_PPE_TRIGGER: set[int] = {0, 1}
+AUTO_PPE_CONFIRM_FRAMES: int = 1   # fires on first reliable detection (vs 3 for zones)
+SIGN_CLASS_NAMES updated to include classes 0 and 1
+```
+
+**Backend changes:**
+- `PPESuggestion` pydantic model added to `schemas/zone.py`.
+- `"ppe_suggestion"` added to `StreamEvent.event` Literal in `schemas/streaming.py`.
+- `SignPPERegistry` class added to `auto_zone.py` — mirrors `SignZoneRegistry` but emits `PPESuggestion` and uses `AUTO_PPE_CONFIRM_FRAMES`.
+- `extract_signs()` now returns **all** sign classes (zone + PPE trigger). `SignZoneRegistry.update()` guards against non-zone classes with an early `continue` to prevent `KeyError`.
+- `ppe_detector.py` initialises `SignPPERegistry`, merges sign class lists for YOLO `classes=` filter, emits `ppe_suggestion` events unconditionally (frontend decides whether to show).
+- `streaming.py` handles `dismiss_ppe_suggestion` client messages; `dismissed_ppe_signatures` added to `settings_state`.
+
+**Frontend changes:**
+- `PPESuggestion` interface added to `src/types/zone.ts`.
+- `PPESuggestionBanner` component in `video-tracking-overlay.tsx` — yellow banner at top of video with **Enable PPE ✓** / **Dismiss ✕** buttons.
+- Banner is only shown when `ppeEnabled` is `false` (`suggestions={ppeEnabled ? [] : Object.values(ppeSuggestions)}`).
+- Clicking **Enable PPE** calls `setPpeEnabled(true)` which triggers the existing `useEffect` to send `update_settings` via WebSocket — the PPE toggle on screen turns on immediately.
+- `SIGN_HUMAN_NAMES` map updated with entries for classes 0 and 1.
+
+**`test_sign_detection.py` updated** to include classes 0 and 1 so the script can test mandatory-PPE sign images.
+
+### 3. Zone save / clear button feedback (spinners)
+
+- `handleSaveZones` and `clearSavedZones` use `Promise.all([action, minDelay(600 ms)])` to guarantee the spinner is visible for at least 600 ms.
+- Buttons use `pointer-events-none` during in-flight state instead of `disabled:opacity-50` so the spinner stays fully visible (previously the `disabled:opacity-50` made the spinner hard to see).
+- `zoneActionState` transitions: `idle → saving/clearing → saved/cleared → idle` (2 s after completion).
+
+### 4. Zone config buttons enabled during active streaming
+
+All zone config buttons (`Finish zone`, `Clear draft`, `Save zones`, `Clear zones`, `Configure zones`) use `phase === "loading" && !isStreaming` as the disabled condition. This allows the user to save or adjust zones while a stream is running without waiting for it to finish.
+
+`addZonePoint` has the same fix so new polygon points can be placed during streaming.
+
+### 5. Streaming video + tracking overlay always visible
+
+`TrackingOverlayLayer` is hidden only when `isDrawing = true` AND `configMode === "draw"` (user is actively clicking to place new polygon points). It remains visible in modify mode and during streaming regardless of zone editing state.
+
+**Root cause of previous breakage:** `handleAcceptSuggestion` was setting `isDrawing = true` during streaming, which removed native video controls and caused the video sync and tracking overlay to stop working.
+
+**Fix:** `handleAcceptSuggestion` only enters drawing mode when `!isStreaming`. During streaming, the accepted zone polygon is shown via a separate SVG guard (`zoneEnabled || isDrawing || pendingAutoZoneIds.size > 0`).
+
+### 6. Bug fixes
+
+| Bug | Fix |
+|---|---|
+| `KeyError: 0` in `SignZoneRegistry.update()` — extract_signs now returns all classes, zone registry saw class 0 | Added `if class_id not in SIGN_CLASS_ZONE_MAP: continue` guard |
+| `ppe_suggestion` rejected by Pydantic — not in `StreamEvent.event` Literal | Added `"ppe_suggestion"` to the Literal in `schemas/streaming.py` |
+| PPE suggestion never fired — `extract_signs` filtered by `SIGN_CLASS_ZONE_MAP` only | `extract_signs` now uses union of `SIGN_CLASS_ZONE_MAP` and `SIGN_CLASS_PPE_TRIGGER` |
+| `pendingAutoZoneIds` accumulated across clear — badge count wrong after clearing zones | `clearSavedZones` now also calls `setPendingAutoZoneIds(new Set())` |

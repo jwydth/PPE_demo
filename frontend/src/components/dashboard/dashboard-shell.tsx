@@ -2,8 +2,10 @@
 
 import {
   ArrowUpRight,
+  Check,
   ChevronDown,
   Factory,
+  Loader2,
   Maximize2,
   Pause,
   Play,
@@ -27,7 +29,7 @@ import {
 } from "@/lib/ppe-api";
 import { BoundingBoxView } from "@/components/ppe/bounding-box-view";
 import { FileUpload } from "@/components/ppe/file-upload";
-import { SuggestionOverlayLayer, TrackingOverlayLayer } from "@/components/ppe/video-tracking-overlay";
+import { PPESuggestionBanner, SuggestionOverlayLayer, TrackingOverlayLayer } from "@/components/ppe/video-tracking-overlay";
 import {
   DetectionSummary,
   EmptyState,
@@ -43,7 +45,7 @@ import {
   VideoProcessingResponse,
   ViolationReport,
 } from "@/types/detection";
-import { Point2D, ZoneConfiguration, ZoneSuggestion, ZoneType, ZoneViolation } from "@/types/zone";
+import { Point2D, PPESuggestion, ZoneConfiguration, ZoneSuggestion, ZoneType, ZoneViolation } from "@/types/zone";
 import {
   appActions,
   navigation,
@@ -267,6 +269,8 @@ function CameraPanel() {
   const [zoneType, setZoneType] = useState<ZoneType>("RESTRICTED");
   const [dwellThresholdSeconds, setDwellThresholdSeconds] = useState(1.5);
   const [status, setStatus] = useState("");
+  const [pendingAutoZoneIds, setPendingAutoZoneIds] = useState<Set<string>>(new Set());
+  const [zoneActionState, setZoneActionState] = useState<"idle" | "saving" | "saved" | "clearing" | "cleared" | "error">("idle");
 
   const [streamData, setStreamData] = useState<{
     summary: any | null;
@@ -287,6 +291,7 @@ function CameraPanel() {
   });
   const [isStreaming, setIsStreaming] = useState(false);
   const [zoneSuggestions, setZoneSuggestions] = useState<Record<string, ZoneSuggestion>>({});
+  const [ppeSuggestions, setPpeSuggestions] = useState<Record<string, PPESuggestion>>({});
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -385,6 +390,8 @@ function CameraPanel() {
           }));
         } else if (eventType === "zone_suggestion") {
           setZoneSuggestions((prev) => ({ ...prev, [data.suggestion_id]: data as ZoneSuggestion }));
+        } else if (eventType === "ppe_suggestion") {
+          setPpeSuggestions((prev) => ({ ...prev, [data.suggestion_id]: data as PPESuggestion }));
         } else if (eventType === "summary") {
           setStreamData((prev) => ({ ...prev, summary: data }));
           setPhase("done");
@@ -611,7 +618,7 @@ function CameraPanel() {
   };
 
   const addZonePoint = (event: React.MouseEvent<HTMLDivElement>) => {
-    if (!surfaceElement || phase === "loading" || !isDrawing) return;
+    if (!surfaceElement || (phase === "loading" && !isStreaming) || !isDrawing) return;
     const rect = surfaceElement.getBoundingClientRect();
     setDraftPoints((current) => [
       ...current,
@@ -662,7 +669,11 @@ function CameraPanel() {
       })),
     );
     setDraftPoints([]);
+    setPendingAutoZoneIds(new Set());
     setStatus(`Saved ${zonesToPersist.length} zone(s) for this camera video.`);
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ event: "reload_zones" }));
+    }
   };
 
   const handleDismissSuggestion = (suggestion: ZoneSuggestion) => {
@@ -674,43 +685,78 @@ function CameraPanel() {
     setZoneSuggestions(({ [suggestion.suggestion_id]: _, ...rest }) => rest);
   };
 
-  const handleAcceptSuggestion = async (suggestion: ZoneSuggestion, name: string) => {
+  const handleEnablePPESuggestion = (suggestion: PPESuggestion) => {
+    setPpeSuggestions(({ [suggestion.suggestion_id]: _, ...rest }) => rest);
+    setPpeEnabled(true);
+  };
+
+  const handleDismissPPESuggestion = (suggestion: PPESuggestion) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({ event: "dismiss_ppe_suggestion", data: { suggestion_id: suggestion.suggestion_id } }),
+      );
+    }
+    setPpeSuggestions(({ [suggestion.suggestion_id]: _, ...rest }) => rest);
+  };
+
+  const handleAcceptSuggestion = (suggestion: ZoneSuggestion, name: string) => {
     if (!file) return;
-    // Remove from UI immediately so the popup closes regardless of save outcome
     setZoneSuggestions(({ [suggestion.suggestion_id]: _, ...rest }) => rest);
     const draft: DraftZone = {
       id: crypto.randomUUID(),
       name,
       type: suggestion.zone_type,
-      // RESTRICTED: fire after any brief entry (0.5 s). WALKWAY: worker must leave for 3 s.
       dwellThresholdSeconds: suggestion.zone_type === "RESTRICTED" ? 0.5 : 3,
       points: suggestion.normalized_coordinates,
     };
+    setZonesForVideo((prev) => [...prev, draft]);
+    setPendingAutoZoneIds((prev) => new Set([...prev, draft.id]));
+    if (!isStreaming) {
+      // Only enter editing mode when not streaming — entering drawing mode
+      // during streaming disrupts video playback and hides the tracking overlay.
+      setIsDrawing(true);
+      setConfigMode("modify");
+      setSelectedZoneId(draft.id);
+      setZoneName(draft.name);
+      setZoneType(draft.type);
+    }
+  };
+
+  const handleSaveZones = async () => {
+    setZoneActionState("saving");
     try {
-      await saveZone(toBackendZone(draft, file.name));
-      await loadSavedZones(file.name);
-      // Signal the running pipeline to reload zones so it enforces the new zone immediately
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ event: "reload_zones" }));
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not save suggested zone");
+      await Promise.all([persistZones(), new Promise((r) => setTimeout(r, 600))]);
+      setZoneActionState("saved");
+    } catch {
+      setZoneActionState("error");
+    } finally {
+      setTimeout(() => setZoneActionState("idle"), 2000);
     }
   };
 
   const clearSavedZones = async () => {
     if (!file || !isVideo) return;
     setPhase("loading");
+    setZoneActionState("clearing");
     setError("");
     try {
-      await deleteZonesForVideo(file.name);
-      setZonesForVideo([]);
-      setDraftPoints([]);
-      setStatus("Cleared saved zones for this camera video.");
+      await Promise.all([
+        (async () => {
+          await deleteZonesForVideo(file.name);
+          setZonesForVideo([]);
+          setDraftPoints([]);
+          setPendingAutoZoneIds(new Set());
+          setStatus("Cleared saved zones for this camera video.");
+        })(),
+        new Promise((r) => setTimeout(r, 600)),
+      ]);
+      setZoneActionState("cleared");
     } catch (err) {
+      setZoneActionState("error");
       setError(err instanceof Error ? err.message : "Could not clear saved zones");
     } finally {
       setPhase("idle");
+      setTimeout(() => setZoneActionState("idle"), 2000);
     }
   };
 
@@ -1035,7 +1081,7 @@ function CameraPanel() {
                         isDrawing ? "pointer-events-none" : ""
                       }`}
                     />
-                    {zoneEnabled || isDrawing ? (
+                    {zoneEnabled || isDrawing || pendingAutoZoneIds.size > 0 ? (
                       <svg
                         onClick={handleSurfaceClick}
                         className={`absolute inset-0 h-full w-full ${
@@ -1159,6 +1205,11 @@ function CameraPanel() {
                       onAccept={(s, name) => void handleAcceptSuggestion(s, name)}
                       onDismiss={handleDismissSuggestion}
                     />
+                    <PPESuggestionBanner
+                      suggestions={ppeEnabled ? [] : Object.values(ppeSuggestions)}
+                      onEnable={handleEnablePPESuggestion}
+                      onDismiss={handleDismissPPESuggestion}
+                    />
                   </div>
                   {isDrawing ? (
                     <p className="mt-2 text-xs text-slate-400">
@@ -1222,6 +1273,12 @@ function CameraPanel() {
                           Modify zones
                         </button>
                       </div>
+                      {pendingAutoZoneIds.size > 0 && (
+                        <div className="rounded-md border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-xs text-amber-200">
+                          Auto-zone accepted — adjust the vertices, then click{" "}
+                          <span className="font-semibold">Save zones</span> to confirm.
+                        </div>
+                      )}
                       {configMode === "modify" && selectedZoneId && (
                         <div className="grid grid-cols-2 gap-2">
                           <button
@@ -1299,7 +1356,7 @@ function CameraPanel() {
                         <button
                           type="button"
                           onClick={finishZone}
-                          disabled={draftPoints.length < 3 || phase === "loading"}
+                          disabled={draftPoints.length < 3 || (phase === "loading" && !isStreaming)}
                           className="rounded-md bg-lime-200 px-3 py-2 text-sm font-semibold text-green-950 disabled:opacity-50"
                         >
                           Finish zone
@@ -1307,7 +1364,7 @@ function CameraPanel() {
                         <button
                           type="button"
                           onClick={() => setDraftPoints([])}
-                          disabled={phase === "loading" || (configMode === "modify" && !selectedZoneId)}
+                          disabled={(phase === "loading" && !isStreaming) || (configMode === "modify" && !selectedZoneId)}
                           className="rounded-md border border-slate-700 px-3 py-2 text-sm font-semibold text-slate-200 disabled:opacity-50"
                         >
                           Clear draft
@@ -1316,19 +1373,47 @@ function CameraPanel() {
                       <div className="grid grid-cols-2 gap-2">
                         <button
                           type="button"
-                          onClick={() => void persistZones()}
-                          disabled={phase === "loading"}
-                          className="rounded-md border border-lime-200 px-3 py-2 text-sm font-semibold text-lime-200 disabled:opacity-50"
+                          onClick={() => void handleSaveZones()}
+                          disabled={phase === "loading" && !isStreaming}
+                          className={`flex min-w-0 items-center justify-center gap-1.5 rounded-md border px-3 py-2 text-sm font-semibold transition-colors disabled:opacity-50 ${
+                            zoneActionState === "saving"
+                              ? "pointer-events-none border-lime-200 text-lime-200"
+                              : zoneActionState === "saved"
+                                ? "pointer-events-none border-emerald-400 text-emerald-300"
+                                : zoneActionState === "error"
+                                  ? "border-red-400 text-red-300"
+                                  : "border-lime-200 text-lime-200"
+                          }`}
                         >
-                          Save zones
+                          {zoneActionState === "saving" ? (
+                            <><Loader2 className="size-3.5 animate-spin" /><span>Saving…</span></>
+                          ) : zoneActionState === "saved" ? (
+                            <><Check className="size-3.5" /><span>Saved</span></>
+                          ) : zoneActionState === "error" ? (
+                            <span>Save failed</span>
+                          ) : (
+                            <span>Save zones</span>
+                          )}
                         </button>
                         <button
                           type="button"
                           onClick={() => void clearSavedZones()}
-                          disabled={phase === "loading"}
-                          className="rounded-md border border-red-400 px-3 py-2 text-sm font-semibold text-red-200 disabled:opacity-50"
+                          disabled={phase === "loading" && !isStreaming}
+                          className={`flex min-w-0 items-center justify-center gap-1.5 rounded-md border px-3 py-2 text-sm font-semibold transition-colors disabled:opacity-50 ${
+                            zoneActionState === "clearing"
+                              ? "pointer-events-none border-red-400 text-red-200"
+                              : zoneActionState === "cleared"
+                                ? "pointer-events-none border-emerald-400 text-emerald-300"
+                                : "border-red-400 text-red-200"
+                          }`}
                         >
-                          Clear zones
+                          {zoneActionState === "clearing" ? (
+                            <><Loader2 className="size-3.5 animate-spin" /><span>Clearing…</span></>
+                          ) : zoneActionState === "cleared" ? (
+                            <><Check className="size-3.5" /><span>Cleared</span></>
+                          ) : (
+                            <span>Clear zones</span>
+                          )}
                         </button>
                       </div>
                       <button
@@ -1344,17 +1429,23 @@ function CameraPanel() {
                     </>
                   ) : (
                     <div className="grid gap-3">
-                      {!zoneEnabled ? (
+                      {pendingAutoZoneIds.size > 0 && (
+                        <div className="rounded-md border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-xs text-amber-200">
+                          {pendingAutoZoneIds.size} auto-zone{pendingAutoZoneIds.size > 1 ? "s" : ""} accepted — open{" "}
+                          <span className="font-semibold">Configure zones</span> to adjust, then save.
+                        </div>
+                      )}
+                      {!zoneEnabled && pendingAutoZoneIds.size === 0 ? (
                         <EmptyState text="Enable Zone Monitoring to view saved areas or start drawing." />
-                      ) : (
+                      ) : pendingAutoZoneIds.size === 0 ? (
                         <div className="rounded-md bg-slate-900 p-3 text-sm text-slate-300">
                           Viewing {zonesForVideo.length} saved zone(s).
                         </div>
-                      )}
+                      ) : null}
                       <button
                         type="button"
                         onClick={() => setIsDrawing(true)}
-                        disabled={!isVideo || phase === "loading"}
+                        disabled={!isVideo || (phase === "loading" && !isStreaming)}
                         className="w-full rounded-md bg-lime-200 py-2 text-sm font-semibold text-green-950 hover:bg-lime-100 disabled:opacity-50"
                       >
                         Configure zones
