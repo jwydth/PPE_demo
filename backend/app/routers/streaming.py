@@ -30,18 +30,22 @@ async def stream_video_ws(
     }
     
     # Resolve the video path
-    video_path = UPLOAD_DIR / video_name
-    if not video_path.exists():
-        root_path = Path(video_name)
-        if root_path.exists():
-            video_path = root_path
+    is_url = video_name.startswith(("rtsp://", "rtmp://", "http://", "https://"))
+    if is_url:
+        video_path = video_name
+    else:
+        video_path = UPLOAD_DIR / video_name
+        if not video_path.exists():
+            root_path = Path(video_name)
+            if root_path.exists():
+                video_path = root_path
 
-    if not video_path.exists():
+    if not is_url and not Path(video_path).exists():
         await websocket.send_json({"event": "error", "data": {"message": f"Video {video_name} not found"}})
         await websocket.close()
         return
 
-    logger.info(f"Starting simulated stream for {video_name} (initial ppe={enable_ppe}, zone={enable_zone})")
+    logger.info(f"Starting {'live' if is_url else 'simulated'} stream for {video_name} (initial ppe={enable_ppe}, zone={enable_zone})")
     
     # Task to handle incoming setting updates
     async def listen_for_settings():

@@ -269,7 +269,7 @@ class PPEDetector:
 
     async def stream_video(
         self,
-        video_path: Path,
+        video_path: str | Path,
         video_name: str,
         *,
         enable_ppe: bool = True,
@@ -288,7 +288,7 @@ class PPEDetector:
 
         stride = max(1, settings.VIDEO_FRAME_STRIDE)
 
-        for event in self._real_video_pipeline(
+        async for event in self._real_video_pipeline(
             video_path,
             video_name,
             stride=stride,
@@ -300,9 +300,9 @@ class PPEDetector:
                 await asyncio.sleep(0)  # yield to event loop (settings listener etc.) without throttling
             yield event
 
-    def _real_video_pipeline(
+    async def _real_video_pipeline(
         self,
-        video_path: Path,
+        video_path: str | Path,
         video_name: str,
         stride: int,
         *,
@@ -312,6 +312,7 @@ class PPEDetector:
     ):
         """Unified internal generator for video processing."""
         fps, total_frames = _video_metadata(video_path)
+        is_stream = total_frames <= 0
         start_wall_time = time.perf_counter()
         cases: list[ViolationCase] = []
         workers: list[WorkerState] = []
@@ -376,8 +377,16 @@ class PPEDetector:
             data={"video_name": video_name, "fps": round(fps, 2), "total_frames": total_frames},
         )
 
+        # Use TCP for RTSP streams to prevent 'Waiting for stream' timeouts
+        source_str = str(video_path)
+        if is_stream and source_str.startswith("rtsp://"):
+            # Ultralytics track() uses cv2/ffmpeg; setting the env var again 
+            # ensures it's picked up by the child processes/threads if any.
+            import os
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+
         results = self.model.track(
-            source=str(video_path),
+            source=source_str,
             stream=True,
             persist=True,
             conf=settings.CONFIDENCE_THRESHOLD,
@@ -386,9 +395,11 @@ class PPEDetector:
             vid_stride=stride,
             device=self.device,
             verbose=False,
+            stream_buffer=True,  # Use threaded reader for stable RTSP ingestion
         )
 
         for processed_frames, result in enumerate(results, start=1):
+            await asyncio.sleep(0.01)  # Critical: yield to event loop to keep WebSocket alive
             frame_index = (processed_frames - 1) * stride
             curr_ppe, curr_zone = get_flags()
 
@@ -577,7 +588,17 @@ class PPEDetector:
                     for suggestion in ppe_sign_registry.update(signs, frame_width, frame_height, frame_index):
                         yield StreamEvent(event="ppe_suggestion", frame_index=frame_index, data=suggestion.model_dump())
 
-            yield StreamEvent(event="frame", frame_index=frame_index, data={"frames": [f.model_dump() for f in current_frame_overlay], "processed_frames": processed_frames, "frame_width": frame_width, "frame_height": frame_height})
+            yield StreamEvent(
+                event="frame",
+                frame_index=frame_index,
+                data={
+                    "frames": [f.model_dump() for f in current_frame_overlay],
+                    "processed_frames": processed_frames,
+                    "frame_width": frame_width,
+                    "frame_height": frame_height
+                },
+                image_base64=_encode_frame_to_base64(frame) if is_stream else None
+            )
 
         elapsed_ms = (time.perf_counter() - start_wall_time) * 1000
         yield StreamEvent(
@@ -1489,6 +1510,24 @@ def _ordered_missing(missing: set[str]) -> list[str]:
     return [label for label in ("Helmet", "Vest") if label in missing]
 
 
+def _encode_frame_to_base64(frame: np.ndarray) -> str:
+    import cv2
+    import base64
+    
+    # Resize to 640px width while maintaining aspect ratio to reduce payload size
+    h, w = frame.shape[:2]
+    target_w = 640
+    if w > target_w:
+        target_h = int(h * (target_w / w))
+        display_frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
+    else:
+        display_frame = frame
+
+    # Lower JPEG quality (e.g., 60) to significantly reduce string size
+    _, buffer = cv2.imencode(".jpg", display_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+    return base64.b64encode(buffer).decode("utf-8")
+
+
 def _extract_result_boxes(result) -> tuple[list[dict], list[dict], list[dict]]:
     persons: list[dict] = []
     helmets: list[dict] = []
@@ -1811,22 +1850,38 @@ def save_violation(
         )
 
 
-def _video_metadata(video_path: Path) -> tuple[float, int]:
+def _video_metadata(video_path: str | Path) -> tuple[float, int]:
     import cv2
 
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise ValueError("Could not decode the uploaded video.")
+    path_str = str(video_path)
+    is_stream = path_str.startswith(("rtsp://", "rtmp://", "http://", "https://"))
 
-    # Try to read the first frame to ensure the codec is supported
-    ret, frame = cap.read()
-    if not ret or frame is None:
-        cap.release()
-        raise ValueError(
-            "Video file opened but frames could not be read. The codec might be unsupported by the server."
-        )
+    # Force TCP for RTSP to avoid UDP packet loss/hangs
+    if is_stream and path_str.startswith("rtsp://"):
+        import os
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+
+    cap = cv2.VideoCapture(path_str)
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video source: {path_str}")
+
+    # For files, ensure we can read a frame. For streams, cap.isOpened() + 
+    # CAP_PROP_FPS is usually enough and faster.
+    if not is_stream:
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            cap.release()
+            raise ValueError(
+                f"Video source {path_str} opened but frames could not be read."
+            )
 
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+    if is_stream and fps <= 0:
+        fps = 30.0  # Default for streams if not detected
+
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if is_stream:
+        total_frames = 0  # Streams don't have a fixed frame count
+
     cap.release()
     return fps, total_frames

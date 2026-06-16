@@ -277,6 +277,7 @@ function CameraPanel() {
     reports: ViolationReport[];
     zone_violations: ZoneViolation[];
     tracking_overlay: TrackingOverlay;
+    live_frame: string | null;
   }>({
     summary: null,
     reports: [],
@@ -288,8 +289,11 @@ function CameraPanel() {
       frame_height: 1000,
       frames: [],
     },
+    live_frame: null,
   });
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isLive, setIsLive] = useState(false);
+  const [liveUrl, setLiveUrl] = useState("rtsp://localhost:8554/mystream");
   const [zoneSuggestions, setZoneSuggestions] = useState<Record<string, ZoneSuggestion>>({});
   const [ppeSuggestions, setPpeSuggestions] = useState<Record<string, PPESuggestion>>({});
   const wsRef = useRef<WebSocket | null>(null);
@@ -314,16 +318,14 @@ function CameraPanel() {
     };
   }, []);
 
-  const startStreaming = async (videoFile: File) => {
+  const startStreaming = async (videoName: string, isAutoLive = false) => {
     try {
       setPhase("loading");
-      setStatus("Uploading video...");
-      const { filename } = await uploadVideo(videoFile);
-      setStatus("Video uploaded. Initializing real-time stream...");
+      setStatus(isAutoLive ? "Connecting to live stream..." : "Initializing real-time stream...");
 
       const wsUrlBase = API_URL.replace(/^http/, "ws");
       const wsUrl = `${wsUrlBase}/ws/stream?video_name=${encodeURIComponent(
-        filename,
+        videoName,
       )}&enable_ppe=${ppeEnabled}&enable_zone=${zoneEnabled}`;
 
       if (wsRef.current) wsRef.current.close();
@@ -337,35 +339,45 @@ function CameraPanel() {
         tracking_overlay: {
           fps: 30,
           stride: 1,
-          frame_width: null,
-          frame_height: null,
+          frame_width: 1000,
+          frame_height: 1000,
           frames: [],
         },
+        live_frame: null,
       });
       setZoneSuggestions({});
       setIsStreaming(true);
+      setIsLive(isAutoLive);
 
       ws.onmessage = (event) => {
         const msg = JSON.parse(event.data);
-        const { event: eventType, data, frame_index } = msg;
+        const { event: eventType, data, frame_index, image_base64 } = msg;
 
         if (eventType === "start") {
           setStreamData((prev) => ({
             ...prev,
             tracking_overlay: { ...prev.tracking_overlay, fps: data.fps },
           }));
-          setStatus("Buffering inference…");
-          // Don't play yet — wait until inference has built a lead (see buffer effect below)
+          setStatus(isAutoLive ? "Stream connected." : "Buffering inference…");
         } else if (eventType === "frame") {
-          setStreamData((prev) => ({
-            ...prev,
-            tracking_overlay: {
+          setStreamData((prev) => {
+            const nextOverlay = {
               ...prev.tracking_overlay,
-              frames: [...prev.tracking_overlay.frames, ...data.frames],
+              frames: isAutoLive ? data.frames : [...prev.tracking_overlay.frames, ...data.frames],
               frame_width: data.frame_width || prev.tracking_overlay.frame_width,
               frame_height: data.frame_height || prev.tracking_overlay.frame_height,
-            },
-          }));
+            };
+
+            if (isAutoLive) {
+              setCurrentVideoTime(frame_index / (nextOverlay.fps || 30));
+            }
+
+            return {
+              ...prev,
+              live_frame: image_base64 ? `data:image/jpeg;base64,${image_base64}` : prev.live_frame,
+              tracking_overlay: nextOverlay,
+            };
+          });
         } else if (eventType === "violation") {
           setStreamData((prev) => ({
             ...prev,
@@ -403,11 +415,16 @@ function CameraPanel() {
         }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         setIsStreaming(false);
+        console.log("WebSocket closed:", event.code, event.reason);
+        if (!event.wasClean) {
+          setError(`Stream disconnected unexpectedly (Code: ${event.code})`);
+        }
       };
-      ws.onerror = () => {
-        setError("WebSocket connection failed.");
+      ws.onerror = (event) => {
+        console.error("WebSocket error:", event);
+        setError("WebSocket connection failed. Check browser console for security/CORS errors.");
         setPhase("error");
       };
     } catch (err) {
@@ -415,6 +432,12 @@ function CameraPanel() {
       setPhase("error");
     }
   };
+
+  useEffect(() => {
+    // Automatically connect to RTSP stream on mount
+    void loadSavedZones(liveUrl);
+    void startStreaming(liveUrl, true);
+  }, []);
 
   useEffect(() => {
     setDwellThresholdSeconds(zoneType === "RESTRICTED" ? 1.5 : 3);
@@ -927,18 +950,18 @@ function CameraPanel() {
   }, [selectedZoneId, configMode, isDrawing]);
 
   const runSelectedModels = async () => {
-    if (!file) return;
+    if (!isLive && !file) return;
     if (!ppeEnabled && !zoneEnabled) {
       setError("Enable at least one detection model before running analysis.");
       setPhase("error");
       return;
     }
-    if (!isVideo && !ppeEnabled) {
+    if (!isLive && !isVideo && !ppeEnabled) {
       setError("Image uploads only support PPE detection.");
       setPhase("error");
       return;
     }
-    if (zoneEnabled && isVideo && zonesReadyToSave.length === 0 && zonesForVideo.length === 0) {
+    if (zoneEnabled && (isLive || isVideo) && zonesReadyToSave.length === 0 && zonesForVideo.length === 0) {
       setError("Draw or load at least one zone before running Zone Monitoring.");
       setPhase("error");
       return;
@@ -950,13 +973,18 @@ function CameraPanel() {
     setPhase("loading");
     setIsDrawing(false);
     try {
-      if (isVideo) {
+      if (isLive) {
         if (zoneEnabled && zonesReadyToSave.length > 0) {
           await persistZones(zonesReadyToSave);
         }
-        await startStreaming(file);
+        await startStreaming(liveUrl, true);
+      } else if (isVideo) {
+        if (zoneEnabled && zonesReadyToSave.length > 0) {
+          await persistZones(zonesReadyToSave);
+        }
+        await startStreaming(file!.name);
       } else {
-        setImageResult(await analyzeImage(file));
+        setImageResult(await analyzeImage(file!));
         setPhase("done");
       }
     } catch (err) {
@@ -997,9 +1025,13 @@ function CameraPanel() {
     <section className="h-fit overflow-hidden rounded-md border border-slate-300 bg-slate-950 shadow-md">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
         <div>
-          <p className="text-sm font-semibold text-white">Packaging Line 1 - Uploaded Feed</p>
+          <p className="text-sm font-semibold text-white">
+            {isLive ? "Live Camera Feed" : "Packaging Line 1 - Uploaded Feed"}
+          </p>
           <p className="text-xs text-slate-400">
-            Upload a photo or CCTV clip, then choose which detection models run on this camera
+            {isLive
+              ? `Connected to ${liveUrl}`
+              : "Upload a photo or CCTV clip, then choose which detection models run on this camera"}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -1008,7 +1040,7 @@ function CameraPanel() {
       </div>
 
       <div className="grid gap-4 p-4">
-        {!file ? (
+        {!isLive && !file ? (
           <FileUpload
             label="Upload camera image or video"
             helper="This replaces the live stream for now. Select model detections after the file is loaded."
@@ -1016,22 +1048,24 @@ function CameraPanel() {
           />
         ) : null}
 
-        {file ? (
+        {isLive || file ? (
           <div className="grid gap-4 rounded-md border border-slate-800 bg-slate-900 p-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="min-w-0">
-                <p className="truncate text-sm font-semibold text-white">{file.name}</p>
+                <p className="truncate text-sm font-semibold text-white">{isLive ? liveUrl : file?.name}</p>
                 <p className="text-xs text-slate-400">
-                  {isVideo ? "Video feed simulation" : "Image frame simulation"}
+                  {isLive ? "Live RTSP stream" : isVideo ? "Video feed simulation" : "Image frame simulation"}
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={reset}
-                className="rounded-md border border-slate-700 px-3 py-2 text-sm font-semibold text-slate-200 transition hover:bg-white/10"
-              >
-                Replace file
-              </button>
+              {!isLive && (
+                <button
+                  type="button"
+                  onClick={reset}
+                  className="rounded-md border border-slate-700 px-3 py-2 text-sm font-semibold text-slate-200 transition hover:bg-white/10"
+                >
+                  Replace file
+                </button>
+              )}
             </div>
 
             <div className="grid gap-2 sm:grid-cols-2">
@@ -1044,13 +1078,13 @@ function CameraPanel() {
               <ModelToggle
                 label="Zone Monitoring"
                 description="Restricted and walkway zones"
-                enabled={zoneEnabled && isVideo}
-                disabled={!isVideo}
+                enabled={zoneEnabled && (isLive || isVideo)}
+                disabled={!isLive && !isVideo}
                 onToggle={() => setZoneEnabled((current) => !current)}
               />
             </div>
 
-            {isVideo && videoUrl ? (
+            {(isLive || (isVideo && videoUrl)) ? (
               <div className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_340px]">
                 <div>
                   <div
@@ -1061,26 +1095,38 @@ function CameraPanel() {
                     className="relative aspect-video overflow-hidden rounded-md border border-slate-800 bg-black"
                     style={{ aspectRatio: feedAspectRatio }}
                   >
-                    <video
-                      ref={videoRef}
-                      src={videoUrl}
-                      controls={!isDrawing}
-                      muted
-                      playsInline
-                      onPlay={() => {
-                        setIsPlaying(true);
-                        setCurrentVideoTime(videoRef.current?.currentTime ?? 0);
-                      }}
-                      onPause={() => {
-                        setIsPlaying(false);
-                        setCurrentVideoTime(videoRef.current?.currentTime ?? 0);
-                      }}
-                      onSeeked={() => setCurrentVideoTime(videoRef.current?.currentTime ?? 0)}
-                      onTimeUpdate={() => setCurrentVideoTime(videoRef.current?.currentTime ?? 0)}
-                      className={`absolute inset-0 h-full w-full object-contain ${
-                        isDrawing ? "pointer-events-none" : ""
-                      }`}
-                    />
+                    {isLive && streamData.live_frame ? (
+                      <img
+                        src={streamData.live_frame}
+                        alt="Live stream"
+                        className="absolute inset-0 h-full w-full object-contain"
+                      />
+                    ) : videoUrl ? (
+                      <video
+                        ref={videoRef}
+                        src={videoUrl}
+                        controls={!isDrawing}
+                        muted
+                        playsInline
+                        onPlay={() => {
+                          setIsPlaying(true);
+                          setCurrentVideoTime(videoRef.current?.currentTime ?? 0);
+                        }}
+                        onPause={() => {
+                          setIsPlaying(false);
+                          setCurrentVideoTime(videoRef.current?.currentTime ?? 0);
+                        }}
+                        onSeeked={() => setCurrentVideoTime(videoRef.current?.currentTime ?? 0)}
+                        onTimeUpdate={() => setCurrentVideoTime(videoRef.current?.currentTime ?? 0)}
+                        className={`absolute inset-0 h-full w-full object-contain ${
+                          isDrawing ? "pointer-events-none" : ""
+                        }`}
+                      />
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center text-slate-500">
+                        <Loader2 className="size-8 animate-spin" />
+                      </div>
+                    )}
                     {zoneEnabled || isDrawing || pendingAutoZoneIds.size > 0 ? (
                       <svg
                         onClick={handleSurfaceClick}
