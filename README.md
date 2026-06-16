@@ -135,7 +135,7 @@ MINIO_ACCESS_KEY=minioadmin
 MINIO_SECRET_KEY=minioadmin
 MINIO_BUCKET_NAME=safety-monitoring-evidence
 MINIO_SECURE=false
-MODEL_PATH=weights/ppe_v4.pt
+MODEL_PATH=weights/ppe_v5.pt
 INFERENCE_DEVICE=auto
 ```
 
@@ -157,7 +157,7 @@ torch==2.12.0+cu132
 torchvision==0.27.0+cu132
 ultralytics==8.4.58
 torch CUDA build == 13.2
-MODEL_PATH=weights/ppe_v4.pt
+MODEL_PATH=weights/ppe_v5.pt
 INFERENCE_DEVICE=auto
 ```
 
