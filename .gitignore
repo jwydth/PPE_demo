@@ -12,3 +12,4 @@ backend/.venv
 backend/venv
 video_debug.log
 docker-compose.yml
+videos/*

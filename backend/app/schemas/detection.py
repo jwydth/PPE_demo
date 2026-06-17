@@ -33,6 +33,8 @@ class PersonResult(BaseModel):
     track_id: Optional[int] = None
     bbox: BoundingBox
     confidence: float
+    role: Literal["worker", "janitor"] | None = None
+    uniform_type: Literal["vest", "cleaning_coverall"] | None = None
     equipment: List[EquipmentStatus]
     compliant: bool
 
@@ -68,6 +70,8 @@ class TrackingOverlayFrame(BaseModel):
     person_id: int | None
     bbox: BoundingBox
     confidence: float
+    role: Literal["worker", "janitor"] | None = None
+    uniform_type: Literal["vest", "cleaning_coverall"] | None = None
     compliant: bool
     missing_equipment: list[str]
     status: Literal["compliant", "violation", "unknown"]

@@ -44,6 +44,16 @@ logger = logging.getLogger(__name__)
 COMPLIANT_COLOR = "#22c55e"
 VIOLATION_COLOR = "#ef4444"
 PERSON_COLOR = "#f97316"
+HELMET_LABEL = "Helmet"
+VEST_LABEL = "Vest"
+CLEANING_COVERALL_LABEL = "Cleaning Coverall"
+ROLE_UNIFORM_LABEL = "Role Uniform"
+MISSING_LABEL_ORDER = (
+    HELMET_LABEL,
+    VEST_LABEL,
+    CLEANING_COVERALL_LABEL,
+    ROLE_UNIFORM_LABEL,
+)
 
 
 @dataclass
@@ -54,6 +64,9 @@ class ViolationCase:
     last_bbox: BoundingBox
     first_frame: int
     last_frame: int
+    video_name: str | None = None
+    violation_type: str | None = None
+    role: str | None = None
 
 
 @dataclass
@@ -63,8 +76,11 @@ class WorkerState:
     last_frame: int
     last_bbox: BoundingBox
     recent_bboxes: list[BoundingBox]
+    role: str | None = None
+    uniform_type: str | None = None
     helmet_seen_frame: int | None = None
     vest_seen_frame: int | None = None
+    cleaning_coverall_seen_frame: int | None = None
     missing_counts: dict[str, int] | None = None
     reported_missing: set[str] | None = None
     reported: bool = False
@@ -75,7 +91,7 @@ class WorkerState:
 
     def __post_init__(self) -> None:
         if self.missing_counts is None:
-            self.missing_counts = {"Helmet": 0, "Vest": 0}
+            self.missing_counts = _empty_missing_counts()
         if self.reported_missing is None:
             self.reported_missing = set()
         if self.zone_dwell is None:
@@ -120,10 +136,11 @@ def _select_inference_device(preferred_device: str) -> str:
     except Exception:
         return "cpu"
 
-    if not torch.cuda.is_available():
+    torch_cuda = getattr(torch, "cuda", None)
+    if torch_cuda is None or not torch_cuda.is_available():
         return "cpu"
 
-    device_count = torch.cuda.device_count()
+    device_count = torch_cuda.device_count()
     if requested.isdigit():
         device_index = int(requested)
     elif requested.startswith("cuda:"):
@@ -139,6 +156,41 @@ def _select_inference_device(preferred_device: str) -> str:
 
     device = f"cuda:{device_index}"
     return device
+
+
+def _resolve_video_tracker(tracker: str) -> str:
+    configured = (tracker or "").strip()
+    if not configured:
+        logger.warning("VIDEO_TRACKER is empty; falling back to Ultralytics default tracker.")
+        return configured
+
+    tracker_path = Path(configured).expanduser()
+    if tracker_path.is_absolute():
+        if tracker_path.exists():
+            return str(tracker_path)
+        logger.warning(
+            "Configured VIDEO_TRACKER path '%s' does not exist; falling back to '%s'.",
+            tracker_path,
+            configured,
+        )
+        return configured
+
+    backend_relative = BACKEND_DIR / tracker_path
+    if backend_relative.exists():
+        return str(backend_relative.resolve())
+
+    if len(tracker_path.parts) == 1:
+        repo_tracker = BACKEND_DIR / "trackers" / tracker_path
+        if repo_tracker.exists():
+            return str(repo_tracker.resolve())
+
+    logger.warning(
+        "Configured VIDEO_TRACKER '%s' was not found under backend at '%s'; "
+        "falling back to the configured value.",
+        configured,
+        backend_relative,
+    )
+    return configured
 
 
 class PPEDetector:
@@ -237,7 +289,7 @@ class PPEDetector:
         frame_width: int = 1000
         frame_height: int = 1000
 
-        for event in self._real_video_pipeline(
+        for event in self._collect_real_video_events(
             video_path,
             video_name,
             stride=stride,
@@ -266,6 +318,51 @@ class PPEDetector:
                 frames=overlay_frames,
             ),
         )
+
+    def _collect_real_video_events(
+        self,
+        video_path: str | Path,
+        video_name: str,
+        stride: int,
+        *,
+        enable_ppe: bool = True,
+        enable_zone: bool = True,
+    ) -> list[StreamEvent]:
+        async def collect() -> list[StreamEvent]:
+            events: list[StreamEvent] = []
+            async for event in self._real_video_pipeline(
+                video_path,
+                video_name,
+                stride=stride,
+                enable_ppe=enable_ppe,
+                enable_zone=enable_zone,
+            ):
+                events.append(event)
+            return events
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(collect())
+
+        import threading
+
+        result: list[StreamEvent] = []
+        error: BaseException | None = None
+
+        def runner() -> None:
+            nonlocal result, error
+            try:
+                result = asyncio.run(collect())
+            except BaseException as exc:
+                error = exc
+
+        thread = threading.Thread(target=runner)
+        thread.start()
+        thread.join()
+        if error is not None:
+            raise error
+        return result
 
     async def stream_video(
         self,
@@ -386,13 +483,14 @@ class PPEDetector:
             import os
             os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|timeout;3000000"
 
+        tracker_path = _resolve_video_tracker(settings.VIDEO_TRACKER)
         results = self.model.track(
             source=source_str,
             stream=True,
             persist=True,
             conf=settings.CONFIDENCE_THRESHOLD,
-            tracker=settings.VIDEO_TRACKER,
-            classes=[0, 1, 2],
+            tracker=tracker_path,
+            classes=[0, 1, 2, 3],
             vid_stride=stride,
             device=self.device,
             verbose=False,
@@ -415,8 +513,8 @@ class PPEDetector:
 
             if zone_just_enabled and zones and foot_history:
                 logger.info(f"[ZONE] Zone enabled/reloaded at frame {frame_index} — running retroactive check over {len(foot_history)} track(s)")
-                persons_this_frame, _, _ = _extract_result_boxes(result)
-                temp_response = _build_response(persons_this_frame, [], [], 0.0)
+                persons_this_frame, _, _, _ = _extract_result_boxes(result)
+                temp_response = _build_response(persons_this_frame, [], [], [], 0.0)
                 retroactively_reported_workers: set[int] = set()
                 for worker, zone, track_id in _retroactive_zone_check(zones, frame_index):
                     cv_id = zone.camera_zone_view_id
@@ -447,9 +545,9 @@ class PPEDetector:
             if processed_frames % 60 == 1:
                 logger.info(f" [PIPELINE] Frame {frame_index} active state: ppe={curr_ppe}, zone={curr_zone}")
 
-            persons, helmets, vests = _extract_result_boxes(result)
+            persons, helmets, vests, cleaning_coveralls = _extract_result_boxes(result)
 
-            response = _build_response(persons, helmets, vests, 0.0)
+            response = _build_response(persons, helmets, vests, cleaning_coveralls, 0.0)
             frame = result.orig_img.copy()
             frame_height, frame_width = frame.shape[:2]
             used_worker_ids: set[int] = set()
@@ -559,7 +657,7 @@ class PPEDetector:
                 missing_to_report = decision["missing_to_report"]
                 if curr_ppe and missing_to_report:
                     old_case_count = len(cases)
-                    _record_violation_case(cases=cases, frame=frame, person=person, worker=worker, missing=missing_to_report, video_name=video_name, frame_index=frame_index, confirmed_aspect_ratios=confirmed_aspect_ratios)
+                    _record_violation_case(cases=cases, frame=frame, person=person, worker=worker, missing=missing_to_report, video_name=video_name, frame_index=frame_index, worker_match_reason=decision.get("worker_match_reason", "unknown"), confirmed_aspect_ratios=confirmed_aspect_ratios)
                     if len(cases) > old_case_count:
                         yield StreamEvent(event="violation", frame_index=frame_index, data=cases[-1].report.model_dump())
 
@@ -628,9 +726,10 @@ class PPEDetector:
         ]
         helmets = [{**px((0.10, 0.03, 0.35, 0.20)), "conf": 0.94}]
         vests = [{**px((0.08, 0.22, 0.38, 0.68)), "conf": 0.89}]
+        cleaning_coveralls = [{**px((0.57, 0.18, 0.93, 0.88)), "conf": 0.87}]
 
         elapsed_ms = (time.perf_counter() - start) * 1000
-        return _build_response(persons, helmets, vests, elapsed_ms)
+        return _build_response(persons, helmets, vests, cleaning_coveralls, elapsed_ms)
 
     def _mock_process_video(
         self,
@@ -741,6 +840,7 @@ class PPEDetector:
                     missing=missing_to_report,
                     video_name=video_name,
                     frame_index=frame_index,
+                    worker_match_reason=decision.get("worker_match_reason", "unknown"),
                     confirmed_aspect_ratios=confirmed_aspect_ratios,
                 )
 
@@ -887,6 +987,7 @@ class PPEDetector:
                         missing=missing_to_report,
                         video_name=video_name,
                         frame_index=frame_index,
+                        worker_match_reason=decision.get("worker_match_reason", "unknown"),
                     )
                     if len(cases) > old_case_count:
                         yield StreamEvent(
@@ -954,15 +1055,13 @@ def _append_tracking_overlay_frame(
         return
     seen_person_ids.add(person_key)
 
-    missing_equipment = (
-        [
+    missing_equipment = []
+    if include_ppe:
+        missing_equipment = decision.get("missing_to_report") or [
             equipment.label
             for equipment in person.equipment
             if equipment.status == "violation"
         ]
-        if include_ppe
-        else []
-    )
     has_zone_violation = zone_type in {"RESTRICTED", "WALKWAY", "SLIPPERY"}
     worker = decision.get("worker")
     worker_status = getattr(worker, "status", "unknown")
@@ -983,6 +1082,8 @@ def _append_tracking_overlay_frame(
             person_id=person.person_id,
             bbox=person.bbox,
             confidence=person.confidence,
+            role=person.role,
+            uniform_type=person.uniform_type,
             compliant=person.compliant and not has_zone_violation,
             missing_equipment=missing_equipment,
             status=status,
@@ -1005,14 +1106,23 @@ def _update_worker_status(
     frame_height: int,
     used_worker_ids: set[int],
 ) -> dict:
-    worker = _find_or_create_worker(workers, person, frame_index, used_worker_ids)
+    worker, worker_match_reason = _find_or_create_worker(
+        workers,
+        person,
+        frame_index,
+        used_worker_ids,
+    )
     _merge_worker_observation(worker, person, frame_index, fps)
+    _update_worker_role(worker, person)
+    _apply_worker_role_to_person(worker, person)
 
     present = _present_equipment(person)
-    if "Helmet" in present:
+    if HELMET_LABEL in present:
         worker.helmet_seen_frame = frame_index
-    if "Vest" in present:
+    if VEST_LABEL in present:
         worker.vest_seen_frame = frame_index
+    if CLEANING_COVERALL_LABEL in present:
+        worker.cleaning_coverall_seen_frame = frame_index
 
     if worker.reported:
         worker.status = "violation"
@@ -1023,10 +1133,14 @@ def _update_worker_status(
             "reason": "already_reported",
             "missing": [],
             "worker": worker,
-            "missing_to_report": [],
+            "worker_match_reason": worker_match_reason,
+            "missing_to_report": _ordered_missing(worker.reported_missing)
+            if worker.reported_missing
+            else [],
         }
 
     raw_missing = _missing_equipment(person)
+    relevant_labels = _relevant_missing_labels(person)
     judgeable = _is_worker_judgeable(
         worker, frame_index, fps, frame_width, frame_height
     )
@@ -1046,6 +1160,7 @@ def _update_worker_status(
             "reason": reason,
             "missing": raw_missing,
             "worker": worker,
+            "worker_match_reason": worker_match_reason,
             "missing_to_report": [],
         }
 
@@ -1066,20 +1181,23 @@ def _update_worker_status(
             "reason": "",
             "missing": [],
             "worker": worker,
+            "worker_match_reason": worker_match_reason,
             "missing_to_report": [],
         }
 
     # They are missing PPE
-    for label in ("Helmet", "Vest"):
-        if worker.missing_counts is None:
-            worker.missing_counts = {"Helmet": 0, "Vest": 0}
+    if worker.missing_counts is None:
+        worker.missing_counts = _empty_missing_counts()
+    for label in MISSING_LABEL_ORDER:
+        if label not in worker.missing_counts:
+            worker.missing_counts[label] = 0
         worker.missing_counts[label] = (
             worker.missing_counts.get(label, 0) + 1 if label in missing else 0
         )
 
     confirmed_missing = [
         label
-        for label in ("Helmet", "Vest")
+        for label in relevant_labels
         if (
             worker.missing_counts
             and worker.missing_counts.get(label, 0) >= confirm_frames
@@ -1096,6 +1214,7 @@ def _update_worker_status(
             "reason": "",
             "missing": missing,
             "worker": worker,
+            "worker_match_reason": worker_match_reason,
             "missing_to_report": [],
         }
 
@@ -1109,6 +1228,7 @@ def _update_worker_status(
         "reason": "",
         "missing": _ordered_missing(worker.reported_missing),
         "worker": worker,
+        "worker_match_reason": worker_match_reason,
         "missing_to_report": _ordered_missing(worker.reported_missing),
     }
 
@@ -1118,11 +1238,16 @@ def _find_or_create_worker(
     person: PersonResult,
     frame_index: int,
     used_worker_ids: set[int],
-) -> WorkerState:
-    worker = _find_existing_worker(workers, person, frame_index, used_worker_ids)
+) -> tuple[WorkerState, str]:
+    worker, match_reason = _find_existing_worker(
+        workers,
+        person,
+        frame_index,
+        used_worker_ids,
+    )
     if worker is not None:
         used_worker_ids.add(id(worker))
-        return worker
+        return worker, match_reason
 
     worker = WorkerState(
         track_ids={person.track_id} if person.track_id is not None else set(),
@@ -1133,7 +1258,7 @@ def _find_or_create_worker(
     )
     workers.append(worker)
     used_worker_ids.add(id(worker))
-    return worker
+    return worker, "new_worker"
 
 
 def _find_existing_worker(
@@ -1141,13 +1266,13 @@ def _find_existing_worker(
     person: PersonResult,
     frame_index: int,
     used_worker_ids: set[int],
-) -> WorkerState | None:
+) -> tuple[WorkerState | None, str]:
     if person.track_id is not None:
         for worker in workers:
             if id(worker) in used_worker_ids:
                 continue
             if person.track_id in worker.track_ids:
-                return worker
+                return worker, "same_track"
 
     fresh_workers = [
         worker
@@ -1157,21 +1282,27 @@ def _find_existing_worker(
     ]
 
     reported_candidates = [worker for worker in fresh_workers if worker.reported]
-    reported_worker = _find_spatial_worker_match(reported_candidates, person)
+    reported_worker, reported_reason = _find_spatial_worker_match(
+        reported_candidates,
+        person,
+    )
     if reported_worker is not None:
-        return reported_worker
+        return reported_worker, f"reported_{reported_reason}"
 
     unreported_candidates = [worker for worker in fresh_workers if not worker.reported]
-    unreported_worker = _find_spatial_worker_match(unreported_candidates, person)
+    unreported_worker, unreported_reason = _find_spatial_worker_match(
+        unreported_candidates,
+        person,
+    )
     if unreported_worker is not None:
-        return unreported_worker
+        return unreported_worker, f"unreported_{unreported_reason}"
 
-    return None
+    return None, "new_worker"
 
 
 def _find_spatial_worker_match(
     workers: list[WorkerState], person: PersonResult
-) -> WorkerState | None:
+) -> tuple[WorkerState | None, str]:
     best_worker: WorkerState | None = None
     best_iou = 0.0
     for worker in workers:
@@ -1181,16 +1312,16 @@ def _find_spatial_worker_match(
             best_worker = worker
 
     if best_worker is not None and best_iou >= settings.VIDEO_CASE_IOU_THRESHOLD:
-        return best_worker
+        return best_worker, "iou"
 
     for worker in workers:
         if (
             _center_distance_ratio(person.bbox, worker.last_bbox)
             <= settings.VIDEO_CASE_CENTER_DISTANCE_RATIO
         ):
-            return worker
+            return worker, "center"
 
-    return None
+    return None, "no_spatial_match"
 
 
 def _merge_worker_observation(
@@ -1242,6 +1373,8 @@ def _is_worker_judgeable(
     # Stability check: only need 2 frames
     if len(worker.recent_bboxes) < 2:
         return False
+    if _has_unclear_posture(worker):
+        return False
         
     return True
 
@@ -1267,6 +1400,8 @@ def _unknown_reason(
         
     if len(worker.recent_bboxes) < 2:
         return "need_more_frames"
+    if _has_unclear_posture(worker):
+        return "unclear_posture"
         
     return "unknown"
 
@@ -1331,9 +1466,7 @@ def _suppress_recently_seen_ppe(
     memory_frames = _seconds_to_frames(settings.VIDEO_RECENT_PPE_MEMORY_SECONDS, fps)
     filtered: list[str] = []
     for label in missing:
-        seen_frame = (
-            worker.helmet_seen_frame if label == "Helmet" else worker.vest_seen_frame
-        )
+        seen_frame = _last_seen_frame(worker, label)
         if seen_frame is not None and frame_index - seen_frame <= memory_frames:
             continue
         filtered.append(label)
@@ -1344,8 +1477,58 @@ def _present_equipment(person: PersonResult) -> set[str]:
     return {eq.label for eq in person.equipment if eq.status == "compliant"}
 
 
+def _update_worker_role(worker: WorkerState, person: PersonResult) -> None:
+    if person.role is None:
+        return
+    worker.role = person.role
+    worker.uniform_type = person.uniform_type
+
+
+def _apply_worker_role_to_person(worker: WorkerState, person: PersonResult) -> None:
+    if person.role is not None or worker.role is None:
+        return
+
+    helmet_status = _equipment_status_for_label(person, HELMET_LABEL)
+    if worker.role == "janitor":
+        uniform_status = _equipment_status_for_label(person, CLEANING_COVERALL_LABEL)
+        person.role = "janitor"
+        person.uniform_type = "cleaning_coverall"
+    else:
+        uniform_status = _equipment_status_for_label(person, VEST_LABEL)
+        person.role = "worker"
+        person.uniform_type = "vest"
+
+    person.equipment = [helmet_status, uniform_status]
+    person.compliant = all(eq.status == "compliant" for eq in person.equipment)
+
+
+def _equipment_status_for_label(person: PersonResult, label: str) -> EquipmentStatus:
+    for equipment in person.equipment:
+        if equipment.label == label and equipment.status == "compliant":
+            return equipment
+    return EquipmentStatus(label=label, status="violation")
+
+
+def _relevant_missing_labels(person: PersonResult) -> tuple[str, ...]:
+    return tuple(equipment.label for equipment in person.equipment)
+
+
+def _last_seen_frame(worker: WorkerState, label: str) -> int | None:
+    if label == HELMET_LABEL:
+        return worker.helmet_seen_frame
+    if label == VEST_LABEL:
+        return worker.vest_seen_frame
+    if label == CLEANING_COVERALL_LABEL:
+        return worker.cleaning_coverall_seen_frame
+    return None
+
+
+def _empty_missing_counts() -> dict[str, int]:
+    return {label: 0 for label in MISSING_LABEL_ORDER}
+
+
 def _reset_missing_counts(worker: WorkerState) -> None:
-    worker.missing_counts = {"Helmet": 0, "Vest": 0}
+    worker.missing_counts = _empty_missing_counts()
 
 
 def _seconds_to_frames(seconds: float, fps: float) -> int:
@@ -1362,18 +1545,73 @@ def _record_violation_case(
     missing: list[str],
     video_name: str,
     frame_index: int,
+    worker_match_reason: str = "unknown",
     confirmed_aspect_ratios: list[float] | None = None,
 ) -> None:
     if worker.reported:
+        logger.info(
+            "[PPE] Suppressed persistence for already-reported worker: "
+            "frame=%s track_id=%s missing=%s worker_match=%s",
+            frame_index,
+            person.track_id,
+            missing,
+            worker_match_reason,
+        )
         return
 
     case, match_reason = _find_existing_case_match(cases, person, frame_index)
     missing_set = set(missing)
     violation_type = _violation_type(missing)
     timestamp = datetime.now(timezone.utc).isoformat()
+    duplicate_case, duplicate_reason, duplicate_gap, duplicate_center = (
+        _find_duplicate_ppe_case(
+            cases=cases,
+            person=person,
+            video_name=video_name,
+            violation_type=violation_type,
+            missing=missing_set,
+            frame_index=frame_index,
+        )
+    )
+    duplicate_suppressed = case is None and duplicate_case is not None
+    action = (
+        "suppress_duplicate"
+        if duplicate_suppressed
+        else "match_existing_immutable"
+        if case is not None
+        else "create"
+    )
+    aspect_ratio = _bbox_aspect_ratio(person.bbox)
+    logger.info(
+        "[PPE] Persistence decision: frame=%s track_id=%s violation_type=%s "
+        "missing=%s role=%s worker_match=%s case_match=%s action=%s duplicate=%s "
+        "duplicate_reason=%s frame_gap=%s center_distance_ratio=%s aspect_ratio=%.3f",
+        frame_index,
+        person.track_id,
+        violation_type,
+        sorted(missing_set),
+        person.role,
+        worker_match_reason,
+        match_reason,
+        action,
+        duplicate_suppressed,
+        duplicate_reason,
+        duplicate_gap if duplicate_gap is not None else "-",
+        f"{duplicate_center:.3f}" if duplicate_center is not None else "-",
+        aspect_ratio,
+    )
 
     if confirmed_aspect_ratios is not None:
-        confirmed_aspect_ratios.append(_bbox_aspect_ratio(person.bbox))
+        confirmed_aspect_ratios.append(aspect_ratio)
+
+    if duplicate_suppressed and duplicate_case is not None:
+        duplicate_case.last_bbox = person.bbox
+        duplicate_case.last_frame = frame_index
+        if person.track_id is not None:
+            duplicate_case.track_ids.add(person.track_id)
+        worker.reported = True
+        worker.status = "violation"
+        return
 
     if case is None:
         try:
@@ -1405,6 +1643,9 @@ def _record_violation_case(
                     last_bbox=person.bbox,
                     first_frame=frame_index,
                     last_frame=frame_index,
+                    video_name=video_name,
+                    violation_type=violation_type,
+                    role=person.role,
                 )
             )
         except Exception as e:
@@ -1465,6 +1706,66 @@ def _find_existing_case_match(
     return None, "new"
 
 
+def _find_duplicate_ppe_case(
+    *,
+    cases: list[ViolationCase],
+    person: PersonResult,
+    video_name: str,
+    violation_type: str,
+    missing: set[str],
+    frame_index: int,
+) -> tuple[ViolationCase | None, str, int | None, float | None]:
+    best_case: ViolationCase | None = None
+    best_gap: int | None = None
+    best_center_ratio: float | None = None
+    max_gap = settings.VIDEO_PPE_DUPLICATE_SUPPRESSION_GAP
+    max_center_ratio = settings.VIDEO_PPE_DUPLICATE_CENTER_DISTANCE_RATIO
+
+    for case in cases:
+        if case.video_name is not None and case.video_name != video_name:
+            continue
+
+        frame_gap = frame_index - case.last_frame
+        if frame_gap < 0 or frame_gap > max_gap:
+            continue
+
+        if not _case_violation_matches(case, violation_type, missing):
+            continue
+
+        if not _case_role_matches(case.role, person.role):
+            continue
+
+        center_ratio = _center_distance_ratio(person.bbox, case.last_bbox)
+        if center_ratio > max_center_ratio:
+            continue
+
+        if best_center_ratio is None or center_ratio < best_center_ratio:
+            best_case = case
+            best_gap = frame_gap
+            best_center_ratio = center_ratio
+
+    if best_case is None:
+        return None, "no_duplicate", best_gap, best_center_ratio
+
+    return best_case, "ppe_duplicate_spatial", best_gap, best_center_ratio
+
+
+def _case_violation_matches(
+    case: ViolationCase,
+    violation_type: str,
+    missing: set[str],
+) -> bool:
+    if case.violation_type is not None and case.violation_type == violation_type:
+        return True
+    return case.missing == missing
+
+
+def _case_role_matches(case_role: str | None, person_role: str | None) -> bool:
+    if case_role is None or person_role is None:
+        return True
+    return case_role == person_role
+
+
 def _bbox_iou(a: BoundingBox, b: BoundingBox) -> float:
     a_dict = a.model_dump()
     b_dict = b.model_dump()
@@ -1508,7 +1809,7 @@ def _bbox_diagonal(box: BoundingBox) -> float:
 
 
 def _ordered_missing(missing: set[str]) -> list[str]:
-    return [label for label in ("Helmet", "Vest") if label in missing]
+    return [label for label in MISSING_LABEL_ORDER if label in missing]
 
 
 def _encode_frame_to_base64(frame: np.ndarray) -> str:
@@ -1529,13 +1830,14 @@ def _encode_frame_to_base64(frame: np.ndarray) -> str:
     return base64.b64encode(buffer).decode("utf-8")
 
 
-def _extract_result_boxes(result) -> tuple[list[dict], list[dict], list[dict]]:
+def _extract_result_boxes(result) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
     persons: list[dict] = []
     helmets: list[dict] = []
     vests: list[dict] = []
+    cleaning_coveralls: list[dict] = []
 
     if result.boxes is None:
-        return persons, helmets, vests
+        return persons, helmets, vests, cleaning_coveralls
 
     for box in result.boxes:
         cls_id = int(box.cls[0])
@@ -1552,8 +1854,10 @@ def _extract_result_boxes(result) -> tuple[list[dict], list[dict], list[dict]]:
             helmets.append(entry)
         elif cls_id == 2:
             vests.append(entry)
+        elif cls_id == 3:
+            cleaning_coveralls.append(entry)
 
-    return persons, helmets, vests
+    return persons, helmets, vests, cleaning_coveralls
 
 
 def _box_track_id(box) -> int | None:
@@ -1570,6 +1874,7 @@ def _build_response(
     persons: list[dict],
     helmets: list[dict],
     vests: list[dict],
+    cleaning_coveralls: list[dict],
     elapsed_ms: float,
 ) -> DetectionResponse:
     threshold = settings.PPE_OVERLAP_THRESHOLD
@@ -1589,9 +1894,14 @@ def _build_response(
 
     helmet_assignments = best_match(helmets)
     vest_assignments = best_match(vests)
+    cleaning_coverall_assignments = best_match(cleaning_coveralls)
 
     person_helmets = _best_equipment_by_person(helmets, helmet_assignments)
     person_vests = _best_equipment_by_person(vests, vest_assignments)
+    person_cleaning_coveralls = _best_equipment_by_person(
+        cleaning_coveralls,
+        cleaning_coverall_assignments,
+    )
 
     person_results: list[PersonResult] = []
     flat_detections: list[Detection] = []
@@ -1612,29 +1922,30 @@ def _build_response(
         )
         det_id += 1
 
-        equipment_statuses: list[EquipmentStatus] = []
-        det_id = _append_equipment_status(
-            equipment_statuses,
-            flat_detections,
-            det_id,
-            "Helmet",
-            person_helmets.get(i),
+        role, uniform_type = _infer_role(
+            vest=person_vests.get(i),
+            cleaning_coverall=person_cleaning_coveralls.get(i),
         )
-        det_id = _append_equipment_status(
-            equipment_statuses,
+        equipment_statuses, det_id = _build_equipment_statuses_for_role(
             flat_detections,
             det_id,
-            "Vest",
-            person_vests.get(i),
+            role=role,
+            helmet=person_helmets.get(i),
+            vest=person_vests.get(i),
+            cleaning_coverall=person_cleaning_coveralls.get(i),
         )
 
-        is_compliant = all(eq.status == "compliant" for eq in equipment_statuses)
+        is_compliant = role is not None and all(
+            eq.status == "compliant" for eq in equipment_statuses
+        )
         person_results.append(
             PersonResult(
                 person_id=i + 1,
                 track_id=p.get("track_id"),
                 bbox=p_bbox,
                 confidence=round(p["conf"], 4),
+                role=role,
+                uniform_type=uniform_type,
                 equipment=equipment_statuses,
                 compliant=is_compliant,
             )
@@ -1665,6 +1976,56 @@ def _best_equipment_by_person(
         if person_idx not in best or best[person_idx]["conf"] < eq["conf"]:
             best[person_idx] = eq
     return best
+
+
+def _infer_role(
+    *,
+    vest: dict | None,
+    cleaning_coverall: dict | None,
+) -> tuple[str | None, str | None]:
+    if cleaning_coverall is not None:
+        return "janitor", "cleaning_coverall"
+    if vest is not None:
+        return "worker", "vest"
+    return None, None
+
+
+def _build_equipment_statuses_for_role(
+    detections: list[Detection],
+    det_id: int,
+    *,
+    role: str | None,
+    helmet: dict | None,
+    vest: dict | None,
+    cleaning_coverall: dict | None,
+) -> tuple[list[EquipmentStatus], int]:
+    statuses: list[EquipmentStatus] = []
+    det_id = _append_equipment_status(
+        statuses,
+        detections,
+        det_id,
+        HELMET_LABEL,
+        helmet,
+    )
+    if role == "janitor":
+        det_id = _append_equipment_status(
+            statuses,
+            detections,
+            det_id,
+            CLEANING_COVERALL_LABEL,
+            cleaning_coverall,
+        )
+    elif role == "worker":
+        det_id = _append_equipment_status(
+            statuses,
+            detections,
+            det_id,
+            VEST_LABEL,
+            vest,
+        )
+    else:
+        statuses.append(EquipmentStatus(label=ROLE_UNIFORM_LABEL, status="violation"))
+    return statuses, det_id
 
 
 def _append_equipment_status(
@@ -1739,13 +2100,21 @@ def _missing_equipment(person: PersonResult) -> list[str]:
 
 
 def _violation_type(missing: list[str]) -> str:
-    normalized = [item.lower() for item in missing]
-    if "helmet" in normalized and "vest" in normalized:
+    missing_set = set(missing)
+    if {HELMET_LABEL, VEST_LABEL}.issubset(missing_set):
         return "missing_helmet_and_vest"
-    if "helmet" in normalized:
+    if {HELMET_LABEL, CLEANING_COVERALL_LABEL}.issubset(missing_set):
+        return "missing_helmet_and_cleaning_coverall"
+    if {HELMET_LABEL, ROLE_UNIFORM_LABEL}.issubset(missing_set):
+        return "missing_helmet_and_role_uniform"
+    if HELMET_LABEL in missing_set:
         return "missing_helmet"
-    if "vest" in normalized:
+    if VEST_LABEL in missing_set:
         return "missing_vest"
+    if CLEANING_COVERALL_LABEL in missing_set:
+        return "missing_cleaning_coverall"
+    if ROLE_UNIFORM_LABEL in missing_set:
+        return "missing_role_uniform"
     return "ppe_violation"
 
 

@@ -6,7 +6,7 @@ import {
 import { ZoneConfiguration, ZoneViolation } from "@/types/zone";
 
 export const API_URL =
-  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? "http://localhost:8000";
+  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? "http://127.0.0.1:8000";
 
 async function readError(res: Response, fallback: string): Promise<Error> {
   const body = await res.json().catch(() => ({ detail: res.statusText }));

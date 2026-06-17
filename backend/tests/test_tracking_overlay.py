@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import numpy as np
@@ -94,6 +95,7 @@ def test_real_video_tracking_overlay_uses_processed_frame_indexes(monkeypatch):
     class FakeModel:
         def track(self, **kwargs):
             assert kwargs["vid_stride"] == 3
+            assert kwargs["classes"] == [0, 1, 2, 3]
             return iter(results)
 
     person = {
@@ -108,7 +110,11 @@ def test_real_video_tracking_overlay_uses_processed_frame_indexes(monkeypatch):
     vest = {"x1": 25, "y1": 35, "x2": 75, "y2": 70, "conf": 0.9}
 
     monkeypatch.setattr(ppe, "_video_metadata", lambda _path: (10.0, 6))
-    monkeypatch.setattr(ppe, "_extract_result_boxes", lambda _result: ([person], [helmet], [vest]))
+    monkeypatch.setattr(
+        ppe,
+        "_extract_result_boxes",
+        lambda _result: ([person], [helmet], [vest], []),
+    )
     monkeypatch.setattr(ppe, "load_zones", lambda _video_name: [])
     monkeypatch.setattr(ppe.settings, "VIDEO_FRAME_STRIDE", 3)
 
@@ -126,6 +132,147 @@ def test_real_video_tracking_overlay_uses_processed_frame_indexes(monkeypatch):
     ]
     assert all(frame.track_id == 42 for frame in result.tracking_overlay.frames)
     assert all(frame.missing_equipment == [] for frame in result.tracking_overlay.frames)
+
+
+def test_mock_response_path_includes_janitor_role():
+    detector = ppe.PPEDetector.__new__(ppe.PPEDetector)
+    image = SimpleNamespace(size=(200, 120))
+
+    response = detector._mock_predict(image)
+
+    roles = [person.role for person in response.persons]
+    assert "worker" in roles
+    assert "janitor" in roles
+
+
+def test_mock_streaming_path_yields_frame_events(monkeypatch):
+    frames = [np.zeros((120, 200, 3), dtype=np.uint8) for _ in range(2)]
+
+    class FakeCapture:
+        def __init__(self, _path):
+            self.frames = iter(frames)
+
+        def isOpened(self):
+            return True
+
+        def read(self):
+            try:
+                return True, next(self.frames)
+            except StopIteration:
+                return False, None
+
+        def release(self):
+            return None
+
+    async def collect_events():
+        detector = ppe.PPEDetector.__new__(ppe.PPEDetector)
+        events = []
+        async for event in detector._mock_stream_video(
+            "ignored.mp4",
+            "factory.mp4",
+            enable_ppe=False,
+            enable_zone=False,
+        ):
+            events.append(event)
+        return events
+
+    monkeypatch.setattr(ppe, "_video_metadata", lambda _path: (10.0, 2))
+    monkeypatch.setattr(ppe.settings, "VIDEO_FRAME_STRIDE", 1)
+    monkeypatch.setattr("cv2.VideoCapture", FakeCapture)
+
+    events = asyncio.run(collect_events())
+
+    assert [event.event for event in events].count("frame") == 2
+    assert events[0].event == "start"
+    assert events[-1].event == "end"
+
+
+def test_reported_worker_overlay_preserves_violation_context():
+    person = PersonResult(
+        person_id=2,
+        track_id=10,
+        bbox=BoundingBox(x1=30, y1=15, x2=90, y2=115),
+        confidence=0.91,
+        role="worker",
+        uniform_type="vest",
+        equipment=[
+            EquipmentStatus(label="Helmet", status="compliant"),
+            EquipmentStatus(label="Vest", status="compliant"),
+        ],
+        compliant=True,
+    )
+    worker = ppe.WorkerState(
+        track_ids={10},
+        first_frame=4,
+        last_frame=4,
+        last_bbox=person.bbox,
+        recent_bboxes=[person.bbox],
+        reported=True,
+        reported_missing={"Vest"},
+        status="violation",
+    )
+    frames = []
+
+    ppe._append_tracking_overlay_frame(
+        overlay_frames=frames,
+        seen_person_ids=set(),
+        person=person,
+        decision={
+            "unknown": False,
+            "worker": worker,
+            "missing_to_report": ["Vest"],
+        },
+        frame_index=4,
+        fps=20,
+    )
+
+    assert frames[0].role == "worker"
+    assert frames[0].missing_equipment == ["Vest"]
+    assert frames[0].status == "violation"
+
+
+def test_reported_janitor_overlay_preserves_violation_context():
+    person = PersonResult(
+        person_id=2,
+        track_id=10,
+        bbox=BoundingBox(x1=30, y1=15, x2=90, y2=115),
+        confidence=0.91,
+        role="janitor",
+        uniform_type="cleaning_coverall",
+        equipment=[
+            EquipmentStatus(label="Helmet", status="compliant"),
+            EquipmentStatus(label="Cleaning Coverall", status="compliant"),
+        ],
+        compliant=True,
+    )
+    worker = ppe.WorkerState(
+        track_ids={10},
+        first_frame=4,
+        last_frame=4,
+        last_bbox=person.bbox,
+        recent_bboxes=[person.bbox],
+        reported=True,
+        reported_missing={"Cleaning Coverall"},
+        status="violation",
+    )
+    frames = []
+
+    ppe._append_tracking_overlay_frame(
+        overlay_frames=frames,
+        seen_person_ids=set(),
+        person=person,
+        decision={
+            "unknown": False,
+            "worker": worker,
+            "missing_to_report": ["Cleaning Coverall"],
+        },
+        frame_index=4,
+        fps=20,
+    )
+
+    assert frames[0].role == "janitor"
+    assert frames[0].missing_equipment == ["Cleaning Coverall"]
+    assert frames[0].status == "violation"
 
 
 def test_tracking_overlay_deduplicates_person_and_reports_unknown_status():

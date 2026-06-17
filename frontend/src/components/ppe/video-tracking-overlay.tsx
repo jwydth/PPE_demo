@@ -216,7 +216,7 @@ function TrackingBoxes({
 function trackingLabels(frame: TrackingOverlayFrame): string[] {
   const labels: string[] = [];
   if (frame.missing_equipment.length > 0) {
-    labels.push(`PPE: ${frame.missing_equipment.join(", ")}`);
+    labels.push(`PPE: ${frame.missing_equipment.map(formatEquipmentLabel).join(", ")}`);
   }
   if (frame.zone_type) {
     const zoneLabel =
@@ -228,10 +228,26 @@ function trackingLabels(frame: TrackingOverlayFrame): string[] {
     labels.push(`Zone: ${frame.zone_name ? `${zoneLabel} - ${frame.zone_name}` : zoneLabel}`);
   }
   if (labels.length === 0) {
-    labels.push(frame.status === "unknown" ? "Status unknown" : "Compliant");
+    labels.push(frame.status === "unknown" ? unknownStatusLabel(frame) : "Compliant");
   }
-  labels.push(`Track ${frame.track_id ?? frame.person_id ?? "-"}`);
+  labels.push(`${formatFrameRole(frame)} ${frame.track_id ?? frame.person_id ?? "-"}`);
   return labels;
+}
+
+function unknownStatusLabel(frame: TrackingOverlayFrame): string {
+  if (frame.role === "worker" || frame.role === "janitor") return "PPE status pending";
+  return "Role unknown";
+}
+
+function formatFrameRole(frame: TrackingOverlayFrame): string {
+  if (frame.role === "worker") return "Worker";
+  if (frame.role === "janitor") return "Janitor";
+  return "Person";
+}
+
+function formatEquipmentLabel(label: string): string {
+  if (label === "Role Uniform") return "Role Uniform (Vest or Cleaning Coverall)";
+  return label;
 }
 
 function trackingColor(frame: TrackingOverlayFrame): string {
@@ -248,7 +264,14 @@ function trackingColor(frame: TrackingOverlayFrame): string {
 function labelColor(label: string, fallback: string): string {
   if (label.startsWith("PPE:")) return "#fca5a5";
   if (label.startsWith("Zone:")) return fallback;
-  if (label.startsWith("Track")) return "#cbd5e1";
+  if (
+    label.startsWith("Track") ||
+    label.startsWith("Worker") ||
+    label.startsWith("Janitor") ||
+    label.startsWith("Person")
+  ) {
+    return "#cbd5e1";
+  }
   return fallback;
 }
 

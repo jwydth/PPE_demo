@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import {
   ArrowUpRight,
@@ -294,7 +294,7 @@ function CameraPanel() {
   });
   const [isStreaming, setIsStreaming] = useState(false);
   const [isLive, setIsLive] = useState(false);
-  const [liveUrl, setLiveUrl] = useState("rtsp://localhost:8554/mystream");
+  const [liveUrl, setLiveUrl] = useState("rtsp://127.0.0.1:8554/mystream");
   const [zoneSuggestions, setZoneSuggestions] = useState<Record<string, ZoneSuggestion>>({});
   const [ppeSuggestions, setPpeSuggestions] = useState<Record<string, PPESuggestion>>({});
   const wsRef = useRef<WebSocket | null>(null);
@@ -1086,7 +1086,7 @@ function CameraPanel() {
             <div className="grid gap-2 sm:grid-cols-2">
               <ModelToggle
                 label="PPE Detection"
-                description="Helmet and vest compliance"
+                description="Helmet and role-uniform compliance"
                 enabled={ppeEnabled}
                 onToggle={() => setPpeEnabled((current) => !current)}
               />

@@ -30,6 +30,8 @@ export interface PersonResult {
   track_id?: number;
   bbox: BoundingBox;
   confidence: number;
+  role: "worker" | "janitor" | null;
+  uniform_type: "vest" | "cleaning_coverall" | null;
   equipment: EquipmentStatus[];
   compliant: boolean;
 }
@@ -76,9 +78,13 @@ export interface TrackingOverlayFrame {
   person_id?: number;
   bbox: BoundingBox;
   confidence: number;
+  role?: "worker" | "janitor" | null;
+  uniform_type?: "vest" | "cleaning_coverall" | null;
   compliant: boolean;
   missing_equipment: string[];
   zone_id?: number;
+  camera_zone_view_id?: number;
+  physical_zone_id?: number;
   zone_name?: string;
   zone_type?: "RESTRICTED" | "WALKWAY" | "SLIPPERY";
   status: Category | "unknown";
