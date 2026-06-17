@@ -84,6 +84,9 @@ To run the project with the real-time streaming feature:
 1.  **Install MediaMTX & FFmpeg**:
     *   Download and run [MediaMTX](https://github.com/bluenviron/mediamtx) (RTSP server).
     *   Ensure [FFmpeg](https://ffmpeg.org/) is installed and available in your system PATH.
+    ```powershell
+    winget install --id Gyan.FFmpeg -e
+    ```
 
 2.  **Start Streaming**:
     Use the following command to send a local video file (`mp_.mp4`) to MediaMTX as a continuous RTSP stream:
