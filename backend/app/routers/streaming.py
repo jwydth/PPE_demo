@@ -1,3 +1,5 @@
+import asyncio
+import itertools
 import logging
 from pathlib import Path
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
@@ -9,6 +11,16 @@ router = APIRouter(tags=["streaming"])
 logger = logging.getLogger(__name__)
 
 _detector = PPEDetector()
+# Ensures only one model.track() session runs at a time.
+# Page reloads would otherwise start a second concurrent tracker before the first is torn down.
+_stream_lock = asyncio.Lock()
+# Monotonic counter so each WebSocket connection has a stable id in the logs.
+_conn_counter = itertools.count(1)
+# Cancel event of the currently active stream. A new connection sets this to tell
+# the previous stream to stop, so a new stream always supersedes the old one
+# instead of waiting (and timing out) on an orphaned WebSocket the browser never
+# closed — which happens on reloads / React StrictMode double-mounts.
+_current_cancel: "asyncio.Event | None" = None
 
 @router.websocket("/ws/stream")
 async def stream_video_ws(
@@ -17,8 +29,11 @@ async def stream_video_ws(
     enable_ppe: bool = Query(True),
     enable_zone: bool = Query(True),
 ):
+    global _current_cancel
+    conn_id = next(_conn_counter)
     await websocket.accept()
     ensure_upload_dir()
+    logger.info(f"[conn {conn_id}] WS accepted (ppe={enable_ppe}, zone={enable_zone})")
     
     # Dynamic settings state
     settings_state = {
@@ -28,6 +43,21 @@ async def stream_video_ws(
         "dismissed_ppe_signatures": [],
         "reload_zones": False,
     }
+
+    # Set when the client disconnects. The settings listener (which calls
+    # receive_json) is the only place a disconnect is reliably detected, so it
+    # signals the main streaming loop to stop. Otherwise an infinite RTSP stream
+    # keeps running forever and never releases _stream_lock.
+    disconnect_event = asyncio.Event()
+
+    # Set when a newer connection wants to take over. Allows this stream to be
+    # superseded even if the browser never closed it (orphaned WebSocket).
+    cancel_event = asyncio.Event()
+    previous_cancel = _current_cancel
+    _current_cancel = cancel_event
+    if previous_cancel is not None:
+        previous_cancel.set()
+        logger.info(f"[conn {conn_id}] superseding previous stream — signalled it to stop")
     
     # Resolve the video path
     is_url = video_name.startswith(("rtsp://", "rtmp://", "http://", "https://"))
@@ -49,61 +79,116 @@ async def stream_video_ws(
     
     # Task to handle incoming setting updates
     async def listen_for_settings():
-        logger.info(" [SIGNAL] Settings listener task started")
-        try:
-            while True:
-                try:
-                    data = await websocket.receive_json()
-                    if data.get("event") == "update_settings":
-                        new_settings = data.get("data", {})
-                        if "enable_ppe" in new_settings:
-                            settings_state["enable_ppe"] = bool(new_settings["enable_ppe"])
-                        if "enable_zone" in new_settings:
-                            settings_state["enable_zone"] = bool(new_settings["enable_zone"])
-                        logger.info(f" [SIGNAL] Received dynamic settings update: {settings_state}")
-                    elif data.get("event") == "dismiss_suggestion":
-                        sig = data.get("data", {}).get("suggestion_id")
-                        if sig:
-                            settings_state["dismissed_signatures"].append(sig)
-                            logger.info(f" [SIGNAL] Queued dismissal for suggestion: {sig}")
-                    elif data.get("event") == "dismiss_ppe_suggestion":
-                        sig = data.get("data", {}).get("suggestion_id")
-                        if sig:
-                            settings_state["dismissed_ppe_signatures"].append(sig)
-                            logger.info(f" [SIGNAL] Queued PPE suggestion dismissal: {sig}")
-                    elif data.get("event") == "reload_zones":
-                        settings_state["reload_zones"] = True
-                        logger.info(" [SIGNAL] Zone reload requested by client")
-                except Exception as e:
-                    # Could be parse error or websocket issues
-                    logger.warning(f" [SIGNAL] Error receiving settings: {e}")
-                    break
-        except Exception as e:
-            logger.error(f" [SIGNAL] Settings listener task failed: {e}")
+        logger.info(f"[conn {conn_id}] [SIGNAL] Settings listener task started")
+        while True:
+            try:
+                data = await websocket.receive_json()
+            except WebSocketDisconnect:
+                logger.info(f"[conn {conn_id}] [SIGNAL] Client disconnected (WebSocketDisconnect) — signalling stream to stop")
+                disconnect_event.set()
+                break
+            except Exception as e:
+                # An abrupt close can surface as something other than
+                # WebSocketDisconnect — treat any receive failure as a
+                # disconnect so the stream loop stops and releases the lock.
+                logger.warning(f"[conn {conn_id}] [SIGNAL] receive_json failed ({type(e).__name__}: {e}) — treating as disconnect")
+                disconnect_event.set()
+                break
 
-    import asyncio
+            if data.get("event") == "update_settings":
+                new_settings = data.get("data", {})
+                if "enable_ppe" in new_settings:
+                    settings_state["enable_ppe"] = bool(new_settings["enable_ppe"])
+                if "enable_zone" in new_settings:
+                    settings_state["enable_zone"] = bool(new_settings["enable_zone"])
+                logger.info(f"[conn {conn_id}] [SIGNAL] Received dynamic settings update: {settings_state}")
+            elif data.get("event") == "dismiss_suggestion":
+                sig = data.get("data", {}).get("suggestion_id")
+                if sig:
+                    settings_state["dismissed_signatures"].append(sig)
+                    logger.info(f"[conn {conn_id}] [SIGNAL] Queued dismissal for suggestion: {sig}")
+            elif data.get("event") == "dismiss_ppe_suggestion":
+                sig = data.get("data", {}).get("suggestion_id")
+                if sig:
+                    settings_state["dismissed_ppe_signatures"].append(sig)
+                    logger.info(f"[conn {conn_id}] [SIGNAL] Queued PPE suggestion dismissal: {sig}")
+            elif data.get("event") == "reload_zones":
+                settings_state["reload_zones"] = True
+                logger.info(f"[conn {conn_id}] [SIGNAL] Zone reload requested by client")
+
     settings_task = asyncio.create_task(listen_for_settings())
 
+    # Wait up to 12 s for any previous stream to finish closing its model.track()
+    # session. The superseded stream breaks within one frame, then tears down
+    # (aclose, capped at 6 s) and releases the lock — so 12 s leaves comfortable
+    # margin.
+    logger.info(f"[conn {conn_id}] acquiring stream lock (locked={_stream_lock.locked()})")
     try:
-        async for event in _detector.stream_video(
-            video_path,
-            video_name,
-            settings_state=settings_state, # Pass shared state
-        ):
+        await asyncio.wait_for(_stream_lock.acquire(), timeout=12.0)
+        logger.info(f"[conn {conn_id}] acquired stream lock")
+    except asyncio.TimeoutError:
+        logger.warning(f"[conn {conn_id}] Stream lock timeout — previous stream did not release in time")
+        try:
+            await websocket.send_json({"event": "error", "data": {"message": "Previous stream still shutting down, please try again in a few seconds."}})
+            await websocket.close()
+        except Exception:
+            pass
+        settings_task.cancel()
+        return
+
+    stream_gen = _detector.stream_video(
+        video_path,
+        video_name,
+        settings_state=settings_state,
+    )
+    sent = 0
+    try:
+        async for event in stream_gen:
+            if disconnect_event.is_set():
+                logger.info(f"[conn {conn_id}] disconnect_event set — stopping stream loop after {sent} events")
+                break
+            if cancel_event.is_set():
+                logger.info(f"[conn {conn_id}] superseded by a newer stream — stopping after {sent} events")
+                break
             await websocket.send_text(event.model_dump_json())
+            sent += 1
+            # Force a yield to the event loop. send_text() often completes without
+            # suspending (send buffer has room), which would starve the settings
+            # listener task and prevent it from ever reading the client's close
+            # frame — leaving this infinite stream running forever.
+            await asyncio.sleep(0)
+            if sent % 120 == 0:
+                logger.info(f"[conn {conn_id}] sent {sent} events (client_state={websocket.client_state.name}, disconnect_event={disconnect_event.is_set()})")
     except WebSocketDisconnect:
-        logger.info("WebSocket disconnected")
+        logger.info(f"[conn {conn_id}] WebSocketDisconnect raised in send loop after {sent} events")
     except Exception as e:
-        logger.error(f"Error in streaming: {e}", exc_info=True)
+        logger.error(f"[conn {conn_id}] Error in streaming: {e}", exc_info=True)
         try:
             await websocket.send_json({"event": "error", "data": {"message": str(e)}})
-        except:
+        except Exception:
             pass
     finally:
+        logger.info(f"[conn {conn_id}] entering cleanup (closing generator + releasing lock)")
+        # Only clear the global if we're still the active stream — a newer
+        # connection may have already replaced it.
+        if _current_cancel is cancel_event:
+            _current_cancel = None
         settings_task.cancel()
+        # Close the generator (fully tears down this model.track() session) BEFORE
+        # releasing the lock. PPEDetector is a singleton, so the next stream must
+        # not start model.track() on the shared model while this one is still
+        # tearing down — that corrupts the predictor and the new stream stalls.
+        # The 3s RTSP read timeout caps how long aclose() can block here.
+        try:
+            await asyncio.wait_for(stream_gen.aclose(), timeout=6.0)
+            logger.info(f"[conn {conn_id}] generator closed")
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.warning(f"[conn {conn_id}] generator aclose did not finish cleanly: {e}")
+        _stream_lock.release()
+        logger.info(f"[conn {conn_id}] released stream lock")
         try:
             await websocket.close()
-        except:
+        except Exception:
             pass
 
 # for testing /ws/stream

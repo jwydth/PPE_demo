@@ -377,13 +377,14 @@ class PPEDetector:
             data={"video_name": video_name, "fps": round(fps, 2), "total_frames": total_frames},
         )
 
-        # Use TCP for RTSP streams to prevent 'Waiting for stream' timeouts
+        # Use TCP for RTSP streams to prevent 'Waiting for stream' timeouts.
+        # timeout;3000000 = 3 s read timeout so cv2 doesn't block indefinitely
+        # when the stream stalls — this lets generator cleanup finish quickly
+        # on WebSocket disconnect instead of waiting 10+ s for the OS read to return.
         source_str = str(video_path)
         if is_stream and source_str.startswith("rtsp://"):
-            # Ultralytics track() uses cv2/ffmpeg; setting the env var again 
-            # ensures it's picked up by the child processes/threads if any.
             import os
-            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|timeout;3000000"
 
         results = self.model.track(
             source=source_str,

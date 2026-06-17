@@ -53,6 +53,17 @@ The application detects PPE compliance (helmets and vests) and monitors configur
     - Standardized diagnostic logs to use human-readable **Track IDs** (e.g., `T1`) to match the frontend monitoring experience.
 
 
+## Session Updates (June 2026 — Live RTSP Streaming)
+
+- **Real RTSP Live Feed:** Added support for live camera streams (e.g. MediaMTX at `rtsp://localhost:8554/mystream`). Live sources are detected by URL scheme (`rtsp://`, `rtmp://`, `http(s)://`); the `StreamEvent` schema now carries an `image_base64` field so the frontend renders annotated frames directly via an `<img>` tag for live feeds (vs. the synced `<video>` overlay used for uploaded files).
+- **Fixed `KeyError(0)` crash:** Removed a stale-tracker reset (`predictor.trackers = {}`) in `ppe_detector.py`. Wiping the dict made Ultralytics raise `KeyError(0)` on the first frame, which surfaced to the client as `{"event":"error","data":{"message":"0"}}` immediately after the `start` event.
+- **Single-stream lifecycle with supersede:** `PPEDetector` is a singleton with one shared YOLO model, so only one `model.track()` session can run at a time, guarded by an `asyncio.Lock`. A new WebSocket now **supersedes** the previous one via a shared cancel event instead of waiting on it. This handles browsers that leak sockets on reload / React StrictMode double-mount and never send a close frame — the newest client always wins, and superseded streams close cleanly (code 1000).
+- **Reliable disconnect detection:** The settings-listener task sets a `disconnect_event` on `WebSocketDisconnect` (or any receive error); the send loop breaks on it so an infinite RTSP stream stops when the client genuinely leaves. Added `await asyncio.sleep(0)` per frame in the streaming loop because `send_text()` often completes without suspending, which previously starved the listener task and stopped it from ever reading the close frame.
+- **Correct teardown ordering:** The generator is now fully closed (`aclose`) **before** the lock is released, so the next stream never starts `model.track()` while the previous session is still tearing down the shared model (which corrupted the predictor and stalled the new stream). RTSP read blocking is capped via `OPENCV_FFMPEG_CAPTURE_OPTIONS` (`rtsp_transport;tcp|timeout;3000000`); lock-acquire timeout is 12s for margin.
+- **Per-connection tracing:** Added a monotonic connection id (`[conn N]`) to all lifecycle logs (accept, lock acquire/release, supersede, disconnect, cleanup) for debuggable stream handoffs.
+
+> Note: `wscat` was used only as a raw-WebSocket debugging client to isolate backend vs. frontend issues. It is not a runtime dependency — the browser is the real client.
+
 ## Folder Structure
 
 ### Backend (`/backend`)
