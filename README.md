@@ -77,6 +77,27 @@ Frontend URL:
 
 - `http://localhost:3000`
 
+## Streaming Setup
+
+To run the project with the real-time streaming feature:
+
+1.  **Install MediaMTX & FFmpeg**:
+    *   Download and run [MediaMTX](https://github.com/bluenviron/mediamtx) (RTSP server).
+    *   Ensure [FFmpeg](https://ffmpeg.org/) is installed and available in your system PATH.
+
+2.  **Start Streaming**:
+    Use the following command to send a local video file (`mp_.mp4`) to MediaMTX as a continuous RTSP stream:
+    ```powershell
+    ffmpeg -re -stream_loop -1 -i mp_.mp4 -c:v libx264 -preset ultrafast -tune zerolatency -profile:v baseline -level 3.0 -g 30 -bf 0 -flags +global_header -f rtsp -rtsp_transport tcp rtsp://localhost:8554/mystream
+    ```
+
+3.  **Run the Project**:
+    *   Ensure the Infrastructure (PostgreSQL, MinIO) is running: `docker compose up -d`
+    *   Start the Backend: `python -m uvicorn app.main:app --reload --port 8000`
+    *   Start the Frontend: `npm run dev`
+
+Once everything is running, the frontend will automatically connect to the RTSP stream at `rtsp://localhost:8554/mystream`.
+
 ## First Data Flow
 
 No manual database seed is required for normal local use.
