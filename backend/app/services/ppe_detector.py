@@ -533,8 +533,8 @@ class PPEDetector:
                                 worker.zone_dwell[cv_id] = 0
 
                     for zone in incursion_zones:
-                        if zone.zone_type == "RESTRICTED":
-                            track_camera_zone_view_id, track_physical_zone_id, track_zone_name, track_zone_type = zone.camera_zone_view_id, zone.physical_zone_id, zone.zone_name, "RESTRICTED"
+                        if zone.zone_type in ("RESTRICTED", "SLIPPERY"):
+                            track_camera_zone_view_id, track_physical_zone_id, track_zone_name, track_zone_type = zone.camera_zone_view_id, zone.physical_zone_id, zone.zone_name, zone.zone_type
                             break
                     if track_zone_type is None:
                         walkway_zones = [z for z in zones if z.zone_type == "WALKWAY"]
@@ -584,7 +584,7 @@ class PPEDetector:
                 )
                 if sign_results:
                     signs = extract_signs(sign_results[0])
-                    for suggestion in sign_registry.update(signs, frame_width, frame_height, frame_index):
+                    for suggestion in sign_registry.update(signs, frame_width, frame_height, frame_index, fps):
                         yield StreamEvent(event="zone_suggestion", frame_index=frame_index, data=suggestion.model_dump())
                     for suggestion in ppe_sign_registry.update(signs, frame_width, frame_height, frame_index):
                         yield StreamEvent(event="ppe_suggestion", frame_index=frame_index, data=suggestion.model_dump())
@@ -702,10 +702,10 @@ class PPEDetector:
                     incursion_zone_ids = {z.zone_id for z in incursion_zones}
 
                     for zone in incursion_zones:
-                        if zone.zone_type == "RESTRICTED":
+                        if zone.zone_type in ("RESTRICTED", "SLIPPERY"):
                             track_zone_id = zone.zone_id
                             track_zone_name = zone.zone_name
-                            track_zone_type = "RESTRICTED"
+                            track_zone_type = zone.zone_type
                             break
                     if track_zone_type is None:
                         walkway_zones = [z for z in zones if z.zone_type == "WALKWAY"]
@@ -849,10 +849,10 @@ class PPEDetector:
                     incursion_zone_ids = {z.zone_id for z in incursion_zones}
 
                     for zone in incursion_zones:
-                        if zone.zone_type == "RESTRICTED":
+                        if zone.zone_type in ("RESTRICTED", "SLIPPERY"):
                             track_zone_id = zone.zone_id
                             track_zone_name = zone.zone_name
-                            track_zone_type = "RESTRICTED"
+                            track_zone_type = zone.zone_type
                             break
                     if track_zone_type is None:
                         walkway_zones = [z for z in zones if z.zone_type == "WALKWAY"]
@@ -963,7 +963,7 @@ def _append_tracking_overlay_frame(
         if include_ppe
         else []
     )
-    has_zone_violation = zone_type in {"RESTRICTED", "WALKWAY"}
+    has_zone_violation = zone_type in {"RESTRICTED", "WALKWAY", "SLIPPERY"}
     worker = decision.get("worker")
     worker_status = getattr(worker, "status", "unknown")
     if missing_equipment or has_zone_violation:

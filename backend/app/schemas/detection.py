@@ -76,7 +76,7 @@ class TrackingOverlayFrame(BaseModel):
     camera_zone_view_id: int | None = None
     physical_zone_id: int | None = None
     zone_name: str | None = None
-    zone_type: Literal["RESTRICTED", "WALKWAY"] | None = None
+    zone_type: Literal["RESTRICTED", "WALKWAY", "SLIPPERY"] | None = None
 
 
 class TrackingOverlay(BaseModel):

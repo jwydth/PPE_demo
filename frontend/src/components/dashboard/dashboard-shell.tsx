@@ -86,6 +86,7 @@ const navViewByLabel: Record<string, DashboardView> = {
 const zoneColors: Record<ZoneType, string> = {
   RESTRICTED: "#dc2626",
   WALKWAY: "#0284c7",
+  SLIPPERY: "#f59e0b",
 };
 
 function IconButton({
@@ -440,7 +441,9 @@ function CameraPanel() {
   }, []);
 
   useEffect(() => {
-    setDwellThresholdSeconds(zoneType === "RESTRICTED" ? 1.5 : 3);
+    // WALKWAY tolerates longer presence; RESTRICTED and SLIPPERY are hazard
+    // zones monitored with the shorter dwell threshold.
+    setDwellThresholdSeconds(zoneType === "WALKWAY" ? 3 : 1.5);
   }, [zoneType]);
 
   useEffect(() => {
@@ -552,6 +555,10 @@ function CameraPanel() {
     [isStreaming, ppeEnabled, streamData.summary, streamData.tracking_overlay, videoResult?.tracking_overlay, zoneEnabled],
   );
   const isVideo = !!file?.type.startsWith("video/");
+  // Unified identifier for the current camera source: the RTSP URL for a live
+  // feed, otherwise the uploaded file name. Used as the zone storage key so
+  // auto-zone save/load/clear works identically for live and uploaded sources.
+  const sourceKey = isLive ? liveUrl : file?.name;
   const feedAspectRatio = visibleTrackingOverlay
     ? `${visibleTrackingOverlay.frame_width ?? 16} / ${visibleTrackingOverlay.frame_height ?? 9}`
     : "16 / 9";
@@ -622,6 +629,7 @@ function CameraPanel() {
         frame_height: 1000,
         frames: [],
       },
+      live_frame: null,
     });
     setError("");
     setStatus("");
@@ -636,7 +644,7 @@ function CameraPanel() {
     if (nextFile.type.startsWith("video/")) {
       await loadSavedZones(nextFile.name);
       // Automatically trigger upload and streaming
-      void startStreaming(nextFile);
+      void startStreaming(nextFile.name);
     }
   };
 
@@ -680,10 +688,10 @@ function CameraPanel() {
   };
 
   const persistZones = async (zonesToPersist = zonesReadyToSave) => {
-    if (!file || !isVideo) return;
-    await deleteZonesForVideo(file.name);
+    if (!sourceKey) return;
+    await deleteZonesForVideo(sourceKey);
     for (const zone of zonesToPersist) {
-      await saveZone(toBackendZone(zone, file.name));
+      await saveZone(toBackendZone(zone, sourceKey));
     }
     setZonesForVideo(
       zonesToPersist.map((zone) => ({
@@ -722,21 +730,27 @@ function CameraPanel() {
     setPpeSuggestions(({ [suggestion.suggestion_id]: _, ...rest }) => rest);
   };
 
-  const handleAcceptSuggestion = (suggestion: ZoneSuggestion, name: string) => {
-    if (!file) return;
+  const handleAcceptSuggestion = async (suggestion: ZoneSuggestion, name: string) => {
+    if (!sourceKey) return;
     setZoneSuggestions(({ [suggestion.suggestion_id]: _, ...rest }) => rest);
     const draft: DraftZone = {
       id: crypto.randomUUID(),
       name,
       type: suggestion.zone_type,
-      dwellThresholdSeconds: suggestion.zone_type === "RESTRICTED" ? 0.5 : 3,
+      dwellThresholdSeconds: suggestion.zone_type === "WALKWAY" ? 3 : 0.5,
       points: suggestion.normalized_coordinates,
     };
-    setZonesForVideo((prev) => [...prev, draft]);
-    setPendingAutoZoneIds((prev) => new Set([...prev, draft.id]));
+    const nextZones = [...zonesForVideo, draft];
+    setZonesForVideo(nextZones); // optimistic — show the zone on the overlay right away
+    // Enable zone monitoring immediately on accept: turning on zoneEnabled pushes
+    // update_settings to the backend, and persistZones saves the new zone and
+    // sends reload_zones so the running pipeline enforces it on the next frame
+    // (the retroactive foot-history check then catches anyone already inside).
+    setZoneEnabled(true);
+    await persistZones(nextZones);
     if (!isStreaming) {
-      // Only enter editing mode when not streaming — entering drawing mode
-      // during streaming disrupts video playback and hides the tracking overlay.
+      // Outside streaming, also open modify mode so the user can fine-tune the
+      // auto-placed polygon; re-saving updates the persisted zone.
       setIsDrawing(true);
       setConfigMode("modify");
       setSelectedZoneId(draft.id);
@@ -758,14 +772,14 @@ function CameraPanel() {
   };
 
   const clearSavedZones = async () => {
-    if (!file || !isVideo) return;
+    if (!sourceKey) return;
     setPhase("loading");
     setZoneActionState("clearing");
     setError("");
     try {
       await Promise.all([
         (async () => {
-          await deleteZonesForVideo(file.name);
+          await deleteZonesForVideo(sourceKey);
           setZonesForVideo([]);
           setDraftPoints([]);
           setPendingAutoZoneIds(new Set());
@@ -1008,6 +1022,7 @@ function CameraPanel() {
         frame_height: 1000,
         frames: [],
       },
+      live_frame: null,
     });
     setError("");
     setStatus("");
@@ -1396,6 +1411,7 @@ function CameraPanel() {
                         >
                           <option value="RESTRICTED">Restricted</option>
                           <option value="WALKWAY">Walkway</option>
+                          <option value="SLIPPERY">Slippery</option>
                         </select>
                       </label>
                       <div className="grid grid-cols-2 gap-2">
@@ -1491,7 +1507,7 @@ function CameraPanel() {
                       <button
                         type="button"
                         onClick={() => setIsDrawing(true)}
-                        disabled={!isVideo || (phase === "loading" && !isStreaming)}
+                        disabled={!(isVideo || isLive) || (phase === "loading" && !isStreaming)}
                         className="w-full rounded-md bg-lime-200 py-2 text-sm font-semibold text-green-950 hover:bg-lime-100 disabled:opacity-50"
                       >
                         Configure zones
@@ -1501,15 +1517,6 @@ function CameraPanel() {
                 </aside>
               </div>
             ) : null}
-
-            <button
-              type="button"
-              onClick={() => void runSelectedModels()}
-              disabled={phase === "loading"}
-              className="w-fit rounded-md bg-lime-200 px-4 py-2 text-sm font-semibold text-green-950 transition hover:bg-lime-100 disabled:opacity-50"
-            >
-              {phase === "loading" ? "Running selected models..." : "Run selected models"}
-            </button>
           </div>
         ) : null}
 
@@ -1898,7 +1905,11 @@ export function DashboardShell() {
             <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1.8fr)_minmax(360px,0.8fr)]">
               <div className="grid h-fit gap-4">
                 {activeView === "violations" ? <IncidentPanel /> : null}
-                {activeView === "feeds" ? <CameraPanel /> : null}
+                {/* CameraPanel stays mounted (only hidden) when on other tabs so
+                    its WebSocket keeps streaming instead of disconnecting on tab switch. */}
+                <div className={activeView === "feeds" ? "grid gap-4" : "hidden"}>
+                  <CameraPanel />
+                </div>
               </div>
               <div className="grid content-start gap-4">
                 <section className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">

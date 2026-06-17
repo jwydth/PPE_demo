@@ -80,7 +80,7 @@ export interface TrackingOverlayFrame {
   missing_equipment: string[];
   zone_id?: number;
   zone_name?: string;
-  zone_type?: "RESTRICTED" | "WALKWAY";
+  zone_type?: "RESTRICTED" | "WALKWAY" | "SLIPPERY";
   status: Category | "unknown";
 }
 

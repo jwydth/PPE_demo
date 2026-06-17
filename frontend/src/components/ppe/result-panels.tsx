@@ -171,6 +171,7 @@ function formatIncidentType(type: string): string {
 
 function formatZoneType(type?: string, name?: string): string {
   if (type === "WALKWAY") return `Left Walkway${name ? `: ${name}` : ""}`;
+  if (type === "SLIPPERY") return `Slippery Area${name ? `: ${name}` : ""}`;
   return `Restricted Zone Incursion${name ? `: ${name}` : ""}`;
 }
 

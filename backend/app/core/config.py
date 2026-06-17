@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     # Sign-detection / auto-zone settings
     SIGN_MODEL_PATH: str = "weights/sign_model.pt"
     SIGN_CONFIDENCE_THRESHOLD: float = 0.35
-    SIGN_CLASS_ZONE_MAP: dict[int, str] = {2: "RESTRICTED", 3: "RESTRICTED"}
+    SIGN_CLASS_ZONE_MAP: dict[int, str] = {2: "RESTRICTED", 3: "SLIPPERY"}
     SIGN_CLASS_NAMES: dict[int, str] = {
         0: "M001_MustWearHardHat",
         1: "M002_MustWearSafetyVest",
@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     AUTO_ZONE_CONFIRM_FRAMES: int = 3
     AUTO_PPE_CONFIRM_FRAMES: int = 1
     AUTO_ZONE_DEDUPE_GRID: float = 0.05
+    # A zone sign must hold still (within AUTO_ZONE_MOVE_TOLERANCE of where its
+    # still-streak began) for this many seconds before a zone is suggested. This
+    # prevents a sign being carried across the floor from creating a zone — only
+    # a sign that has been put down and left in place triggers one.
+    AUTO_ZONE_STATIONARY_SECONDS: float = 3.0
+    AUTO_ZONE_MOVE_TOLERANCE: float = 0.03  # max center drift (fraction of frame) still counted as "still"
     # Gap in seconds without a detection that is treated as the worker having exited any zone
     VIDEO_ZONE_REENTRY_GAP_SECONDS: float = 1.0
 

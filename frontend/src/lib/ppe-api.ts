@@ -133,13 +133,14 @@ export async function deleteZoneViolation(
 }
 
 export async function getZones(videoName: string): Promise<ZoneConfiguration[]> {
-  const res = await fetch(`${API_URL}/zones/${encodeURIComponent(videoName)}`);
+  // video_name is a query param so source keys with slashes (RTSP URLs) work.
+  const res = await fetch(`${API_URL}/zones?video_name=${encodeURIComponent(videoName)}`);
   if (!res.ok) throw await readError(res, "Could not load zones");
   return res.json();
 }
 
 export async function deleteZonesForVideo(videoName: string): Promise<{ deleted: number }> {
-  const res = await fetch(`${API_URL}/zones/video/${encodeURIComponent(videoName)}`, {
+  const res = await fetch(`${API_URL}/zones/video?video_name=${encodeURIComponent(videoName)}`, {
     method: "DELETE",
   });
   if (!res.ok) throw await readError(res, "Could not clear saved zones");

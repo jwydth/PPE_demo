@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.schemas.violation import ZoneViolation
 from app.schemas.zone import Zone
@@ -25,10 +25,14 @@ async def create_zone(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.get("/zones/{video_name}", response_model=list[Zone])
+# video_name is a query param (not a path param) so source keys containing
+# slashes — e.g. RTSP URLs like "rtsp://localhost:8554/mystream" — are handled
+# correctly. As a path param, the ASGI server decodes %2F back to "/" and the
+# extra segments break route matching (404).
+@router.get("/zones", response_model=list[Zone])
 async def get_zones(
-    video_name: str,
     service: Annotated[ZoneService, Depends(get_zone_service)],
+    video_name: str = Query(...),
 ) -> list[Zone]:
     return service.get_zones_by_source_key(video_name)
 
@@ -47,10 +51,13 @@ async def modify_zone(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.delete("/zones/video/{video_name}")
+# Defined before /zones/{zone_id} so "/zones/video" never gets matched as a
+# zone_id. video_name is a query param for the same slash-handling reason as the
+# GET route above.
+@router.delete("/zones/video")
 async def remove_zones_for_video(
-    video_name: str,
     service: Annotated[ZoneService, Depends(get_zone_service)],
+    video_name: str = Query(...),
 ) -> dict[str, str | int]:
     deleted = service.delete_zones_by_source_key(video_name)
     return {"status": "success", "deleted": deleted}

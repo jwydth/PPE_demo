@@ -330,6 +330,8 @@ def record_zone_violation(
     timestamp = datetime.now(timezone.utc).isoformat()
     if zone.zone_type == "WALKWAY":
         label = f"Left Walkway: {zone.zone_name}"
+    elif zone.zone_type == "SLIPPERY":
+        label = f"Entered Slippery Area: {zone.zone_name}"
     else:
         label = f"Entered Zone: {zone.zone_name}"
 

@@ -108,78 +108,91 @@ def _sign(
 
 
 class TestSignZoneRegistry:
-    def test_no_emit_before_confirm_frames(self, monkeypatch):
-        monkeypatch.setattr(settings, "AUTO_ZONE_CONFIRM_FRAMES", 3)
-        reg = SignZoneRegistry()
-        sign = _sign()
-        assert reg.update([sign], 1000, 1000, 0) == []
-        assert reg.update([sign], 1000, 1000, 15) == []
+    # update() now needs fps to convert AUTO_ZONE_STATIONARY_SECONDS into a frame
+    # count: required_frames = AUTO_ZONE_STATIONARY_SECONDS * fps.
+    FPS = 10.0
 
-    def test_emits_on_confirm_frame(self, monkeypatch):
-        monkeypatch.setattr(settings, "AUTO_ZONE_CONFIRM_FRAMES", 3)
+    def test_no_emit_before_stationary_time(self, monkeypatch):
+        monkeypatch.setattr(settings, "AUTO_ZONE_STATIONARY_SECONDS", 2.0)  # 20 frames @ 10fps
         reg = SignZoneRegistry()
         sign = _sign()
-        reg.update([sign], 1000, 1000, 0)
-        reg.update([sign], 1000, 1000, 15)
-        result = reg.update([sign], 1000, 1000, 30)
+        assert reg.update([sign], 1000, 1000, 0, self.FPS) == []
+        assert reg.update([sign], 1000, 1000, 10, self.FPS) == []  # 10 < 20
+
+    def test_emits_after_stationary_time(self, monkeypatch):
+        monkeypatch.setattr(settings, "AUTO_ZONE_STATIONARY_SECONDS", 2.0)  # 20 frames
+        reg = SignZoneRegistry()
+        sign = _sign()
+        reg.update([sign], 1000, 1000, 0, self.FPS)
+        reg.update([sign], 1000, 1000, 10, self.FPS)
+        result = reg.update([sign], 1000, 1000, 20, self.FPS)  # 20 >= 20
         assert len(result) == 1
         s = result[0]
         assert s.zone_type == "RESTRICTED"
         assert s.source_class == "P004_NoThoroughfare"
         assert 0.0 < s.confidence <= 1.0
         assert len(s.normalized_coordinates) == 4
-        assert s.frame_index == 30
+        assert s.frame_index == 20
+
+    def test_carried_sign_never_emits(self, monkeypatch):
+        """A sign that moves each pass keeps restarting its still-streak → no zone."""
+        monkeypatch.setattr(settings, "AUTO_ZONE_STATIONARY_SECONDS", 1.0)  # 10 frames
+        reg = SignZoneRegistry()
+        # Each pass the sign moves far beyond AUTO_ZONE_MOVE_TOLERANCE (0.03 → 30px).
+        for i, x in enumerate([100.0, 250.0, 400.0, 550.0, 700.0]):
+            bbox = (x, 100.0, x + 80.0, 200.0)
+            assert reg.update([_sign(bbox=bbox)], 1000, 1000, i * 10, self.FPS) == []
 
     def test_emits_only_once(self, monkeypatch):
-        monkeypatch.setattr(settings, "AUTO_ZONE_CONFIRM_FRAMES", 2)
+        monkeypatch.setattr(settings, "AUTO_ZONE_STATIONARY_SECONDS", 1.0)  # 10 frames
         reg = SignZoneRegistry()
         sign = _sign()
-        reg.update([sign], 1000, 1000, 0)
-        first = reg.update([sign], 1000, 1000, 15)
+        reg.update([sign], 1000, 1000, 0, self.FPS)
+        first = reg.update([sign], 1000, 1000, 10, self.FPS)
         assert len(first) == 1
-        assert reg.update([sign], 1000, 1000, 30) == []
-        assert reg.update([sign], 1000, 1000, 45) == []
+        assert reg.update([sign], 1000, 1000, 20, self.FPS) == []
+        assert reg.update([sign], 1000, 1000, 30, self.FPS) == []
 
     def test_dismiss_suppresses_reemit(self, monkeypatch):
-        monkeypatch.setattr(settings, "AUTO_ZONE_CONFIRM_FRAMES", 2)
+        monkeypatch.setattr(settings, "AUTO_ZONE_STATIONARY_SECONDS", 1.0)
         reg = SignZoneRegistry()
         sign = _sign()
-        reg.update([sign], 1000, 1000, 0)
-        [suggestion] = reg.update([sign], 1000, 1000, 15)
+        reg.update([sign], 1000, 1000, 0, self.FPS)
+        [suggestion] = reg.update([sign], 1000, 1000, 10, self.FPS)
         reg.dismiss(suggestion.suggestion_id)
-        assert reg.update([sign], 1000, 1000, 30) == []
+        assert reg.update([sign], 1000, 1000, 20, self.FPS) == []
 
     def test_accept_suppresses_reemit(self, monkeypatch):
-        monkeypatch.setattr(settings, "AUTO_ZONE_CONFIRM_FRAMES", 2)
+        monkeypatch.setattr(settings, "AUTO_ZONE_STATIONARY_SECONDS", 1.0)
         reg = SignZoneRegistry()
         sign = _sign()
-        reg.update([sign], 1000, 1000, 0)
-        [suggestion] = reg.update([sign], 1000, 1000, 15)
+        reg.update([sign], 1000, 1000, 0, self.FPS)
+        [suggestion] = reg.update([sign], 1000, 1000, 10, self.FPS)
         reg.accept(suggestion.suggestion_id)
-        assert reg.update([sign], 1000, 1000, 30) == []
+        assert reg.update([sign], 1000, 1000, 20, self.FPS) == []
 
     def test_two_distinct_signs_emit_independently(self, monkeypatch):
-        monkeypatch.setattr(settings, "AUTO_ZONE_CONFIRM_FRAMES", 2)
+        monkeypatch.setattr(settings, "AUTO_ZONE_STATIONARY_SECONDS", 1.0)
         reg = SignZoneRegistry()
         sign_a = _sign(class_id=2, bbox=(100.0, 100.0, 200.0, 200.0))
         sign_b = _sign(class_id=3, bbox=(700.0, 700.0, 800.0, 800.0))
-        reg.update([sign_a, sign_b], 1000, 1000, 0)
-        results = reg.update([sign_a, sign_b], 1000, 1000, 15)
+        reg.update([sign_a, sign_b], 1000, 1000, 0, self.FPS)
+        results = reg.update([sign_a, sign_b], 1000, 1000, 10, self.FPS)
         assert len(results) == 2
         source_classes = {r.source_class for r in results}
         assert source_classes == {"P004_NoThoroughfare", "W011_Slippery"}
 
     def test_dismissed_sign_does_not_block_new_sign_at_different_position(self, monkeypatch):
-        monkeypatch.setattr(settings, "AUTO_ZONE_CONFIRM_FRAMES", 2)
+        monkeypatch.setattr(settings, "AUTO_ZONE_STATIONARY_SECONDS", 1.0)
         reg = SignZoneRegistry()
         sign_a = _sign(class_id=2, bbox=(100.0, 100.0, 200.0, 200.0))
         sign_b = _sign(class_id=2, bbox=(700.0, 700.0, 800.0, 800.0))
-        reg.update([sign_a], 1000, 1000, 0)
-        [s] = reg.update([sign_a], 1000, 1000, 15)
+        reg.update([sign_a], 1000, 1000, 0, self.FPS)
+        [s] = reg.update([sign_a], 1000, 1000, 10, self.FPS)
         reg.dismiss(s.suggestion_id)
-        # sign_b at a different grid cell should still be tracked independently
-        reg.update([sign_b], 1000, 1000, 30)
-        results = reg.update([sign_b], 1000, 1000, 45)
+        # sign_b at a different position should still be tracked independently
+        reg.update([sign_b], 1000, 1000, 20, self.FPS)
+        results = reg.update([sign_b], 1000, 1000, 30, self.FPS)
         assert len(results) == 1
 
 
@@ -236,8 +249,9 @@ def _make_detector(ppe_model, sign_model) -> ppe.PPEDetector:
 
 
 def test_pipeline_emits_exactly_one_zone_suggestion(monkeypatch):
-    """3 frames each containing the same sign → exactly 1 zone_suggestion after confirm_frames."""
-    monkeypatch.setattr(settings, "AUTO_ZONE_CONFIRM_FRAMES", 3)
+    """3 frames each containing the same stationary sign → exactly 1 zone_suggestion."""
+    # fps from _video_metadata is 10.0, so 0.1s → 1 frame of stationarity required.
+    monkeypatch.setattr(settings, "AUTO_ZONE_STATIONARY_SECONDS", 0.1)
     monkeypatch.setattr(settings, "SIGN_PASS_FRAME_INTERVAL", 1)
     monkeypatch.setattr(settings, "SIGN_CONFIDENCE_THRESHOLD", 0.5)
 
@@ -266,8 +280,8 @@ def test_pipeline_emits_exactly_one_zone_suggestion(monkeypatch):
 
 
 def test_pipeline_does_not_emit_suggestion_twice(monkeypatch):
-    """6 frames with same sign → still only 1 zone_suggestion (EMITTED is terminal)."""
-    monkeypatch.setattr(settings, "AUTO_ZONE_CONFIRM_FRAMES", 2)
+    """6 frames with same stationary sign → still only 1 zone_suggestion (emit is terminal)."""
+    monkeypatch.setattr(settings, "AUTO_ZONE_STATIONARY_SECONDS", 0.1)
     monkeypatch.setattr(settings, "SIGN_PASS_FRAME_INTERVAL", 1)
     monkeypatch.setattr(settings, "SIGN_CONFIDENCE_THRESHOLD", 0.5)
 

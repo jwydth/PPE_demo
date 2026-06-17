@@ -222,6 +222,8 @@ function trackingLabels(frame: TrackingOverlayFrame): string[] {
     const zoneLabel =
       frame.zone_type === "RESTRICTED"
         ? "Restricted zone"
+        : frame.zone_type === "SLIPPERY"
+        ? "Slippery area"
         : "Walkway violation";
     labels.push(`Zone: ${frame.zone_name ? `${zoneLabel} - ${frame.zone_name}` : zoneLabel}`);
   }
@@ -234,6 +236,7 @@ function trackingLabels(frame: TrackingOverlayFrame): string[] {
 
 function trackingColor(frame: TrackingOverlayFrame): string {
   if (frame.zone_type === "RESTRICTED") return "#ef4444";
+  if (frame.zone_type === "SLIPPERY") return "#f59e0b";
   if (frame.zone_type === "WALKWAY") return "#3b82f6";
   if (frame.missing_equipment.length > 0 || frame.status === "violation" || !frame.compliant) {
     return "#ef4444";

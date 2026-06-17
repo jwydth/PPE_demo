@@ -1,5 +1,5 @@
 export type ShapeType = "polygon";
-export type ZoneType = "RESTRICTED" | "WALKWAY";
+export type ZoneType = "RESTRICTED" | "WALKWAY" | "SLIPPERY";
 
 export interface Point2D {
   x: number;
