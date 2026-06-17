@@ -7,6 +7,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[2]
 
 class Settings(BaseSettings):
     MODEL_PATH: str = "weights/ppe_v5.pt"
+    SIGN_MODEL_PATH: str = "weights/signdetect.pt"
     DATABASE_URL: str | None = None
     MINIO_ENDPOINT: str | None = None
     MINIO_ACCESS_KEY: str | None = None

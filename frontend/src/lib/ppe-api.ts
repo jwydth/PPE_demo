@@ -32,6 +32,19 @@ export async function analyzeImage(file: File): Promise<DetectionResponse> {
   return res.json() as Promise<DetectionResponse>;
 }
 
+export async function analyzeSignImage(file: File): Promise<DetectionResponse> {
+  const form = new FormData();
+  form.append("file", file);
+
+  const res = await fetch(`${API_URL}/predict-sign`, {
+    method: "POST",
+    body: form,
+  });
+
+  if (!res.ok) throw await readError(res, "Sign inference request failed");
+  return res.json() as Promise<DetectionResponse>;
+}
+
 export async function analyzeVideo(
   file: File,
   options: { enablePpe?: boolean; enableZone?: boolean } = {},

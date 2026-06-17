@@ -14,6 +14,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   analyzeImage,
+  analyzeSignImage,
   analyzeVideo,
   deleteZonesForVideo,
   deleteViolation,
@@ -64,7 +65,7 @@ const zoneStatus = {
 };
 
 type AnalysisPhase = "idle" | "loading" | "done" | "error";
-type DashboardView = "feeds" | "violations";
+type DashboardView = "feeds" | "signs" | "violations";
 type DraftZone = {
   id: string;
   name: string;
@@ -75,6 +76,7 @@ type DraftZone = {
 
 const navViewByLabel: Record<string, DashboardView> = {
   "Camera Feeds": "feeds",
+  "Sign Detection": "signs",
   "Violations Log": "violations",
 };
 
@@ -82,6 +84,21 @@ const zoneColors: Record<ZoneType, string> = {
   RESTRICTED: "#dc2626",
   WALKWAY: "#0284c7",
 };
+
+function formatSignDetectionResult(result: DetectionResponse): DetectionResponse {
+  return {
+    ...result,
+    detections: result.detections.map((detection) => ({
+      ...detection,
+      label: formatSignLabel(detection.label),
+    })),
+  };
+}
+
+function formatSignLabel(label: string): string {
+  if (label === "W011_Slippery") return "Slippery";
+  return label;
+}
 
 function IconButton({
   label,
@@ -1206,6 +1223,180 @@ function CameraPanel() {
   );
 }
 
+function SignDetectionPanel() {
+  const [file, setFile] = useState<File | null>(null);
+  const [result, setResult] = useState<DetectionResponse | null>(null);
+  const [phase, setPhase] = useState<AnalysisPhase>("idle");
+  const [error, setError] = useState("");
+  const displayResult = useMemo(
+    () => (result ? formatSignDetectionResult(result) : null),
+    [result],
+  );
+  const previewUrl = useMemo(() => {
+    if (!file) return "";
+    return URL.createObjectURL(file);
+  }, [file]);
+
+  useEffect(() => {
+    return () => {
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+    };
+  }, [previewUrl]);
+
+  const selectFile = (nextFile: File) => {
+    setFile(nextFile);
+    setResult(null);
+    setError("");
+    setPhase("idle");
+  };
+
+  const reset = () => {
+    setFile(null);
+    setResult(null);
+    setError("");
+    setPhase("idle");
+  };
+
+  const runSignDetection = async () => {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setError("Sign detection currently supports image uploads only.");
+      setPhase("error");
+      return;
+    }
+
+    setResult(null);
+    setError("");
+    setPhase("loading");
+    try {
+      setResult(await analyzeSignImage(file));
+      setPhase("done");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not analyze the uploaded sign image");
+      setPhase("error");
+    }
+  };
+
+  return (
+    <section className="h-fit overflow-hidden rounded-md border border-slate-300 bg-slate-950 shadow-md">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
+        <div>
+          <p className="text-sm font-semibold text-white">Sign Detection</p>
+          <p className="text-xs text-slate-400">
+            Upload an image to detect M014 Helmet, M015 Vest, P004 No Thoroughfare, and W011 Slippery signs
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <IconButton label="Fullscreen sign frame" icon={Maximize2} />
+        </div>
+      </div>
+
+      <div className="grid gap-4 p-4">
+        {!file ? (
+          <FileUpload
+            label="Upload sign image"
+            helper="Use a JPEG, PNG, WebP, or BMP image for sign detection."
+            onFiles={(files) => selectFile(files[0])}
+          />
+        ) : null}
+
+        {file ? (
+          <div className="grid gap-4 rounded-md border border-slate-800 bg-slate-900 p-3">
+            <div className="overflow-hidden rounded-md border border-slate-700 bg-slate-950">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={previewUrl}
+                alt="Sign image preview"
+                className="max-h-[360px] w-full object-contain"
+              />
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-semibold text-white">{file.name}</p>
+                <p className="text-xs text-slate-400">Sign image frame</p>
+              </div>
+              <button
+                type="button"
+                onClick={reset}
+                className="rounded-md border border-slate-700 px-3 py-2 text-sm font-semibold text-slate-200 transition hover:bg-white/10"
+              >
+                Replace file
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => void runSignDetection()}
+              disabled={phase === "loading"}
+              className="w-fit rounded-md bg-lime-200 px-4 py-2 text-sm font-semibold text-green-950 transition hover:bg-lime-100 disabled:opacity-50"
+            >
+              {phase === "loading" ? "Running sign model..." : "Run sign detection"}
+            </button>
+          </div>
+        ) : null}
+
+        {phase === "loading" ? <LoadingState text="Running sign inference..." /> : null}
+        {phase === "error" ? <ErrorState text={error} /> : null}
+
+        {phase === "done" && file && result ? (
+          <div className="grid gap-4">
+            {result ? <SignDetectionSummary result={result} /> : null}
+            {displayResult ? (
+              <BoundingBoxView file={file} detections={displayResult.detections} showConfidence={false} />
+            ) : null}
+            <section className="rounded-md border border-slate-200 bg-slate-50 p-3">
+              <h3 className="text-sm font-semibold text-slate-950">Detected Signs</h3>
+              <div className="mt-3 grid gap-2">
+                {displayResult && displayResult.detections.length > 0 ? (
+                  displayResult.detections.map((detection) => (
+                    <div
+                      key={detection.id}
+                      className="flex items-center justify-between rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
+                    >
+                      <span className="flex min-w-0 items-center gap-2 font-semibold text-slate-800">
+                        <span
+                          className="size-2.5 shrink-0 rounded-full"
+                          style={{ backgroundColor: detection.color }}
+                        />
+                        <span className="truncate">{detection.label}</span>
+                      </span>
+                    </div>
+                  ))
+                ) : (
+                  <EmptyState text="No supported signs were detected in this image." />
+                )}
+              </div>
+            </section>
+          </div>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function SignDetectionSummary({ result }: { result: DetectionResponse }) {
+  const counts = result.detections.reduce<Record<string, number>>((acc, detection) => {
+    acc[detection.label] = (acc[detection.label] ?? 0) + 1;
+    return acc;
+  }, {});
+  const averageConfidence =
+    result.detections.length > 0
+      ? result.detections.reduce((sum, detection) => sum + detection.confidence, 0) /
+        result.detections.length
+      : 0;
+
+  return (
+    <div className="grid gap-3 sm:grid-cols-3 xl:grid-cols-6">
+      <CompactMetric label="Signs" value={result.detections.length} />
+      <CompactMetric label="M014" value={counts.M014_Helmet ?? 0} />
+      <CompactMetric label="M015" value={counts.M015_Vest ?? 0} />
+      <CompactMetric label="P004" value={counts.P004_NoThoroughfare ?? 0} />
+      <CompactMetric label="W011" value={counts.W011_Slippery ?? 0} />
+      <CompactMetric label="Avg Conf" value={`${Math.round(averageConfidence * 100)}%`} />
+    </div>
+  );
+}
+
 function CompactMetric({
   label,
   value,
@@ -1456,10 +1647,14 @@ export function DashboardShell() {
   const pageTitle =
     activeView === "violations"
         ? "Violations Log"
+        : activeView === "signs"
+          ? "Sign Detection"
         : "Packaging Line 1";
   const pageDescription =
     activeView === "violations"
         ? "Review PPE and zone incidents recorded by the backend incident store."
+        : activeView === "signs"
+          ? "Upload a sign image and classify supported safety signage with the temporary sign model."
         : "Upload a camera simulation file, choose which detection models are enabled, and review the model outputs in one place.";
 
   return (
@@ -1498,6 +1693,7 @@ export function DashboardShell() {
             <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1.8fr)_minmax(360px,0.8fr)]">
               <div className="grid h-fit gap-4">
                 {activeView === "violations" ? <IncidentPanel /> : null}
+                {activeView === "signs" ? <SignDetectionPanel /> : null}
                 {activeView === "feeds" ? <CameraPanel /> : null}
               </div>
               <div className="grid content-start gap-4">

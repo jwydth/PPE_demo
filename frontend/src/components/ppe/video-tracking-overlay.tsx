@@ -249,7 +249,7 @@ function formatEquipmentLabel(label: string): string {
 
 function trackingColor(frame: TrackingOverlayFrame): string {
   if (frame.zone_type === "RESTRICTED") return "#ef4444";
-  if (frame.zone_type === "WALKWAY") return "#3b82f6";
+  if (frame.zone_type === "WALKWAY") return "#ef4444";
   if (frame.missing_equipment.length > 0 || frame.status === "violation" || !frame.compliant) {
     return "#ef4444";
   }

@@ -14,6 +14,7 @@ from app.services.ppe_violation_service import (
     PPEViolationService,
     get_ppe_violation_service,
 )
+from app.services.sign_detector import SignDetector
 from app.services.zone_violation_service import (
     ZoneViolationService,
     get_zone_violation_service,
@@ -23,6 +24,7 @@ router = APIRouter(tags=["detection"])
 logger = logging.getLogger(__name__)
 
 _detector = PPEDetector()
+_sign_detector = SignDetector()
 
 _ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/bmp"}
 _ALLOWED_VIDEO_TYPES = {
@@ -56,6 +58,29 @@ async def predict(file: UploadFile = File(...)) -> DetectionResponse:
         )
 
     return _detector.predict(image)
+
+
+@router.post("/predict-sign", response_model=DetectionResponse)
+async def predict_sign(file: UploadFile = File(...)) -> DetectionResponse:
+    if file.content_type not in _ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=(
+                f"Unsupported content type '{file.content_type}'. "
+                "Accepted: image/jpeg, image/png, image/webp, image/bmp."
+            ),
+        )
+
+    data = await file.read()
+
+    try:
+        image = Image.open(io.BytesIO(data)).convert("RGB")
+    except Exception:
+        raise HTTPException(
+            status_code=400, detail="Could not decode the uploaded image."
+        )
+
+    return _sign_detector.predict(image)
 
 
 @router.post("/predict-video", response_model=VideoProcessingResponse)
