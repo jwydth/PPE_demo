@@ -10,7 +10,10 @@ from fastapi import Depends
 from sqlmodel import Session
 
 from app.db.session import get_engine, get_session
+from app.models.camera import Camera
 from app.models.ppe_violation import PPEViolation, PPEViolationSubject
+from app.repositories.camera_repository import CameraRepository
+from app.repositories.factory_repository import FactoryRepository
 from app.repositories.ppe_violation_repository import PPEViolationRepository
 from app.schemas.violation import ViolationReport
 from app.services import ServiceNotFoundError, ServiceValidationError
@@ -39,9 +42,13 @@ class PPEViolationService:
             Depends(PPEViolationRepository),
         ],
         storage: EvidenceStorage | None = None,
+        camera_repository: CameraRepository | None = None,
+        factory_repository: FactoryRepository | None = None,
     ) -> None:
         self.repository = repository
         self.storage = storage
+        self.camera_repository = camera_repository
+        self.factory_repository = factory_repository
 
     def persist_violation(
         self,
@@ -59,6 +66,7 @@ class PPEViolationService:
         confidence: float | None,
         camera_id: int | None = None,
     ) -> ViolationReport:
+        camera_id = self._resolve_camera_id(camera_id, video_name)
         storage = self._require_storage()
         stored_object = storage.upload_ppe_snapshot(local_snapshot_path)
         violation = self.repository.create(
@@ -110,6 +118,7 @@ class PPEViolationService:
         frame_index: int | None = None,
         camera_id: int | None = None,
     ) -> ViolationReport:
+        camera_id = self._resolve_camera_id(camera_id, video_name)
         violation = self.repository.create(
             PPEViolation(
                 camera_id=_optional_positive_id(camera_id, "camera_id"),
@@ -230,6 +239,70 @@ class PPEViolationService:
         if self.storage is None:
             return _to_snapshot_url(snapshot_path)
         return self.storage.get_object_url(snapshot_path)
+
+    def _resolve_camera_id(
+        self,
+        camera_id: int | None,
+        video_name: str | None,
+    ) -> int | None:
+        """Resolve camera_id via lazy get-or-create from source_key.
+
+        Priority:
+        1. Explicit camera_id wins — return as-is (validation happens later).
+        2. If video_name is provided, look up Camera by source_key.
+           - Found   → return its id.
+           - Missing → create a Camera row (using the default factory) and
+             return the new id.
+        3. Neither supplied → return None.
+        """
+        if camera_id is not None:
+            return camera_id
+
+        source_key = _optional_text(video_name)
+        if source_key is None or self.camera_repository is None:
+            return None
+
+        try:
+            camera = self.camera_repository.get_by_source_key(source_key)
+            if camera is not None:
+                return camera.id
+
+            # Lazy-create: resolve the default factory id first.
+            factory_id: int | None = None
+            if self.factory_repository is not None:
+                factory = self.factory_repository.get_or_create_default_factory()
+                factory_id = factory.id
+
+            if factory_id is None:
+                logger.warning(
+                    "Cannot create implicit camera for '%s': no factory available.",
+                    source_key,
+                )
+                return None
+
+            camera = self.camera_repository.create(
+                Camera(
+                    factory_id=factory_id,
+                    name=source_key,
+                    source_key=source_key,
+                    source_uri=None,
+                    is_active=True,
+                )
+            )
+            logger.info(
+                "Implicitly created Camera id=%s for source_key='%s'",
+                camera.id,
+                source_key,
+            )
+            return camera.id
+        except Exception:
+            # Never let camera resolution break violation persistence.
+            logger.warning(
+                "Could not resolve camera_id for source_key='%s'; storing NULL.",
+                source_key,
+                exc_info=True,
+            )
+            return None
 
     def _require_storage(self) -> EvidenceStorage:
         if self.storage is None:
@@ -379,6 +452,8 @@ def get_ppe_violation_service(
     return PPEViolationService(
         PPEViolationRepository(session),
         storage,
+        CameraRepository(session),
+        FactoryRepository(session),
     )
 
 
@@ -388,4 +463,6 @@ def open_ppe_violation_service() -> Iterator[PPEViolationService]:
         yield PPEViolationService(
             PPEViolationRepository(session),
             get_evidence_storage(),
+            CameraRepository(session),
+            FactoryRepository(session),
         )
