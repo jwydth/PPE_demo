@@ -11,6 +11,7 @@ import {
   Play,
   RefreshCw,
   Shield,
+  Trash2,
   type LucideIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -26,6 +27,7 @@ import {
   getSafetyEvents,
   getZones,
   saveZone,
+  deleteAllIncidents,
 } from "@/lib/ppe-api";
 import { BoundingBoxView } from "@/components/ppe/bounding-box-view";
 import { FileUpload } from "@/components/ppe/file-upload";
@@ -987,11 +989,6 @@ function CameraPanel() {
       setPhase("error");
       return;
     }
-    if (zoneEnabled && (isLive || isVideo) && zonesReadyToSave.length === 0 && zonesForVideo.length === 0) {
-      setError("Draw or load at least one zone before running Zone Monitoring.");
-      setPhase("error");
-      return;
-    }
 
     if (zoneEnabled && (isLive || isVideo)) {
       let hasOverlap = false;
@@ -1859,6 +1856,20 @@ function IncidentPanel() {
     setEvents((current) => current.filter((item) => item.id !== event.id));
   };
 
+  const deleteAllEvents = async () => {
+    if (!confirm("Are you sure you want to delete all logged violations? This action cannot be undone.")) return;
+    setLoading(true);
+    setError("");
+    try {
+      await deleteAllIncidents();
+      setEvents([]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not delete violations");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <section className="rounded-md border border-slate-200 bg-slate-50 p-3 shadow-sm">
       <div className="mb-3 flex items-start justify-between gap-3">
@@ -1866,13 +1877,24 @@ function IncidentPanel() {
           <h2 className="text-sm font-semibold text-slate-950">Recent Violations</h2>
           <p className="text-xs text-slate-500">Loaded from the PPE backend incident store.</p>
         </div>
-        <button
-          onClick={() => void loadEvents()}
-          className="rounded-md border border-slate-200 bg-white p-2 text-xs font-semibold text-slate-700 transition hover:border-slate-300 hover:text-slate-950"
-          type="button"
-        >
-          <RefreshCw className="size-3.5" aria-hidden="true" />
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => void deleteAllEvents()}
+            disabled={events.length === 0 || loading}
+            className="flex items-center gap-1.5 rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-xs font-semibold text-red-700 transition hover:bg-red-100 hover:border-red-300 disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:border-slate-200 disabled:text-slate-400"
+            type="button"
+          >
+            <Trash2 className="size-3.5" />
+            <span>Delete All</span>
+          </button>
+          <button
+            onClick={() => void loadEvents()}
+            className="rounded-md border border-slate-200 bg-white p-2 text-xs font-semibold text-slate-700 transition hover:border-slate-300 hover:text-slate-950"
+            type="button"
+          >
+            <RefreshCw className="size-3.5" aria-hidden="true" />
+          </button>
+        </div>
       </div>
       {loading ? <LoadingState text="Loading recent incidents..." /> : null}
       {error ? <ErrorState text={error} /> : null}

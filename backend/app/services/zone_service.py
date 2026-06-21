@@ -352,9 +352,14 @@ def record_zone_violation(
     local_snapshot_path = SNAPSHOT_DIR / snapshot_filename
     try:
         with open_zone_violation_service() as service:
+            # Sentinel IDs (negative) represent virtual zones (e.g. "No Walkway
+            # Defined") that have no database row.  Pass None so the DB layer
+            # stores a NULL foreign key instead of rejecting a negative ID.
+            db_view_id = zone.camera_zone_view_id if zone.camera_zone_view_id > 0 else None
+            db_phys_id = zone.physical_zone_id if zone.physical_zone_id > 0 else None
             saved = service.persist_zone_violation(
-                camera_zone_view_id=zone.camera_zone_view_id,
-                physical_zone_id=zone.physical_zone_id,
+                camera_zone_view_id=db_view_id,
+                physical_zone_id=db_phys_id,
                 zone_name=zone.zone_name,
                 zone_type=zone.zone_type,
                 track_id=person.track_id or 0,

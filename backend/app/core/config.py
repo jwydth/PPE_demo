@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     AUTO_ZONE_MOVE_TOLERANCE: float = 0.03  # max center drift (fraction of frame) still counted as "still"
     # Gap in seconds without a detection that is treated as the worker having exited any zone
     VIDEO_ZONE_REENTRY_GAP_SECONDS: float = 1.0
+    # When zone monitoring is enabled but no WALKWAY zone is defined, every
+    # detected walker is treated as being outside a walkway.  A violation is
+    # raised once the worker has been visible for this many consecutive seconds.
+    NO_WALKWAY_DWELL_SECONDS: float = 1.5
 
     @model_validator(mode="after")
     def _coerce_sign_dict_keys(self) -> "Settings":

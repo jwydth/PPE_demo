@@ -65,11 +65,13 @@ ffmpeg -version
 
 ### Start the RTSP stream
 
-Open a terminal in the folder that contains your video file. Replace
-`mp_.mp4` with the actual video filename.
+Open a terminal in the folder that contains your video file, configure and run the FFmpeg command below.
+Make sure to configure the command with the attributes below before running:
++ Replace `mp_.mp4` with the actual video filename.
++ The `-r 15` flag sets the output frame rate to 15 FPS. Adjust this value if needed.
 
-```powershell
-ffmpeg -re -stream_loop -1 -i mp_.mp4 -c:v libx264 -preset ultrafast -tune zerolatency -profile:v baseline -level 3.0 -g 30 -bf 0 -flags +global_header -f rtsp -rtsp_transport tcp rtsp://localhost:8554/mystream
+```powershell\
+ffmpeg -re -stream_loop -1 -i mp_.mp4 -r 15 -c:v libx264 -preset ultrafast -tune zerolatency -profile:v baseline -level 3.0 -g 15 -bf 0 -flags +global_header -f rtsp -rtsp_transport tcp rtsp://localhost:8554/mystream
 ```
 
 This command keeps running and loops the video into MediaMTX. Leave this
