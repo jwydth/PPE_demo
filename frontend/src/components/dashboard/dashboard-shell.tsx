@@ -663,17 +663,6 @@ function CameraPanel() {
   const finishZone = () => {
     if (draftPoints.length < 3) return;
 
-    const hasOverlap = zonesForVideo.some((existingZone) =>
-      doPolygonsOverlap(draftPoints, existingZone.points),
-    );
-
-    if (hasOverlap) {
-      window.alert(
-        "Cannot finish zone: The drawn polygon overlaps with an existing zone. Please adjust the vertices to avoid overlap.",
-      );
-      return;
-    }
-
     setZonesForVideo((current) => [
       ...current,
       {
@@ -760,6 +749,29 @@ function CameraPanel() {
   };
 
   const handleSaveZones = async () => {
+    let hasOverlap = false;
+    for (let i = 0; i < zonesReadyToSave.length; i++) {
+      for (let j = i + 1; j < zonesReadyToSave.length; j++) {
+        if (
+          zonesReadyToSave[i].type !== zonesReadyToSave[j].type &&
+          doPolygonsOverlap(zonesReadyToSave[i].points, zonesReadyToSave[j].points)
+        ) {
+          hasOverlap = true;
+          break;
+        }
+      }
+      if (hasOverlap) break;
+    }
+
+    if (hasOverlap) {
+      window.alert(
+        "Cannot save zones: Zones of different types overlap. Please adjust the vertices to avoid overlap.",
+      );
+      setZoneActionState("error");
+      setTimeout(() => setZoneActionState("idle"), 2000);
+      return;
+    }
+
     setZoneActionState("saving");
     try {
       await Promise.all([persistZones(), new Promise((r) => setTimeout(r, 600))]);
@@ -979,6 +991,28 @@ function CameraPanel() {
       setError("Draw or load at least one zone before running Zone Monitoring.");
       setPhase("error");
       return;
+    }
+
+    if (zoneEnabled && (isLive || isVideo)) {
+      let hasOverlap = false;
+      for (let i = 0; i < zonesReadyToSave.length; i++) {
+        for (let j = i + 1; j < zonesReadyToSave.length; j++) {
+          if (
+            zonesReadyToSave[i].type !== zonesReadyToSave[j].type &&
+            doPolygonsOverlap(zonesReadyToSave[i].points, zonesReadyToSave[j].points)
+          ) {
+            hasOverlap = true;
+            break;
+          }
+        }
+        if (hasOverlap) break;
+      }
+
+      if (hasOverlap) {
+        setError("Cannot run analysis: Zones of different types overlap. Please adjust the vertices to avoid overlap.");
+        setPhase("error");
+        return;
+      }
     }
 
     setImageResult(null);
