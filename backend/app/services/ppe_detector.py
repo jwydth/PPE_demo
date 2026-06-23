@@ -451,6 +451,9 @@ class PPEDetector:
                     worker = next((w for w in workers if track_id in w.track_ids), None)
                     if worker is None or cv_id in worker.reported_zones:
                         continue
+                    # Janitors are immune to slippery zone violations
+                    if zone.zone_type == "SLIPPERY" and worker.role == "janitor":
+                        continue
                     # Compute the longest unbroken streak of in-zone frames
                     max_dwell = 0.0
                     current_dwell = 0.0
@@ -632,12 +635,16 @@ class PPEDetector:
                                     if zv:
                                         yield StreamEvent(event="zone_violation", frame_index=frame_index, data=zv.model_dump())
                         else:
+                            # Janitors are immune to slippery zone violations
+                            if zone.zone_type == "SLIPPERY" and worker.role == "janitor":
+                                continue
+
                             if in_z:
                                 worker.zone_dwell[cv_id] = worker.zone_dwell.get(cv_id, 0) + (stride / fps)
                                 dwell = worker.zone_dwell[cv_id]
-                                logger.info(f"[ZONE] Frame {frame_index} worker {person.track_id}: RESTRICTED '{zone.zone_name}' dwell={dwell:.2f}s / threshold={zone.threshold}s already_reported={cv_id in worker.reported_zones}")
+                                logger.info(f"[ZONE] Frame {frame_index} worker {person.track_id} in role {worker.role}: {zone.zone_type} '{zone.zone_name}' dwell={dwell:.2f}s / threshold={zone.threshold}s already_reported={cv_id in worker.reported_zones}")
                                 if dwell > zone.threshold and cv_id not in worker.reported_zones:
-                                    logger.info(f"[ZONE] Frame {frame_index} worker {person.track_id}: RESTRICTED threshold crossed — recording violation")
+                                    logger.info(f"[ZONE] Frame {frame_index} worker {person.track_id}: {zone.zone_type} threshold crossed — recording violation")
                                     zv = record_zone_violation(worker, zone, frame, person, video_name, frame_index, _save_violation_snapshot)
                                     logger.info(f"[ZONE] record_zone_violation returned: {zv}")
                                     if zv:
