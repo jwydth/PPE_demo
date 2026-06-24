@@ -1958,7 +1958,7 @@ export function DashboardShell() {
               ))}
             </section>
 
-            <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1.8fr)_minmax(360px,0.8fr)]">
+            <div className="grid items-start gap-4">
               <div className="grid h-fit gap-4">
                 {activeView === "violations" ? <IncidentPanel /> : null}
                 {/* CameraPanel stays mounted (only hidden) when on other tabs so
