@@ -1551,7 +1551,7 @@ function CameraPanel() {
           </div>
         ) : null}
 
-        {phase === "loading" ? <LoadingState text="Running PPE inference..." /> : null}
+        {phase === "loading" && (ppeEnabled || zoneEnabled) ? <LoadingState text="Running PPE inference..." /> : null}
         {phase === "error" ? <ErrorState text={error} /> : null}
         {status ? <EmptyState text={status} /> : null}
 
