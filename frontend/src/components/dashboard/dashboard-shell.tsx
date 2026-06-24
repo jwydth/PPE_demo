@@ -1967,18 +1967,6 @@ export function DashboardShell() {
                   <CameraPanel />
                 </div>
               </div>
-              <div className="grid content-start gap-4">
-                <section className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
-                  <h2 className="text-base font-semibold text-slate-950">
-                    Operational Notes
-                  </h2>
-                  <p className="mt-3 text-sm leading-6 text-slate-600">
-                    Safety rules are running at the edge gateway. Escalations are routed
-                    to line supervisors when confidence stays above threshold for 3
-                    consecutive frames.
-                  </p>
-                </section>
-              </div>
             </div>
           </div>
         </main>
