@@ -227,12 +227,15 @@ class SignPPERegistry:
 
             if self._hits[sig] >= settings.AUTO_PPE_CONFIRM_FRAMES:
                 self._state[sig] = _State.EMITTED
+                x1, y1, x2, y2 = bbox
+                norm_bbox = (x1 / frame_w, y1 / frame_h, x2 / frame_w, y2 / frame_h)
                 suggestions.append(
                     PPESuggestion(
                         suggestion_id=sig,
                         source_class=settings.SIGN_CLASS_NAMES.get(class_id, str(class_id)),
                         confidence=sign["conf"],
                         frame_index=frame_index,
+                        bbox=norm_bbox,
                     )
                 )
         return suggestions

@@ -402,37 +402,61 @@ export function PPESuggestionBanner({
   if (suggestions.length === 0) return null;
 
   return (
-    <div className="pointer-events-auto absolute left-0 right-0 top-0 flex flex-col gap-1 p-2">
-      {suggestions.map((s) => {
-        const humanName = SIGN_HUMAN_NAMES[s.source_class] ?? s.source_class;
-        return (
-          <div
-            key={s.suggestion_id}
-            className="flex items-center justify-between gap-2 rounded-md border border-yellow-400/60 bg-slate-950/90 px-3 py-2 text-xs shadow-lg"
-          >
-            <span className="font-semibold text-yellow-300">
-              ⚠ Sign detected: <span className="text-white">{humanName}</span> — PPE monitoring required
-            </span>
-            <div className="flex shrink-0 gap-1.5">
-              <button
-                type="button"
-                onClick={() => onEnable(s)}
-                className="rounded bg-yellow-400 px-2 py-1 text-[10px] font-bold text-slate-950 hover:bg-yellow-300"
-              >
-                Enable PPE ✓
-              </button>
-              <button
-                type="button"
-                onClick={() => onDismiss(s)}
-                className="rounded border border-slate-600 px-2 py-1 text-[10px] font-bold text-slate-300 hover:bg-white/10"
-              >
-                Dismiss ✕
-              </button>
+    <>
+      <svg
+        className="pointer-events-none absolute inset-0 h-full w-full"
+        viewBox="0 0 1 1"
+        preserveAspectRatio="none"
+      >
+        {suggestions.map((s) => {
+          const [x1, y1, x2, y2] = s.bbox;
+          return (
+            <rect
+              key={s.suggestion_id}
+              x={x1} y={y1}
+              width={x2 - x1}
+              height={y2 - y1}
+              fill="rgba(250,204,21,0.12)"
+              stroke="#facc15"
+              strokeWidth={0.004}
+              strokeDasharray="0.015 0.008"
+            />
+          );
+        })}
+      </svg>
+
+      <div className="pointer-events-auto absolute left-0 right-0 top-0 flex flex-col gap-1 p-2">
+        {suggestions.map((s) => {
+          const humanName = SIGN_HUMAN_NAMES[s.source_class] ?? s.source_class;
+          return (
+            <div
+              key={s.suggestion_id}
+              className="flex items-center justify-between gap-2 rounded-md border border-yellow-400/60 bg-slate-950/90 px-3 py-2 text-xs shadow-lg"
+            >
+              <span className="font-semibold text-yellow-300">
+                ⚠ Sign detected: <span className="text-white">{humanName}</span> — PPE monitoring required
+              </span>
+              <div className="flex shrink-0 gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => onEnable(s)}
+                  className="rounded bg-yellow-400 px-2 py-1 text-[10px] font-bold text-slate-950 hover:bg-yellow-300"
+                >
+                  Enable PPE ✓
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onDismiss(s)}
+                  className="rounded border border-slate-600 px-2 py-1 text-[10px] font-bold text-slate-300 hover:bg-white/10"
+                >
+                  Dismiss ✕
+                </button>
+              </div>
             </div>
-          </div>
-        );
-      })}
-    </div>
+          );
+        })}
+      </div>
+    </>
   );
 }
 

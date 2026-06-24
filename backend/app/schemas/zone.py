@@ -17,6 +17,7 @@ class PPESuggestion(BaseModel):
     source_class: str
     confidence: float
     frame_index: int
+    bbox: tuple[float, float, float, float]  # normalized x1, y1, x2, y2 in [0, 1]
 
 
 class Zone(BaseModel):

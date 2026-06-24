@@ -32,6 +32,7 @@ export interface PPESuggestion {
   source_class: string;
   confidence: number;
   frame_index: number;
+  bbox: [number, number, number, number]; // normalized x1, y1, x2, y2 in [0, 1]
 }
 
 export interface ZoneViolation {
