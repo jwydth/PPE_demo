@@ -29,6 +29,12 @@ from app.schemas.violation import (
     ZoneViolation,
 )
 from app.services.auto_zone import SignPPERegistry, SignZoneRegistry, extract_signs
+from app.services.fall_detector import (
+    box_area_frac,
+    compute_fall_features,
+    record_fall_violation,
+    update_fall_state,
+)
 from app.services.ppe_violation_service import open_ppe_violation_service
 from app.services.zone_service import (
     COORD_SCALE,
@@ -93,6 +99,15 @@ class WorkerState:
     zone_dwell: dict[int, float] | None = None  # camera_zone_view_id -> seconds
     reported_zones: set[int] | None = None  # camera_zone_view_ids
     zone_last_in: dict[int, bool] | None = None  # camera_zone_view_id -> was inside zone at last detection
+    fall_state: str = "standing"  # "standing" | "falling" | "lying"
+    floor_seconds: float = 0.0  # accumulated time in "lying" shape
+    fall_reported: bool = False  # guard against duplicate alerts
+    fall_lying_miss_seconds: float = 0.0  # time spent "not lying" while still in the lying grace window
+    recent_bbox_times: list[float] | None = None  # monotonic timestamps paired with recent_bboxes
+    standing_height_baseline: float | None = None  # rolling EMA of box height (frac of frame) while standing
+    fall_recovery_seconds: float = 0.0  # time spent looking recovered before the baseline is trusted to adapt again
+    fall_baseline_locked: bool = False  # once a fall has ever been suspected, freeze the baseline for good
+    last_gap_seconds: float = 0.0  # true video-time elapsed since the prior observation (may span multiple missed frames)
 
     def __post_init__(self) -> None:
         if self.missing_counts is None:
@@ -105,6 +120,8 @@ class WorkerState:
             self.reported_zones = set()
         if self.zone_last_in is None:
             self.zone_last_in = {}
+        if self.recent_bbox_times is None:
+            self.recent_bbox_times = []
 
 
 def _area(b: dict) -> float:
@@ -301,7 +318,7 @@ class PPEDetector:
             enable_ppe=enable_ppe,
             enable_zone=enable_zone,
         ):
-            if event.event == "violation":
+            if event.event == "violation" or event.event == "fall_violation":
                 reports.append(ViolationReport(**event.data))
             elif event.event == "zone_violation":
                 zone_violations.append(ZoneViolation(**event.data))
@@ -496,10 +513,16 @@ class PPEDetector:
         # timeout;3000000 = 3 s read timeout so cv2 doesn't block indefinitely
         # when the stream stalls — this lets generator cleanup finish quickly
         # on WebSocket disconnect instead of waiting 10+ s for the OS read to return.
+        # buffer_size/max_delay/reorder_queue_size give the FFmpeg demuxer more
+        # room to absorb jitter (e.g. around the publisher's stream_loop restart)
+        # before a read stalls and a frame gets skipped.
         source_str = str(video_path)
         if is_stream and source_str.startswith("rtsp://"):
             import os
-            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|timeout;3000000"
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+                "rtsp_transport;tcp|timeout;3000000|buffer_size;1024000|"
+                "max_delay;500000|reorder_queue_size;500"
+            )
 
         tracker_path = _resolve_video_tracker(settings.VIDEO_TRACKER)
         results = self.model.track(
@@ -519,6 +542,7 @@ class PPEDetector:
             await asyncio.sleep(0.01)  # Critical: yield to event loop to keep WebSocket alive
             frame_index = (processed_frames - 1) * stride
             curr_ppe, curr_zone = get_flags()
+            curr_fall = settings.FALL_ENABLED
 
             # Detect zone being toggled ON mid-stream and retroactively check foot history
             zone_just_enabled = curr_zone and not prev_zone_enabled
@@ -689,6 +713,45 @@ class PPEDetector:
                     track_physical_zone_id = nw_id
                     track_zone_name = "No Walkway Defined"
                     track_zone_type = "WALKWAY"
+
+                if curr_fall and person.track_id is not None:
+                    fall_features = compute_fall_features(
+                        worker.recent_bboxes,
+                        worker.recent_bbox_times,
+                        frame_height,
+                        fps,
+                        stride,
+                        nominal_gap_seconds=worker.last_gap_seconds,
+                    )
+                    fall_area_frac = box_area_frac(person.bbox, frame_width, frame_height)
+                    prev_fall_state = worker.fall_state
+                    baseline = worker.standing_height_baseline
+                    height_drop_ratio = (
+                        1.0 - (fall_features["height_frac"] / baseline)
+                        if baseline and baseline > 0 and fall_features["height_frac"] > 0
+                        else 0.0
+                    )
+                    if frame_index % 30 == 0:
+                        logger.info(
+                            f"[FALL] Frame {frame_index} worker {person.track_id}: "
+                            f"state={prev_fall_state} aspect_ratio={fall_features['aspect_ratio']:.2f} "
+                            f"vy={fall_features['vertical_velocity']:.3f} window_vy={fall_features['window_vertical_velocity']:.3f} "
+                            f"area_frac={fall_area_frac:.4f} height_drop={height_drop_ratio:.2f} floor_s={worker.floor_seconds:.2f}"
+                        )
+                    fall_confirmed = update_fall_state(worker, fall_features, fall_area_frac, stride, fps, settings)
+                    if worker.fall_state != prev_fall_state:
+                        logger.info(
+                            f"[FALL] Frame {frame_index} worker {person.track_id}: "
+                            f"state {prev_fall_state} -> {worker.fall_state} "
+                            f"(aspect_ratio={fall_features['aspect_ratio']:.2f}, vy={fall_features['vertical_velocity']:.3f}, "
+                            f"window_vy={fall_features['window_vertical_velocity']:.3f}, height_drop={height_drop_ratio:.2f})"
+                        )
+                    if fall_confirmed:
+                        logger.info(f"[FALL] Frame {frame_index} worker {person.track_id}: fall CONFIRMED — recording violation")
+                        fv = record_fall_violation(worker, frame, person, video_name, frame_index, _save_violation_snapshot)
+                        logger.info(f"[FALL] record_fall_violation returned: {fv}")
+                        if fv:
+                            yield StreamEvent(event="fall_violation", frame_index=frame_index, data=fv.model_dump())
 
                 _append_tracking_overlay_frame(
                     overlay_frames=current_frame_overlay,
@@ -1115,7 +1178,8 @@ def _append_tracking_overlay_frame(
     has_zone_violation = zone_type in {"RESTRICTED", "WALKWAY", "SLIPPERY"}
     worker = decision.get("worker")
     worker_status = getattr(worker, "status", "unknown")
-    if missing_equipment or has_zone_violation:
+    fall_status = getattr(worker, "fall_state", None)
+    if missing_equipment or has_zone_violation or fall_status == "lying":
         status = "violation"
     elif decision.get("unknown") or worker_status == "unknown":
         status = "unknown"
@@ -1142,6 +1206,7 @@ def _append_tracking_overlay_frame(
             physical_zone_id=physical_zone_id,
             zone_name=zone_name,
             zone_type=zone_type,
+            fall_status=fall_status,
         )
     )
 
@@ -1361,14 +1426,26 @@ def _find_spatial_worker_match(
             best_iou = iou
             best_worker = worker
 
-    if best_worker is not None and best_iou >= settings.VIDEO_CASE_IOU_THRESHOLD:
-        return best_worker, "iou"
+    if best_worker is not None:
+        # A worker mid-fall ("falling"/"lying") gets a looser IOU bar — the
+        # fall motion itself is what most often breaks ByteTrack's ID
+        # continuity, so a track-ID switch during exactly that window needs
+        # to be forgiving to reattach to the same WorkerState.
+        iou_threshold = (
+            settings.FALL_REMATCH_IOU_THRESHOLD
+            if best_worker.fall_state in ("falling", "lying")
+            else settings.VIDEO_CASE_IOU_THRESHOLD
+        )
+        if best_iou >= iou_threshold:
+            return best_worker, "iou"
 
     for worker in workers:
-        if (
-            _center_distance_ratio(person.bbox, worker.last_bbox)
-            <= settings.VIDEO_CASE_CENTER_DISTANCE_RATIO
-        ):
+        center_distance_ratio = (
+            settings.FALL_REMATCH_CENTER_DISTANCE_RATIO
+            if worker.fall_state in ("falling", "lying")
+            else settings.VIDEO_CASE_CENTER_DISTANCE_RATIO
+        )
+        if _center_distance_ratio(person.bbox, worker.last_bbox) <= center_distance_ratio:
             return worker, "center"
 
     return None, "no_spatial_match"
@@ -1379,6 +1456,11 @@ def _merge_worker_observation(
 ) -> None:
     effective_fps = fps if fps > 0 else 30.0
     gap_seconds = (frame_index - worker.last_frame) / effective_fps
+    # The true elapsed video-time since this worker's last observation --
+    # unlike a fixed `stride`, this correctly reflects a multi-step detection
+    # gap (e.g. a few frames of missed/low-confidence detection), which the
+    # fall math needs to accumulate/reset floor-time correctly across.
+    worker.last_gap_seconds = gap_seconds
     if gap_seconds >= settings.VIDEO_ZONE_REENTRY_GAP_SECONDS:
         # Only reset zones where the person was last seen OUTSIDE the zone.
         # If they were inside when the tracker dropped (e.g. occluded by a sign),
@@ -1388,14 +1470,33 @@ def _merge_worker_observation(
                 worker.reported_zones.discard(cv_id)
                 worker.zone_dwell[cv_id] = 0
 
+    if gap_seconds >= settings.FALL_REENTRY_GAP_SECONDS:
+        # Track dropped and reappeared after a long gap — start the fall
+        # state machine fresh so a new fall can be detected rather than
+        # resuming mid-way through a stale one. Uses its own (longer)
+        # tolerance than the zone reset above: a mid-fall occlusion from
+        # other people overlapping shouldn't wipe out floor-time
+        # accumulation just because it exceeds the much shorter window
+        # tuned for routine walkway dwell resets.
+        worker.fall_state = "standing"
+        worker.floor_seconds = 0.0
+        worker.fall_reported = False
+        worker.fall_lying_miss_seconds = 0.0
+        worker.standing_height_baseline = None
+        worker.fall_recovery_seconds = 0.0
+        worker.fall_baseline_locked = False
+
     if person.track_id is not None:
         worker.track_ids.add(person.track_id)
     worker.last_frame = frame_index
     worker.last_bbox = person.bbox
     worker.recent_bboxes.append(person.bbox)
-    max_window = max(2, settings.VIDEO_STABILITY_WINDOW_FRAMES)
+    worker.recent_bbox_times.append(time.monotonic())
+    max_window = max(2, settings.FALL_WINDOW_FRAMES, settings.VIDEO_STABILITY_WINDOW_FRAMES)
     if len(worker.recent_bboxes) > max_window:
         worker.recent_bboxes = worker.recent_bboxes[-max_window:]
+    if len(worker.recent_bbox_times) > max_window:
+        worker.recent_bbox_times = worker.recent_bbox_times[-max_window:]
 
 
 def _is_worker_judgeable(
@@ -2279,7 +2380,10 @@ def _video_metadata(video_path: str | Path) -> tuple[float, int]:
     # Force TCP for RTSP to avoid UDP packet loss/hangs
     if is_stream and path_str.startswith("rtsp://"):
         import os
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+            "rtsp_transport;tcp|timeout;3000000|buffer_size;1024000|"
+            "max_delay;500000|reorder_queue_size;500"
+        )
 
     cap = cv2.VideoCapture(path_str)
     if not cap.isOpened():

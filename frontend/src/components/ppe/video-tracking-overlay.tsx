@@ -227,6 +227,9 @@ function trackingLabels(frame: TrackingOverlayFrame): string[] {
         : "Walkway violation";
     labels.push(`Zone: ${frame.zone_name ? `${zoneLabel} - ${frame.zone_name}` : zoneLabel}`);
   }
+  if (frame.fall_status === "lying") {
+    labels.push("Fall detected");
+  }
   if (labels.length === 0) {
     labels.push(frame.status === "unknown" ? unknownStatusLabel(frame) : "Compliant");
   }

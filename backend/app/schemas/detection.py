@@ -81,6 +81,7 @@ class TrackingOverlayFrame(BaseModel):
     physical_zone_id: int | None = None
     zone_name: str | None = None
     zone_type: Literal["RESTRICTED", "WALKWAY", "SLIPPERY"] | None = None
+    fall_status: Literal["standing", "falling", "lying"] | None = None
 
 
 class TrackingOverlay(BaseModel):

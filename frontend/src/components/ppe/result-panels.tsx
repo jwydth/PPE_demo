@@ -65,10 +65,17 @@ export function IncidentCard({
   compact?: boolean;
 }) {
   const isPpe = "violation_type" in event;
+  const isFall = isPpe && event.violation_type === "FALL";
   const imageUrl = isPpe ? event.snapshot_url : event.snapshot_path;
   const title = isPpe
     ? formatIncidentType(event.violation_type)
     : formatZoneType(event.zone_type, event.zone_name);
+  const badgeLabel = isFall ? "Fall" : isPpe ? "PPE" : "Zone";
+  const badgeClass = isFall
+    ? "bg-purple-50 text-purple-700 ring-purple-200"
+    : isPpe
+      ? "bg-red-50 text-red-700 ring-red-200"
+      : "bg-amber-50 text-amber-700 ring-amber-200";
 
   return (
     <article className="overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm">
@@ -88,8 +95,8 @@ export function IncidentCard({
             </p>
             <p className="mt-1 text-xs text-slate-500">{formatTime(event.timestamp)}</p>
           </div>
-          <span className={`shrink-0 rounded px-2 py-1 text-xs font-semibold ring-1 ${isPpe ? "bg-red-50 text-red-700 ring-red-200" : "bg-amber-50 text-amber-700 ring-amber-200"}`}>
-            {isPpe ? "PPE" : "Zone"}
+          <span className={`shrink-0 rounded px-2 py-1 text-xs font-semibold ring-1 ${badgeClass}`}>
+            {badgeLabel}
           </span>
         </div>
         <div className={`${compact ? "mt-2 gap-1 pt-2" : "mt-3 gap-2 pt-3"} grid grid-cols-2 border-t border-slate-100 text-xs text-slate-600`}>
@@ -171,6 +178,7 @@ function formatIncidentType(type: string): string {
     missing_helmet_and_role_uniform: "Missing Helmet and Role Uniform",
     proximity_violation: "Proximity Violation",
     zone_incursion: "Zone Incursion",
+    FALL: "Fall Detected",
   };
   return labels[type] ?? type.replaceAll("_", " ");
 }

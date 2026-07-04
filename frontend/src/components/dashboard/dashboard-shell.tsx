@@ -381,7 +381,7 @@ function CameraPanel() {
               tracking_overlay: nextOverlay,
             };
           });
-        } else if (eventType === "violation") {
+        } else if (eventType === "violation" || eventType === "fall_violation") {
           setStreamData((prev) => ({
             ...prev,
             reports: [
@@ -1565,15 +1565,15 @@ function CameraPanel() {
           </div>
         ) : null}
 
-        {phase === "done" && (videoResult || streamData.summary) ? (
+        {phase === "done" || isStreaming ? (
           <div className="grid h-fit content-start gap-3 rounded-md border border-slate-800 bg-slate-900 p-3">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-wide text-lime-200">
-                  Analysis Result
+                  {isStreaming && phase !== "done" ? "Live Monitoring" : "Analysis Result"}
                 </p>
                 <h3 className="mt-1 text-base font-semibold text-white">
-                  {currentSummary?.video_name}
+                  {currentSummary?.video_name ?? (isLive ? liveUrl : file?.name)}
                 </h3>
               </div>
               <span
@@ -1625,7 +1625,13 @@ function CameraPanel() {
                     ))}
                   </div>
                 ) : (
-                  <EmptyState text="No confirmed incidents were detected in this video." />
+                  <EmptyState
+                    text={
+                      isStreaming && phase !== "done"
+                        ? "No incidents detected yet."
+                        : "No confirmed incidents were detected in this video."
+                    }
+                  />
                 )}
               </div>
 
@@ -1806,7 +1812,9 @@ function filterTrackingOverlay(
           zone_type: undefined,
         };
     const hasViolation =
-      missingEquipment.length > 0 || (showZone && Boolean(frame.zone_type));
+      missingEquipment.length > 0 ||
+      (showZone && Boolean(frame.zone_type)) ||
+      frame.fall_status === "lying";
 
     return {
       ...frame,

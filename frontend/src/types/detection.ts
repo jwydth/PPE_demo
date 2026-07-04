@@ -88,6 +88,7 @@ export interface TrackingOverlayFrame {
   zone_name?: string;
   zone_type?: "RESTRICTED" | "WALKWAY" | "SLIPPERY";
   status: Category | "unknown";
+  fall_status?: "standing" | "falling" | "lying" | null;
 }
 
 export interface TrackingOverlay {
