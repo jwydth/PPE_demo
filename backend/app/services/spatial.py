@@ -1,6 +1,7 @@
-import numpy as np
 import cv2
+import numpy as np
 from typing import List, Tuple
+
 
 def is_point_in_polygon(point: Tuple[float, float], polygon: List[Tuple[float, float]]) -> bool:
     """
