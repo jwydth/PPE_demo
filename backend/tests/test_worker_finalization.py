@@ -7,6 +7,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.schemas.detection import BoundingBox, EquipmentStatus, PersonResult
 from app.schemas.violation import ViolationReport
 from app.services import ppe_detector as ppe
+from app.services import video_pipeline
+from app.services.ppe import device as ppe_device
 
 
 VIDEO_NAME = "factory.mp4"
@@ -147,9 +149,9 @@ def _update(
 
 
 def _record(monkeypatch, cases: list[ppe.ViolationCase], decision: dict, person: PersonResult) -> None:
-    monkeypatch.setattr(ppe, "_save_violation_snapshot", lambda **_: "snapshot.jpg")
+    monkeypatch.setattr(video_pipeline, "_save_violation_snapshot", lambda **_: "snapshot.jpg")
     monkeypatch.setattr(
-        ppe,
+        video_pipeline,
         "save_violation",
         lambda **kwargs: ViolationReport(
             id=len(cases) + 1,
@@ -175,7 +177,7 @@ def _record(monkeypatch, cases: list[ppe.ViolationCase], decision: dict, person:
 
 def _install_violation_spies(monkeypatch) -> list[dict]:
     saved_reports: list[dict] = []
-    monkeypatch.setattr(ppe, "_save_violation_snapshot", lambda **_: "snapshot.jpg")
+    monkeypatch.setattr(video_pipeline, "_save_violation_snapshot", lambda **_: "snapshot.jpg")
 
     def fake_save_violation(**kwargs) -> ViolationReport:
         saved_reports.append(kwargs)
@@ -190,7 +192,7 @@ def _install_violation_spies(monkeypatch) -> list[dict]:
             track_id=kwargs["track_id"],
         )
 
-    monkeypatch.setattr(ppe, "save_violation", fake_save_violation)
+    monkeypatch.setattr(video_pipeline, "save_violation", fake_save_violation)
     return saved_reports
 
 
@@ -543,7 +545,7 @@ def test_resolve_video_tracker_prefers_repo_local_tracker():
 def test_resolve_video_tracker_warns_and_falls_back_for_missing_path(caplog):
     configured = "trackers/missing-bytetrack.yaml"
 
-    with caplog.at_level(logging.WARNING, logger=ppe.logger.name):
+    with caplog.at_level(logging.WARNING, logger=ppe_device.logger.name):
         resolved = ppe._resolve_video_tracker(configured)
 
     assert resolved == configured

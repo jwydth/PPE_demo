@@ -10,6 +10,7 @@ import pytest
 from app.core.config import settings
 from app.schemas.detection import BoundingBox, EquipmentStatus, PersonResult, Summary
 from app.services import ppe_detector as ppe
+from app.services import video_pipeline
 from app.services.auto_zone import SignZoneRegistry, derive_zone_polygon, signature
 from app.services.zone_service import (
     COORD_SCALE,
@@ -256,9 +257,9 @@ def test_pipeline_emits_exactly_one_zone_suggestion(monkeypatch):
     monkeypatch.setattr(settings, "SIGN_CONFIDENCE_THRESHOLD", 0.5)
 
     frame = np.zeros((_FRAME_H, _FRAME_W, 3), dtype=np.uint8)
-    monkeypatch.setattr(ppe, "_video_metadata", lambda _: (10.0, 3))
-    monkeypatch.setattr(ppe, "_extract_result_boxes", lambda _r: ([], [], []))
-    monkeypatch.setattr(ppe, "load_zones", lambda _: [])
+    monkeypatch.setattr(video_pipeline, "_video_metadata", lambda _: (10.0, 3))
+    monkeypatch.setattr(video_pipeline, "_extract_result_boxes", lambda _r: ([], [], []))
+    monkeypatch.setattr(video_pipeline, "load_zones", lambda _: [])
 
     detector = _make_detector(_FakePPEModel(frame, 3), _FakeSignModel())
 
@@ -286,9 +287,9 @@ def test_pipeline_does_not_emit_suggestion_twice(monkeypatch):
     monkeypatch.setattr(settings, "SIGN_CONFIDENCE_THRESHOLD", 0.5)
 
     frame = np.zeros((_FRAME_H, _FRAME_W, 3), dtype=np.uint8)
-    monkeypatch.setattr(ppe, "_video_metadata", lambda _: (10.0, 6))
-    monkeypatch.setattr(ppe, "_extract_result_boxes", lambda _r: ([], [], []))
-    monkeypatch.setattr(ppe, "load_zones", lambda _: [])
+    monkeypatch.setattr(video_pipeline, "_video_metadata", lambda _: (10.0, 6))
+    monkeypatch.setattr(video_pipeline, "_extract_result_boxes", lambda _r: ([], [], []))
+    monkeypatch.setattr(video_pipeline, "load_zones", lambda _: [])
 
     detector = _make_detector(_FakePPEModel(frame, 6), _FakeSignModel())
 

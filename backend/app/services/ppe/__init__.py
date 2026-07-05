@@ -1,13 +1,18 @@
 """Feature-scoped PPE detection package.
 
-`PPEDetector` itself is not re-exported here yet — it still lives in
-`app/services/ppe_detector.py` because several of its methods
-(`_real_video_pipeline`, `_mock_process_video`, `_mock_stream_video`) import
-`app.services.zone_service` directly, which this package's modules must not
-do (see Step 4 of the refactor plan, which introduces `video_pipeline/` as
-the only allowed PPE/zone bridge). Re-exporting it from here before then
-would also create a circular import with `ppe_detector.py`, which imports
-these submodules.
+This module must not import from `app.services.zone_service` — cross-feature
+logic belongs in `app.services.video_pipeline`, the only module allowed to
+import from both `app.services.ppe` and `app.services.zone_service`.
+
+`PPEDetector` (in `app.services.ppe.detector`) is exposed lazily via
+`__getattr__` below rather than a top-level import: `ppe.detector` imports
+`app.services.video_pipeline`, which imports several sibling modules in this
+package — a top-level `from app.services.ppe.detector import PPEDetector`
+here would try to fully import `ppe.detector` (and transitively
+`video_pipeline`) *while this package's own `__init__` is still running*,
+which is a circular import. Deferring the import to attribute-access time
+(PEP 562) avoids that without losing `from app.services.ppe import
+PPEDetector` as a working spelling.
 """
 
 from __future__ import annotations
@@ -36,4 +41,13 @@ __all__ = [
     "VIOLATION_COLOR",
     "ViolationCase",
     "WorkerState",
+    "PPEDetector",
 ]
+
+
+def __getattr__(name: str):
+    if name == "PPEDetector":
+        from app.services.ppe.detector import PPEDetector
+
+        return PPEDetector
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

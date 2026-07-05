@@ -1,3 +1,7 @@
+# This module must not import from `app.services.ppe` (or `app.services.ppe_detector`)
+# — cross-feature logic belongs in `app.services.video_pipeline`, the only module
+# allowed to import from both `app.services.ppe` and `app.services.zone_service`.
+
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone

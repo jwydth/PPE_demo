@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.schemas.detection import BoundingBox, EquipmentStatus, PersonResult
 from app.schemas.violation import ViolationReport
 from app.services import ppe_detector as ppe
+from app.services import video_pipeline
 
 
 def _person(missing: tuple[str, ...]) -> PersonResult:
@@ -24,9 +25,9 @@ def _person(missing: tuple[str, ...]) -> PersonResult:
 
 
 def test_existing_incident_title_is_not_upgraded(monkeypatch, caplog):
-    caplog.set_level(logging.INFO, logger=ppe.logger.name)
+    caplog.set_level(logging.INFO, logger=video_pipeline.logger.name)
     saved_reports: list[ViolationReport] = []
-    monkeypatch.setattr(ppe, "_save_violation_snapshot", lambda **_: "snapshot.jpg")
+    monkeypatch.setattr(video_pipeline, "_save_violation_snapshot", lambda **_: "snapshot.jpg")
 
     def fake_save_violation(**kwargs):
         report = ViolationReport(
@@ -42,7 +43,7 @@ def test_existing_incident_title_is_not_upgraded(monkeypatch, caplog):
         saved_reports.append(report)
         return report
 
-    monkeypatch.setattr(ppe, "save_violation", fake_save_violation)
+    monkeypatch.setattr(video_pipeline, "save_violation", fake_save_violation)
 
     cases: list[ppe.ViolationCase] = []
     aspect_ratios: list[float] = []

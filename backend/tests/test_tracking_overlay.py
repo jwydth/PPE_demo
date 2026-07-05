@@ -11,6 +11,8 @@ from app.schemas.detection import (
     Summary,
 )
 from app.services import ppe_detector as ppe
+from app.services import video_pipeline
+from app.services.ppe import detector as ppe_detector_module
 
 
 def _compliant_response(track_id: int | None = None) -> DetectionResponse:
@@ -57,7 +59,7 @@ def test_mock_video_tracking_overlay_respects_stride(monkeypatch):
         def release(self):
             return None
 
-    monkeypatch.setattr(ppe, "_video_metadata", lambda _path: (10.0, 5))
+    monkeypatch.setattr(video_pipeline, "_video_metadata", lambda _path: (10.0, 5))
     monkeypatch.setattr(ppe.settings, "VIDEO_FRAME_STRIDE", 2)
     monkeypatch.setattr("cv2.VideoCapture", FakeCapture)
 
@@ -109,13 +111,19 @@ def test_real_video_tracking_overlay_uses_processed_frame_indexes(monkeypatch):
     helmet = {"x1": 30, "y1": 10, "x2": 60, "y2": 30, "conf": 0.9}
     vest = {"x1": 25, "y1": 35, "x2": 75, "y2": 70, "conf": 0.9}
 
-    monkeypatch.setattr(ppe, "_video_metadata", lambda _path: (10.0, 6))
+    # `_real_process_video` calls `_video_metadata` directly (in
+    # app.services.ppe.detector); the actual per-frame work happens in
+    # `_real_video_pipeline`, which delegates to app.services.video_pipeline
+    # — both call sites need patching since each resolves the name against
+    # its own module globals.
+    monkeypatch.setattr(ppe_detector_module, "_video_metadata", lambda _path: (10.0, 6))
+    monkeypatch.setattr(video_pipeline, "_video_metadata", lambda _path: (10.0, 6))
     monkeypatch.setattr(
-        ppe,
+        video_pipeline,
         "_extract_result_boxes",
         lambda _result: ([person], [helmet], [vest], []),
     )
-    monkeypatch.setattr(ppe, "load_zones", lambda _video_name: [])
+    monkeypatch.setattr(video_pipeline, "load_zones", lambda _video_name: [])
     monkeypatch.setattr(ppe.settings, "VIDEO_FRAME_STRIDE", 3)
 
     detector = ppe.PPEDetector.__new__(ppe.PPEDetector)
@@ -176,7 +184,7 @@ def test_mock_streaming_path_yields_frame_events(monkeypatch):
             events.append(event)
         return events
 
-    monkeypatch.setattr(ppe, "_video_metadata", lambda _path: (10.0, 2))
+    monkeypatch.setattr(video_pipeline, "_video_metadata", lambda _path: (10.0, 2))
     monkeypatch.setattr(ppe.settings, "VIDEO_FRAME_STRIDE", 1)
     monkeypatch.setattr("cv2.VideoCapture", FakeCapture)
 

@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.schemas.detection import BoundingBox, PersonResult
 from app.services import ppe_detector as ppe
+from app.services import video_pipeline
 
 
 def _person(track_id: int, bbox: BoundingBox) -> PersonResult:
@@ -23,7 +24,7 @@ def _person(track_id: int, bbox: BoundingBox) -> PersonResult:
 def test_save_violation_snapshot_does_not_mutate_source_frame(monkeypatch, tmp_path):
     import cv2
 
-    monkeypatch.setattr(ppe, "SNAPSHOT_DIR", tmp_path)
+    monkeypatch.setattr(video_pipeline, "SNAPSHOT_DIR", tmp_path)
     frame = np.zeros((120, 160, 3), dtype=np.uint8)
 
     first = ppe._save_violation_snapshot(
@@ -55,7 +56,7 @@ def test_save_violation_snapshot_does_not_mutate_source_frame(monkeypatch, tmp_p
 def test_save_zone_snapshot_draws_polygon_boundary(monkeypatch, tmp_path):
     import cv2
 
-    monkeypatch.setattr(ppe, "SNAPSHOT_DIR", tmp_path)
+    monkeypatch.setattr(video_pipeline, "SNAPSHOT_DIR", tmp_path)
     frame = np.zeros((100, 100, 3), dtype=np.uint8)
 
     filename = ppe._save_violation_snapshot(
