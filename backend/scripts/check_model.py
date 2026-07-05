@@ -1,9 +1,9 @@
 import sys
-import os
 from pathlib import Path
 
-# Add backend to path
-sys.path.append(os.path.abspath('backend'))
+BACKEND_DIR_FOR_IMPORTS = Path(__file__).resolve().parents[1]
+if str(BACKEND_DIR_FOR_IMPORTS) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR_FOR_IMPORTS))
 
 from app.core.config import settings, BACKEND_DIR
 from app.services.ppe_detector import PPEDetector
