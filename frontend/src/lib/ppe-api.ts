@@ -75,8 +75,8 @@ export async function analyzeVideo(
   };
 }
 
-export async function getViolations(): Promise<ViolationReport[]> {
-  const res = await fetch(`${API_URL}/violations`);
+export async function getViolations(limit = 200): Promise<ViolationReport[]> {
+  const res = await fetch(`${API_URL}/violations?limit=${limit}`);
   if (!res.ok) throw await readError(res, "Could not load PPE violations");
 
   const payload = (await res.json()) as ViolationReport[];
@@ -86,8 +86,8 @@ export async function getViolations(): Promise<ViolationReport[]> {
   }));
 }
 
-export async function getZoneViolations(): Promise<ZoneViolation[]> {
-  const res = await fetch(`${API_URL}/zone-violations`);
+export async function getZoneViolations(limit = 200): Promise<ZoneViolation[]> {
+  const res = await fetch(`${API_URL}/zone-violations?limit=${limit}`);
   if (!res.ok) throw await readError(res, "Could not load zone violations");
 
   const payload = (await res.json()) as ZoneViolation[];
@@ -97,8 +97,8 @@ export async function getZoneViolations(): Promise<ZoneViolation[]> {
   }));
 }
 
-export async function getSafetyEvents(): Promise<(ViolationReport | ZoneViolation)[]> {
-  const [ppe, zones] = await Promise.all([getViolations(), getZoneViolations()]);
+export async function getSafetyEvents(limit = 200): Promise<(ViolationReport | ZoneViolation)[]> {
+  const [ppe, zones] = await Promise.all([getViolations(limit), getZoneViolations(limit)]);
   return [...ppe, ...zones].sort(
     (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
   );

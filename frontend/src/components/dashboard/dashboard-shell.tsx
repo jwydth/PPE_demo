@@ -5,6 +5,7 @@ import {
   Check,
   ChevronDown,
   Factory,
+  Filter,
   Loader2,
   Maximize2,
   Pause,
@@ -1832,10 +1833,51 @@ function clamp01(value: number) {
   return Math.max(0, Math.min(1, value));
 }
 
+type IncidentTypeFilter = "all" | "ppe" | "zone" | "fall";
+type IncidentDayFilter = "all" | "today" | "7" | "30";
+
+const TYPE_FILTER_OPTIONS: { value: IncidentTypeFilter; label: string }[] = [
+  { value: "all", label: "All types" },
+  { value: "ppe", label: "PPE violation" },
+  { value: "zone", label: "Zone violation" },
+  { value: "fall", label: "Fall detected" },
+];
+
+const DAY_FILTER_OPTIONS: { value: IncidentDayFilter; label: string }[] = [
+  { value: "all", label: "All time" },
+  { value: "today", label: "Today" },
+  { value: "7", label: "Last 7 days" },
+  { value: "30", label: "Last 30 days" },
+];
+
+function eventTypeMatches(event: ViolationReport | ZoneViolation, filter: IncidentTypeFilter): boolean {
+  if (filter === "all") return true;
+  const isPpe = "violation_type" in event;
+  const isFall = isPpe && event.violation_type === "FALL";
+  if (filter === "fall") return isFall;
+  if (filter === "ppe") return isPpe && !isFall;
+  return !isPpe;
+}
+
+function eventDayMatches(event: ViolationReport | ZoneViolation, filter: IncidentDayFilter): boolean {
+  if (filter === "all") return true;
+  const eventTime = new Date(event.timestamp).getTime();
+  if (Number.isNaN(eventTime)) return true;
+  const now = new Date();
+  if (filter === "today") {
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    return eventTime >= startOfToday;
+  }
+  const cutoff = now.getTime() - Number(filter) * 24 * 60 * 60 * 1000;
+  return eventTime >= cutoff;
+}
+
 function IncidentPanel() {
   const [events, setEvents] = useState<(ViolationReport | ZoneViolation)[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [typeFilter, setTypeFilter] = useState<IncidentTypeFilter>("all");
+  const [dayFilter, setDayFilter] = useState<IncidentDayFilter>("all");
 
   const loadEvents = useCallback(async () => {
     setLoading(true);
@@ -1853,6 +1895,13 @@ function IncidentPanel() {
     const timer = window.setTimeout(() => void loadEvents(), 0);
     return () => window.clearTimeout(timer);
   }, [loadEvents]);
+
+  const filteredEvents = useMemo(
+    () => events.filter((event) => eventTypeMatches(event, typeFilter) && eventDayMatches(event, dayFilter)),
+    [events, typeFilter, dayFilter],
+  );
+
+  const filtersActive = typeFilter !== "all" || dayFilter !== "all";
 
   const deleteEvent = async (event: ViolationReport | ZoneViolation) => {
     if (!event.id || !confirm("Delete this incident?")) return;
@@ -1904,13 +1953,64 @@ function IncidentPanel() {
           </button>
         </div>
       </div>
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <span className="flex items-center gap-1.5 text-xs font-semibold text-slate-500">
+          <Filter className="size-3.5" aria-hidden="true" />
+          Filter
+        </span>
+        <select
+          value={dayFilter}
+          onChange={(event) => setDayFilter(event.target.value as IncidentDayFilter)}
+          className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 outline-none focus:border-slate-400"
+        >
+          {DAY_FILTER_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        <select
+          value={typeFilter}
+          onChange={(event) => setTypeFilter(event.target.value as IncidentTypeFilter)}
+          className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 outline-none focus:border-slate-400"
+        >
+          {TYPE_FILTER_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        {filtersActive ? (
+          <button
+            onClick={() => {
+              setTypeFilter("all");
+              setDayFilter("all");
+            }}
+            className="rounded-md px-2 py-1.5 text-xs font-semibold text-slate-500 underline-offset-2 hover:text-slate-950 hover:underline"
+            type="button"
+          >
+            Clear filters
+          </button>
+        ) : null}
+        {!loading && !error ? (
+          <span className="ml-auto text-xs text-slate-500">
+            {filteredEvents.length} of {events.length} incidents
+          </span>
+        ) : null}
+      </div>
       {loading ? <LoadingState text="Loading recent incidents..." /> : null}
       {error ? <ErrorState text={error} /> : null}
-      {!loading && !error && events.length === 0 ? (
-        <EmptyState text="No incidents have been recorded yet." />
+      {!loading && !error && filteredEvents.length === 0 ? (
+        <EmptyState
+          text={
+            events.length === 0
+              ? "No incidents have been recorded yet."
+              : "No incidents match the selected filters."
+          }
+        />
       ) : null}
-      <div className="grid gap-2">
-        {events.slice(0, 6).map((event, index) => (
+      <div className="grid max-h-[32rem] gap-2 overflow-y-auto pr-1">
+        {filteredEvents.map((event, index) => (
           <IncidentCard
             key={`${event.id ?? index}-${event.timestamp}`}
             event={event}
