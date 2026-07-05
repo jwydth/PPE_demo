@@ -1,17 +1,10 @@
-import logging
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
-from app.routers import detection, streaming, testing, zones
-from app.storage.local_paths import SNAPSHOT_DIR, ensure_snapshot_dir, ensure_upload_dir
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(levelname)s:%(name)s:%(message)s",
-)
+from app.routers import detection
+from app.services.violation_store import SNAPSHOT_DIR, init_db
 
 app = FastAPI(
     title="De Heus PPE Detection API",
@@ -30,16 +23,13 @@ app.add_middleware(
 )
 
 app.include_router(detection.router)
-app.include_router(streaming.router)
-app.include_router(zones.router)
-app.include_router(testing.router)
-ensure_snapshot_dir()
+SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/snapshots", StaticFiles(directory=SNAPSHOT_DIR), name="snapshots")
 
 
 @app.on_event("startup")
 async def startup() -> None:
-    ensure_snapshot_dir()
+    init_db()
 
 
 @app.get("/health", tags=["meta"])
