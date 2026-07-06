@@ -147,6 +147,65 @@ Table zone_violations {
   Note: "frame_index must be nonnegative. Copied zone and source fields preserve reportable history if referenced configuration is later deleted. No assigned, acknowledged, or resolved user tracking is included; incident assignment and audit workflow are deferred."
 }
 
+Table behavior_incidents {
+  id bigint [pk, increment]
+  camera_id bigint [note: "Nullable historical reference. Set to NULL when the camera is deleted."]
+  source_key varchar(500) [note: "Nullable copy of source/video name."]
+  behavior_type varchar(64) [not null, note: "FALL_DETECTED, RUNNING_DETECTED, FAINT_DETECTED, COLLAPSE_DETECTED."]
+  status varchar(32) [not null, default: 'NEW', note: "NEW, REVIEWED, RESOLVED, FALSE_POSITIVE."]
+  severity varchar(32) [default: 'HIGH', note: "LOW, MEDIUM, HIGH, CRITICAL."]
+  confidence float [note: "Nullable behavior confidence from 0 to 1."]
+  track_id bigint [note: "Nullable primary tracker ID for single-person behavior incidents."]
+  frame_start integer [note: "Nullable and nonnegative when present."]
+  frame_end integer [note: "Nullable and nonnegative when present."]
+  started_at timestamptz [not null]
+  ended_at timestamptz
+  details text [not null]
+  metadata jsonb [not null, default: '{}']
+  created_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    camera_id
+    source_key
+    behavior_type
+    status
+    started_at
+  }
+
+  Note: "Behavior incidents are separate from PPE/zone violations. V1 writes only FALL_DETECTED; future running/faint/collapse detections can reuse this table."
+}
+
+Table behavior_incident_subjects {
+  id bigint [pk, increment]
+  behavior_incident_id bigint [not null]
+  tracker_id bigint [note: "Nullable tracker ID."]
+  person_index integer [note: "Nullable and nonnegative when present."]
+  bounding_box jsonb [note: "Nullable object with x1, y1, x2, and y2."]
+  confidence float [note: "Nullable value from 0 to 1."]
+  keypoints jsonb [note: "Nullable pose keypoint array."]
+  features jsonb [note: "Nullable behavior feature vector/explanation."]
+  created_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    behavior_incident_id
+  }
+}
+
+Table behavior_evidence {
+  id bigint [pk, increment]
+  behavior_incident_id bigint [not null]
+  evidence_type varchar(32) [not null, default: 'SNAPSHOT']
+  object_key varchar(500) [not null, note: "MinIO object key or equivalent storage key."]
+  frame_index integer [note: "Nullable and nonnegative when present."]
+  occurred_at timestamptz [not null]
+  created_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    behavior_incident_id
+    occurred_at
+  }
+}
+
 Ref: factories.id < cameras.factory_id [delete: restrict]
 Ref: factories.id < physical_zones.factory_id [delete: restrict]
 Ref: cameras.id < camera_zone_views.camera_id [delete: cascade]
@@ -156,3 +215,6 @@ Ref: ppe_violations.id < ppe_violation_subjects.ppe_violation_id [delete: cascad
 Ref: cameras.id < zone_violations.camera_id [delete: set null]
 Ref: physical_zones.id < zone_violations.physical_zone_id [delete: set null]
 Ref: camera_zone_views.id < zone_violations.camera_zone_view_id [delete: set null]
+Ref: cameras.id < behavior_incidents.camera_id [delete: set null]
+Ref: behavior_incidents.id < behavior_incident_subjects.behavior_incident_id [delete: cascade]
+Ref: behavior_incidents.id < behavior_evidence.behavior_incident_id [delete: cascade]

@@ -3,6 +3,7 @@ import {
   VideoProcessingResponse,
   ViolationReport,
 } from "@/types/detection";
+import { BehaviorIncident } from "@/types/behavior";
 import { ZoneConfiguration, ZoneViolation } from "@/types/zone";
 
 export const API_URL =
@@ -97,9 +98,28 @@ export async function getZoneViolations(): Promise<ZoneViolation[]> {
   }));
 }
 
-export async function getSafetyEvents(): Promise<(ViolationReport | ZoneViolation)[]> {
-  const [ppe, zones] = await Promise.all([getViolations(), getZoneViolations()]);
-  return [...ppe, ...zones].sort(
+export async function getBehaviorIncidents(): Promise<BehaviorIncident[]> {
+  const res = await fetch(`${API_URL}/behavior-incidents?limit=100`);
+  if (!res.ok) throw await readError(res, "Could not load behavior incidents");
+
+  const payload = (await res.json()) as BehaviorIncident[];
+  return payload.map((incident) => ({
+    ...incident,
+    snapshot_url: toAbsoluteUrl(incident.snapshot_url ?? undefined),
+    evidence: incident.evidence.map((item) => ({
+      ...item,
+      file_url: toAbsoluteUrl(item.file_url ?? undefined),
+    })),
+  }));
+}
+
+export async function getSafetyEvents(): Promise<(ViolationReport | ZoneViolation | BehaviorIncident)[]> {
+  const [ppe, zones, behavior] = await Promise.all([
+    getViolations(),
+    getZoneViolations(),
+    getBehaviorIncidents(),
+  ]);
+  return [...ppe, ...zones, ...behavior].sort(
     (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
   );
 }

@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
-from app.routers import detection, streaming, testing, zones
+from app.routers import detection, fall_detection, streaming, testing, zones
 from app.storage.local_paths import SNAPSHOT_DIR, ensure_snapshot_dir, ensure_upload_dir
 
 logging.basicConfig(
@@ -30,6 +30,7 @@ app.add_middleware(
 )
 
 app.include_router(detection.router)
+app.include_router(fall_detection.router)
 app.include_router(streaming.router)
 app.include_router(zones.router)
 app.include_router(testing.router)

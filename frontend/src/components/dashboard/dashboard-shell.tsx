@@ -32,6 +32,7 @@ import { useZoneDrawing } from "@/hooks/useZoneDrawing";
 import { useLiveStream } from "@/hooks/useLiveStream";
 import { useAutoZoneSuggestions } from "@/hooks/useAutoZoneSuggestions";
 import { AnalysisPhase } from "@/hooks/camera-panel-types";
+import { BehaviorIncident } from "@/types/behavior";
 import { safetyMetrics } from "./data";
 import { TopBar, type DashboardView } from "./top-bar";
 import { ZoneSidebar } from "./zone-sidebar";
@@ -529,7 +530,7 @@ function ModelToggle({
 }
 
 function IncidentPanel() {
-  const [events, setEvents] = useState<(ViolationReport | ZoneViolation)[]>([]);
+  const [events, setEvents] = useState<(ViolationReport | ZoneViolation | BehaviorIncident)[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -550,12 +551,14 @@ function IncidentPanel() {
     return () => window.clearTimeout(timer);
   }, [loadEvents]);
 
-  const deleteEvent = async (event: ViolationReport | ZoneViolation) => {
+  const deleteEvent = async (event: ViolationReport | ZoneViolation | BehaviorIncident) => {
     if (!event.id || !confirm("Delete this incident?")) return;
     if ("violation_type" in event) {
       await deleteViolation(event.id);
-    } else {
+    } else if ("zone_type" in event) {
       await deleteZoneViolation(event.id);
+    } else {
+      return;
     }
     setEvents((current) => current.filter((item) => item.id !== event.id));
   };
@@ -578,8 +581,8 @@ function IncidentPanel() {
     <section className="rounded-md border border-slate-200 bg-slate-50 p-3 shadow-sm">
       <div className="mb-3 flex items-start justify-between gap-3">
         <div>
-          <h2 className="text-sm font-semibold text-slate-950">Recent Violations</h2>
-          <p className="text-xs text-slate-500">Loaded from the PPE backend incident store.</p>
+          <h2 className="text-sm font-semibold text-slate-950">Recent Incidents</h2>
+          <p className="text-xs text-slate-500">Loaded from PPE, zone, and behavior incident stores.</p>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -589,7 +592,7 @@ function IncidentPanel() {
             type="button"
           >
             <Trash2 className="size-3.5" />
-            <span>Delete All</span>
+            <span>Delete PPE/Zone</span>
           </button>
           <button
             onClick={() => void loadEvents()}
@@ -610,7 +613,7 @@ function IncidentPanel() {
           <IncidentCard
             key={`${event.id ?? index}-${event.timestamp}`}
             event={event}
-            onDelete={() => void deleteEvent(event)}
+            onDelete={"behavior_type" in event ? undefined : () => void deleteEvent(event)}
           />
         ))}
       </div>
@@ -622,11 +625,11 @@ export function DashboardShell() {
   const [activeView, setActiveView] = useState<DashboardView>("feeds");
   const pageTitle =
     activeView === "violations"
-        ? "Violations Log"
+        ? "Incidents Log"
         : "Packaging Line 1";
   const pageDescription =
     activeView === "violations"
-        ? "Review PPE and zone incidents recorded by the backend incident store."
+        ? "Review PPE, zone, and behavior incidents recorded by the backend stores."
         : "Upload a camera simulation file, choose which detection models are enabled, and review the model outputs in one place.";
 
   return (

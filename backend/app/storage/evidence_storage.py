@@ -58,6 +58,16 @@ class EvidenceStorage:
             self.build_zone_object_key(),
         )
 
+    def upload_behavior_snapshot(
+        self,
+        local_file_path: str | Path,
+    ) -> StorageObject:
+        path = _validate_file(local_file_path, _SNAPSHOT_EXTENSIONS)
+        return self._upload_file(
+            path,
+            self.build_behavior_object_key(),
+        )
+
     def upload_report(
         self,
         local_file_path: str | Path,
@@ -94,6 +104,16 @@ class EvidenceStorage:
         timestamp = _as_utc(occurred_at)
         identifier = object_id or uuid4()
         return f"zone-violations/{timestamp:%Y/%m/%d}/{identifier.hex}.jpg"
+
+    def build_behavior_object_key(
+        self,
+        *,
+        occurred_at: datetime | None = None,
+        object_id: UUID | None = None,
+    ) -> str:
+        timestamp = _as_utc(occurred_at)
+        identifier = object_id or uuid4()
+        return f"behavior-incidents/{timestamp:%Y/%m/%d}/{identifier.hex}.jpg"
 
     def build_report_object_key(
         self,

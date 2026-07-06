@@ -1,6 +1,7 @@
 "use client";
 
 import { HardHat, Trash2 } from "lucide-react";
+import { BehaviorIncident } from "@/types/behavior";
 import { DetectionResponse, PersonResult, ViolationReport } from "@/types/detection";
 import { ZoneViolation } from "@/types/zone";
 
@@ -60,15 +61,29 @@ export function IncidentCard({
   onDelete,
   compact = false,
 }: {
-  event: ViolationReport | ZoneViolation;
+  event: ViolationReport | ZoneViolation | BehaviorIncident;
   onDelete?: () => void;
   compact?: boolean;
 }) {
-  const isPpe = "violation_type" in event;
-  const imageUrl = isPpe ? event.snapshot_url : event.snapshot_path;
+  const isPpe = isPpeIncident(event);
+  const isBehavior = isBehaviorIncident(event);
+  const imageUrl = isPpe
+    ? event.snapshot_url
+    : isBehavior
+      ? event.snapshot_url ?? event.evidence[0]?.file_url ?? undefined
+      : event.snapshot_path;
   const title = isPpe
     ? formatIncidentType(event.violation_type)
-    : formatZoneType(event.zone_type, event.zone_name);
+    : isBehavior
+      ? formatBehaviorType(event.behavior_type)
+      : formatZoneType(event.zone_type, event.zone_name);
+  const sourceLabel = isPpe ? "PPE" : isBehavior ? "Behavior" : "Zone";
+  const badgeClass = isPpe
+    ? "bg-red-50 text-red-700 ring-red-200"
+    : isBehavior
+      ? "bg-orange-50 text-orange-700 ring-orange-200"
+      : "bg-amber-50 text-amber-700 ring-amber-200";
+  const frameLabel = isBehavior ? event.frame_start : event.frame_index;
 
   return (
     <article className="overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm">
@@ -88,13 +103,13 @@ export function IncidentCard({
             </p>
             <p className="mt-1 text-xs text-slate-500">{formatTime(event.timestamp)}</p>
           </div>
-          <span className={`shrink-0 rounded px-2 py-1 text-xs font-semibold ring-1 ${isPpe ? "bg-red-50 text-red-700 ring-red-200" : "bg-amber-50 text-amber-700 ring-amber-200"}`}>
-            {isPpe ? "PPE" : "Zone"}
+          <span className={`shrink-0 rounded px-2 py-1 text-xs font-semibold ring-1 ${badgeClass}`}>
+            {sourceLabel}
           </span>
         </div>
         <div className={`${compact ? "mt-2 gap-1 pt-2" : "mt-3 gap-2 pt-3"} grid grid-cols-2 border-t border-slate-100 text-xs text-slate-600`}>
           <span className="truncate">Video: {event.video_name ?? "-"}</span>
-          <span>Frame: {event.frame_index ?? "-"}</span>
+          <span>Frame: {frameLabel ?? "-"}</span>
           <span>Track: {event.track_id ?? "-"}</span>
           <span>ID: #{event.id ?? "-"}</span>
         </div>
@@ -173,6 +188,24 @@ function formatIncidentType(type: string): string {
     zone_incursion: "Zone Incursion",
   };
   return labels[type] ?? type.replaceAll("_", " ");
+}
+
+function formatBehaviorType(type: string): string {
+  const labels: Record<string, string> = {
+    FALL_DETECTED: "Fall Detected",
+    RUNNING_DETECTED: "Running Detected",
+    FAINT_DETECTED: "Faint Detected",
+    COLLAPSE_DETECTED: "Collapse Detected",
+  };
+  return labels[type] ?? type.replaceAll("_", " ");
+}
+
+function isPpeIncident(event: ViolationReport | ZoneViolation | BehaviorIncident): event is ViolationReport {
+  return "violation_type" in event;
+}
+
+function isBehaviorIncident(event: ViolationReport | ZoneViolation | BehaviorIncident): event is BehaviorIncident {
+  return "behavior_type" in event;
 }
 
 function formatPersonRole(person: PersonResult): string {

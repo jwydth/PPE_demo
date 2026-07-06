@@ -1,5 +1,6 @@
 import { IncidentCard } from "@/components/ppe/result-panels";
 import { EmptyState } from "@/components/ppe/result-panels";
+import { BehaviorIncident } from "@/types/behavior";
 import { ViolationReport } from "@/types/detection";
 import { ZoneViolation } from "@/types/zone";
 
@@ -30,7 +31,7 @@ export function AnalysisResultPanel({
   onRerun,
 }: {
   videoName: string | undefined;
-  incidents: (ViolationReport | ZoneViolation)[];
+  incidents: (ViolationReport | ZoneViolation | BehaviorIncident)[];
   ppeEnabled: boolean;
   zoneEnabled: boolean;
   onRerun: () => void;

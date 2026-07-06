@@ -71,6 +71,16 @@ class Settings(BaseSettings):
     # detected walker is treated as being outside a walkway.  A violation is
     # raised once the worker has been visible for this many consecutive seconds.
     NO_WALKWAY_DWELL_SECONDS: float = 1.5
+    # Fall-detection / behavior incident settings.
+    FALL_MODEL_PATH: str = "weights/yolo26m-pose.pt"
+    FALL_PERSON_CONFIDENCE: float = 0.10
+    FALL_RISK_THRESHOLD: float = 0.52
+    FALL_THRESHOLD: float = 0.68
+    FALL_PERSISTENCE_SECONDS: float = 1.0
+    FALL_MAX_FRAMES: int = 1200
+    FALL_FRAME_STRIDE: int = 1
+    FALL_MODEL_NAME: str = "yolo26m-pose"
+    FALL_MODEL_VERSION: str = "v8.4.0"
 
     @model_validator(mode="after")
     def _coerce_sign_dict_keys(self) -> "Settings":
