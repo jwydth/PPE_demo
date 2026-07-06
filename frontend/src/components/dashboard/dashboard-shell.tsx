@@ -32,7 +32,7 @@ import { useZoneDrawing } from "@/hooks/useZoneDrawing";
 import { useLiveStream } from "@/hooks/useLiveStream";
 import { useAutoZoneSuggestions } from "@/hooks/useAutoZoneSuggestions";
 import { AnalysisPhase } from "@/hooks/camera-panel-types";
-import { BehaviorIncident } from "@/types/behavior";
+import { BehaviorIncident, FallLiveSummary } from "@/types/behavior";
 import { safetyMetrics } from "./data";
 import { TopBar, type DashboardView } from "./top-bar";
 import { ZoneSidebar } from "./zone-sidebar";
@@ -94,12 +94,14 @@ function CameraPanel() {
   const [status, setStatus] = useState("");
   const [ppeEnabled, setPpeEnabled] = useState(true);
   const [zoneEnabled, setZoneEnabled] = useState(false);
+  const [fallEnabled, setFallEnabled] = useState(false);
 
   const upload = useDetectionUpload();
 
   const liveStream = useLiveStream({
     ppeEnabled,
     zoneEnabled,
+    fallEnabled,
     setPhase,
     setError,
     setStatus,
@@ -158,6 +160,7 @@ function CameraPanel() {
       return [
         ...(ppeEnabled ? reports : []),
         ...(zoneEnabled ? zoneViolations : []),
+        ...(fallEnabled ? liveStream.streamData.behavior_incidents : []),
       ];
     },
     [
@@ -166,8 +169,10 @@ function CameraPanel() {
       liveStream.streamData.reports,
       liveStream.streamData.summary,
       liveStream.streamData.zone_violations,
+      liveStream.streamData.behavior_incidents,
       upload.videoResult?.reports,
       upload.videoResult?.zone_violations,
+      fallEnabled,
       zoneEnabled,
     ],
   );
@@ -206,6 +211,10 @@ function CameraPanel() {
       summary: null,
       reports: [],
       zone_violations: [],
+      behavior_incidents: [],
+      fall_summary: null,
+      fall_detections: [],
+      fall_unavailable: null,
       tracking_overlay: {
         fps: 30,
         stride: 1,
@@ -234,13 +243,13 @@ function CameraPanel() {
 
   const runSelectedModels = async () => {
     if (!liveStream.isLive && !upload.file) return;
-    if (!ppeEnabled && !zoneEnabled) {
+    if (!ppeEnabled && !zoneEnabled && !fallEnabled) {
       setError("Enable at least one detection model before running analysis.");
       setPhase("error");
       return;
     }
     if (!liveStream.isLive && !isVideo && !ppeEnabled) {
-      setError("Image uploads only support PPE detection.");
+      setError("Image uploads only support PPE detection in this dashboard.");
       setPhase("error");
       return;
     }
@@ -359,7 +368,7 @@ function CameraPanel() {
               )}
             </div>
 
-            <div className="grid gap-2 sm:grid-cols-2">
+            <div className="grid gap-2 sm:grid-cols-3">
               <ModelToggle
                 label="PPE Detection"
                 description="Helmet and role-uniform compliance"
@@ -372,6 +381,13 @@ function CameraPanel() {
                 enabled={zoneEnabled && (liveStream.isLive || isVideo)}
                 disabled={!liveStream.isLive && !isVideo}
                 onToggle={() => setZoneEnabled((current) => !current)}
+              />
+              <ModelToggle
+                label="Fall Detection"
+                description="Live pose risk and incident capture"
+                enabled={fallEnabled && (liveStream.isLive || isVideo)}
+                disabled={!liveStream.isLive && !isVideo}
+                onToggle={() => setFallEnabled((current) => !current)}
               />
             </div>
 
@@ -443,22 +459,30 @@ function CameraPanel() {
                   ) : null}
                 </div>
 
-                <ZoneConfigPanel
-                  zoneDrawing={zoneDrawing}
-                  zoneEnabled={zoneEnabled}
-                  phase={phase}
-                  isStreaming={liveStream.isStreaming}
-                  isVideo={isVideo}
-                  isLive={liveStream.isLive}
-                  isPlaying={liveStream.isPlaying}
-                  togglePlayback={liveStream.togglePlayback}
-                />
+                <div className="grid gap-4">
+                  <ZoneConfigPanel
+                    zoneDrawing={zoneDrawing}
+                    zoneEnabled={zoneEnabled}
+                    phase={phase}
+                    isStreaming={liveStream.isStreaming}
+                    isVideo={isVideo}
+                    isLive={liveStream.isLive}
+                    isPlaying={liveStream.isPlaying}
+                    togglePlayback={liveStream.togglePlayback}
+                  />
+                  <FallStatusPanel
+                    enabled={fallEnabled}
+                    summary={liveStream.streamData.fall_summary}
+                    unavailable={liveStream.streamData.fall_unavailable}
+                    latestIncident={liveStream.streamData.behavior_incidents.at(-1)}
+                  />
+                </div>
               </div>
             ) : null}
           </div>
         ) : null}
 
-        {phase === "loading" && (ppeEnabled || zoneEnabled) ? <LoadingState text="Running PPE inference..." /> : null}
+        {phase === "loading" && (ppeEnabled || zoneEnabled || fallEnabled) ? <LoadingState text="Running inference..." /> : null}
         {phase === "error" ? <ErrorState text={error} /> : null}
         {status ? <EmptyState text={status} /> : null}
 
@@ -526,6 +550,90 @@ function ModelToggle({
         />
       </span>
     </button>
+  );
+}
+
+function FallStatusPanel({
+  enabled,
+  summary,
+  unavailable,
+  latestIncident,
+}: {
+  enabled: boolean;
+  summary: FallLiveSummary | null;
+  unavailable: string | null;
+  latestIncident?: BehaviorIncident;
+}) {
+  const status = unavailable ? "unavailable" : summary?.status ?? (enabled ? "no_detection" : "off");
+  const statusClass =
+    status === "fall"
+      ? "border-red-400 bg-red-500/10 text-red-100"
+      : status === "fall_risk"
+      ? "border-amber-300 bg-amber-400/10 text-amber-100"
+      : status === "unavailable"
+      ? "border-slate-600 bg-slate-800 text-slate-200"
+      : "border-emerald-300 bg-emerald-400/10 text-emerald-100";
+  const label =
+    status === "fall"
+      ? "Fall detected"
+      : status === "fall_risk"
+      ? "Fall risk"
+      : status === "unavailable"
+      ? "Unavailable"
+      : status === "off"
+      ? "Off"
+      : "Normal";
+
+  return (
+    <section className="rounded-md border border-slate-800 bg-slate-950 p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold text-white">Fall Detection</h3>
+          <p className="mt-1 text-xs text-slate-400">Live pose status from the backend stream.</p>
+        </div>
+        <span className={`rounded border px-2 py-1 text-xs font-semibold ${statusClass}`}>
+          {label}
+        </span>
+      </div>
+
+      {!enabled ? (
+        <p className="mt-3 text-xs text-slate-500">Enable Fall Detection to process live/video frames.</p>
+      ) : unavailable ? (
+        <p className="mt-3 text-xs leading-5 text-slate-300">{unavailable}</p>
+      ) : (
+        <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+          <MetricMini label="Confidence" value={`${Math.round((summary?.top_confidence ?? 0) * 100)}%`} />
+          <MetricMini label="People" value={`${summary?.person_count ?? 0}`} />
+          <MetricMini label="Risk" value={`${summary?.fall_risk_count ?? 0}`} />
+          <MetricMini label="Falls" value={`${summary?.fall_count ?? 0}`} />
+        </div>
+      )}
+
+      {latestIncident ? (
+        <div className="mt-3 rounded-md border border-red-400/30 bg-red-500/10 p-2 text-xs text-red-50">
+          <p className="font-semibold">Persisted incident #{latestIncident.id}</p>
+          <p className="mt-1 text-red-100/80">
+            {latestIncident.severity ?? "HIGH"} - {Math.round((latestIncident.confidence ?? 0) * 100)}%
+          </p>
+          {latestIncident.snapshot_url ? (
+            <img
+              src={latestIncident.snapshot_url}
+              alt={`Fall incident ${latestIncident.id}`}
+              className="mt-2 max-h-32 w-full rounded object-cover"
+            />
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function MetricMini({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded border border-slate-800 bg-slate-900 px-2 py-1.5">
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label}</p>
+      <p className="mt-1 font-semibold text-white">{value}</p>
+    </div>
   );
 }
 

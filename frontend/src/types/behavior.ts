@@ -45,3 +45,32 @@ export interface BehaviorIncident {
   subjects: BehaviorIncidentSubject[];
   evidence: BehaviorEvidence[];
 }
+
+export type FallLiveStatus = "normal" | "fall_risk" | "fall" | "no_detection" | "unavailable";
+
+export interface FallLiveSummary {
+  status: FallLiveStatus;
+  fall_count: number;
+  fall_risk_count: number;
+  normal_count: number;
+  person_count: number;
+  top_label: string;
+  top_confidence: number;
+  persisted_incident_ids: number[];
+}
+
+export interface FallLiveDetection {
+  track_id: number;
+  status: "normal" | "fall_risk" | "fall";
+  score: number;
+  person_confidence: number;
+  bbox: {
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+  };
+  features: Record<string, number>;
+  keypoints?: number[][] | null;
+  incident_id?: number | null;
+}

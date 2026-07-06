@@ -89,6 +89,13 @@ class FallDetector:
             frame_stride=max(1, settings.FALL_FRAME_STRIDE),
         )
 
+    def create_live_session(self, *, fps: float, frame_stride: int | None = None) -> "FallLiveSession":
+        return FallLiveSession(
+            detector=self,
+            fps=fps,
+            frame_stride=max(1, frame_stride or settings.FALL_LIVE_FRAME_STRIDE),
+        )
+
     def predict_image(
         self,
         input_path: Path,
@@ -339,6 +346,98 @@ class FallDetector:
             ) from exc
         self.model = YOLO(str(self.model_path))
         return self.model
+
+
+class FallLiveSession:
+    def __init__(self, *, detector: FallDetector, fps: float, frame_stride: int) -> None:
+        self.detector = detector
+        self.frame_stride = max(1, frame_stride)
+        self.effective_fps = max(float(fps) / self.frame_stride, 1.0)
+        self.tracker = SimplePoseTracker(
+            fps=self.effective_fps,
+            iou_threshold=detector.config.iou_threshold,
+            max_missed_frames=detector.config.max_missed_frames,
+            config=detector.config,
+        )
+        self.active_fall_tracks: set[int] = set()
+        self.last_persisted_at_by_track: dict[int, float] = {}
+        self.incident_by_track: dict[int, int] = {}
+        self.sample_index = 0
+
+    def process_frame(
+        self,
+        frame: np.ndarray,
+        *,
+        frame_index: int,
+        source_name: str | None,
+    ) -> dict[str, Any]:
+        model = self.detector._ensure_model()
+        result = model.predict(
+            source=frame,
+            conf=self.detector.config.person_confidence,
+            imgsz=self.detector.config.image_size,
+            device=self.detector.device,
+            verbose=False,
+        )[0]
+        detections = extract_pose_detections(result, self.detector.config.person_confidence)
+        detections = self.tracker.update(detections, self.sample_index)
+        scored = [
+            self.tracker.score_and_commit(detection, frame.shape, self.sample_index)
+            for detection in detections
+        ]
+        payloads = [detection_payload(item) for item in scored]
+        current_tracks = {int(item["track_id"]) for item in payloads}
+        self.active_fall_tracks.intersection_update(set(self.tracker.tracks))
+        self.active_fall_tracks.intersection_update(current_tracks)
+
+        persisted: list[BehaviorIncidentRead] = []
+        timestamp = datetime.now(timezone.utc)
+        time_seconds = self.sample_index / self.effective_fps
+        annotated = frame.copy()
+        for detection in scored:
+            draw_detection(annotated, detection)
+
+        for detection, payload in zip(scored, payloads):
+            track_id = int(payload["track_id"])
+            if payload["status"] == "normal":
+                self.active_fall_tracks.discard(track_id)
+                continue
+            if payload["status"] != "fall":
+                continue
+            if track_id in self.active_fall_tracks:
+                continue
+            last_persisted = self.last_persisted_at_by_track.get(track_id)
+            if (
+                last_persisted is not None
+                and time_seconds - last_persisted < settings.FALL_INCIDENT_COOLDOWN_SECONDS
+            ):
+                self.active_fall_tracks.add(track_id)
+                continue
+
+            incidents = self.detector._persist_confirmed_detections(
+                detections=[detection],
+                frame=annotated,
+                source_name=source_name,
+                frame_index=frame_index,
+                timestamp=timestamp,
+                incident_service=None,
+            )
+            if incidents:
+                persisted.extend(incidents)
+                self.incident_by_track[track_id] = incidents[0].id
+                self.last_persisted_at_by_track[track_id] = time_seconds
+            self.active_fall_tracks.add(track_id)
+
+        self.sample_index += 1
+        incident_ids = [incident.id for incident in persisted]
+        return {
+            "summary": _summary_schema(payloads, incident_ids).model_dump(),
+            "detections": [
+                _to_pose_schema(item, self.incident_by_track.get(int(item["track_id"]))).model_dump()
+                for item in payloads
+            ],
+            "incidents": [incident.model_dump() for incident in persisted],
+        }
 
 
 class SimplePoseTracker:

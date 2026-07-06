@@ -35,6 +35,7 @@ from app.schemas.detection import (
 from app.schemas.streaming import StreamEvent
 from app.schemas.violation import ViolationReport
 from app.services.auto_zone import SignPPERegistry, SignZoneRegistry, extract_signs
+from app.services.fall_detector import FallDetector, FallModelUnavailable
 from app.services.ppe_violation_service import open_ppe_violation_service
 from app.services.zone_service import (
     COORD_SCALE,
@@ -65,6 +66,7 @@ from app.services.ppe.violation_matching import (
 from app.services.ppe.worker_tracking import WorkerState, _update_worker_status
 
 logger = logging.getLogger(__name__)
+_fall_detector = FallDetector()
 
 # Sentinel camera_zone_view_id used for the virtual "no walkway defined" zone.
 # Uses a negative value so it can never collide with real database IDs.
@@ -294,6 +296,7 @@ async def real_video_pipeline(
     *,
     enable_ppe: bool = True,
     enable_zone: bool = True,
+    enable_fall: bool = False,
     settings_state: dict | None = None,
 ):
     """Unified internal generator for video processing (real model path)."""
@@ -308,6 +311,9 @@ async def real_video_pipeline(
     frame_width: int | None = None
     frame_height: int | None = None
     prev_zone_enabled = enable_zone  # track zone toggle to trigger retroactive check
+    fall_live_session = None
+    fall_unavailable_message: str | None = None
+    last_fall_payload: dict | None = None
 
     # Rolling window of foot-point history: track_id → [(frame_index, foot_point)]
     # Used to retroactively check newly-accepted zones against recent worker positions.
@@ -317,8 +323,12 @@ async def real_video_pipeline(
     # Helper to get current flags
     def get_flags():
         if settings_state:
-            return settings_state.get("enable_ppe", enable_ppe), settings_state.get("enable_zone", enable_zone)
-        return enable_ppe, enable_zone
+            return (
+                settings_state.get("enable_ppe", enable_ppe),
+                settings_state.get("enable_zone", enable_zone),
+                settings_state.get("enable_fall", enable_fall),
+            )
+        return enable_ppe, enable_zone, enable_fall
 
     def _retroactive_zone_check(new_zones, current_frame_index):
         """Check foot-point history against zones and emit any missed violations.
@@ -402,7 +412,7 @@ async def real_video_pipeline(
     for processed_frames, result in enumerate(results, start=1):
         await asyncio.sleep(0.01)  # Critical: yield to event loop to keep WebSocket alive
         frame_index = (processed_frames - 1) * stride
-        curr_ppe, curr_zone = get_flags()
+        curr_ppe, curr_zone, curr_fall = get_flags()
 
         # Detect zone being toggled ON mid-stream and retroactively check foot history
         zone_just_enabled = curr_zone and not prev_zone_enabled
@@ -447,13 +457,64 @@ async def real_video_pipeline(
                     worker.zone_last_in = {}
 
         if processed_frames % 60 == 1:
-            logger.info(f" [PIPELINE] Frame {frame_index} active state: ppe={curr_ppe}, zone={curr_zone}")
+            logger.info(f" [PIPELINE] Frame {frame_index} active state: ppe={curr_ppe}, zone={curr_zone}, fall={curr_fall}")
 
         persons, helmets, vests, cleaning_coveralls = _extract_result_boxes(result)
 
         response = _build_response(persons, helmets, vests, cleaning_coveralls, 0.0)
         frame = result.orig_img.copy()
         frame_height, frame_width = frame.shape[:2]
+        if curr_fall:
+            if fall_unavailable_message is None and fall_live_session is None:
+                fall_live_session = _fall_detector.create_live_session(
+                    fps=fps,
+                    frame_stride=settings.FALL_LIVE_FRAME_STRIDE,
+                )
+            if fall_unavailable_message is None and frame_index % max(1, settings.FALL_LIVE_FRAME_STRIDE) == 0:
+                try:
+                    last_fall_payload = fall_live_session.process_frame(
+                        frame,
+                        frame_index=frame_index,
+                        source_name=video_name,
+                    )
+                    for incident in last_fall_payload.get("incidents", []):
+                        yield StreamEvent(event="behavior_incident", frame_index=frame_index, data=incident)
+                except FallModelUnavailable as exc:
+                    fall_unavailable_message = str(exc)
+                    last_fall_payload = {
+                        "summary": {
+                            "status": "unavailable",
+                            "fall_count": 0,
+                            "fall_risk_count": 0,
+                            "normal_count": 0,
+                            "person_count": 0,
+                            "top_label": "unavailable",
+                            "top_confidence": 0.0,
+                            "persisted_incident_ids": [],
+                        },
+                        "detections": [],
+                        "incidents": [],
+                    }
+                    logger.warning("[FALL] Live fall detection unavailable: %s", fall_unavailable_message)
+                except Exception:
+                    fall_unavailable_message = "Fall detection failed during live stream processing."
+                    last_fall_payload = {
+                        "summary": {
+                            "status": "unavailable",
+                            "fall_count": 0,
+                            "fall_risk_count": 0,
+                            "normal_count": 0,
+                            "person_count": 0,
+                            "top_label": "unavailable",
+                            "top_confidence": 0.0,
+                            "persisted_incident_ids": [],
+                        },
+                        "detections": [],
+                        "incidents": [],
+                    }
+                    logger.exception("[FALL] Live fall detection failed")
+        else:
+            last_fall_payload = None
         used_worker_ids: set[int] = set()
         overlay_person_ids: set[tuple[str, int]] = set()
         current_frame_overlay: list[TrackingOverlayFrame] = []
@@ -628,7 +689,10 @@ async def real_video_pipeline(
                 "frames": [f.model_dump() for f in current_frame_overlay],
                 "processed_frames": processed_frames,
                 "frame_width": frame_width,
-                "frame_height": frame_height
+                "frame_height": frame_height,
+                "fall_summary": last_fall_payload.get("summary") if curr_fall and last_fall_payload else None,
+                "fall_detections": last_fall_payload.get("detections") if curr_fall and last_fall_payload else [],
+                "fall_unavailable": fall_unavailable_message if curr_fall else None,
             },
             image_base64=_encode_frame_to_base64(frame) if is_stream else None
         )
@@ -652,6 +716,7 @@ def mock_process_video(
     *,
     enable_ppe: bool = True,
     enable_zone: bool = True,
+    enable_fall: bool = False,
 ):
     import cv2
 
@@ -794,6 +859,7 @@ async def mock_stream_video(
     *,
     enable_ppe: bool = True,
     enable_zone: bool = True,
+    enable_fall: bool = False,
 ):
     import cv2
 

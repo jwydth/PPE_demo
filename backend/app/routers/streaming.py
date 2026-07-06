@@ -28,17 +28,19 @@ async def stream_video_ws(
     video_name: str = Query(...),
     enable_ppe: bool = Query(True),
     enable_zone: bool = Query(True),
+    enable_fall: bool = Query(False),
 ):
     global _current_cancel
     conn_id = next(_conn_counter)
     await websocket.accept()
     ensure_upload_dir()
-    logger.info(f"[conn {conn_id}] WS accepted (ppe={enable_ppe}, zone={enable_zone})")
+    logger.info(f"[conn {conn_id}] WS accepted (ppe={enable_ppe}, zone={enable_zone}, fall={enable_fall})")
     
     # Dynamic settings state
     settings_state = {
         "enable_ppe": enable_ppe,
         "enable_zone": enable_zone,
+        "enable_fall": enable_fall,
         "dismissed_signatures": [],
         "dismissed_ppe_signatures": [],
         "reload_zones": False,
@@ -75,7 +77,7 @@ async def stream_video_ws(
         await websocket.close()
         return
 
-    logger.info(f"Starting {'live' if is_url else 'simulated'} stream for {video_name} (initial ppe={enable_ppe}, zone={enable_zone})")
+    logger.info(f"Starting {'live' if is_url else 'simulated'} stream for {video_name} (initial ppe={enable_ppe}, zone={enable_zone}, fall={enable_fall})")
     
     # Task to handle incoming setting updates
     async def listen_for_settings():
@@ -101,6 +103,8 @@ async def stream_video_ws(
                     settings_state["enable_ppe"] = bool(new_settings["enable_ppe"])
                 if "enable_zone" in new_settings:
                     settings_state["enable_zone"] = bool(new_settings["enable_zone"])
+                if "enable_fall" in new_settings:
+                    settings_state["enable_fall"] = bool(new_settings["enable_fall"])
                 logger.info(f"[conn {conn_id}] [SIGNAL] Received dynamic settings update: {settings_state}")
             elif data.get("event") == "dismiss_suggestion":
                 sig = data.get("data", {}).get("suggestion_id")

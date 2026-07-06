@@ -79,6 +79,8 @@ class Settings(BaseSettings):
     FALL_PERSISTENCE_SECONDS: float = 1.0
     FALL_MAX_FRAMES: int = 1200
     FALL_FRAME_STRIDE: int = 1
+    FALL_LIVE_FRAME_STRIDE: int = 5
+    FALL_INCIDENT_COOLDOWN_SECONDS: float = 10.0
     FALL_MODEL_NAME: str = "yolo26m-pose"
     FALL_MODEL_VERSION: str = "v8.4.0"
 

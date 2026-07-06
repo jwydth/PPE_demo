@@ -212,6 +212,7 @@ class PPEDetector:
         *,
         enable_ppe: bool = True,
         enable_zone: bool = True,
+        enable_fall: bool = False,
         settings_state: dict | None = None,
     ):
         if self.model is None:
@@ -220,6 +221,7 @@ class PPEDetector:
                 video_name,
                 enable_ppe=enable_ppe,
                 enable_zone=enable_zone,
+                enable_fall=enable_fall,
             ):
                 yield event
             return
@@ -232,6 +234,7 @@ class PPEDetector:
             stride=stride,
             enable_ppe=enable_ppe,
             enable_zone=enable_zone,
+            enable_fall=enable_fall,
             settings_state=settings_state,
         ):
             if event.event == "frame":
@@ -246,6 +249,7 @@ class PPEDetector:
         *,
         enable_ppe: bool = True,
         enable_zone: bool = True,
+        enable_fall: bool = False,
         settings_state: dict | None = None,
     ):
         async for event in video_pipeline.real_video_pipeline(
@@ -255,6 +259,7 @@ class PPEDetector:
             stride,
             enable_ppe=enable_ppe,
             enable_zone=enable_zone,
+            enable_fall=enable_fall,
             settings_state=settings_state,
         ):
             yield event
@@ -303,6 +308,7 @@ class PPEDetector:
         *,
         enable_ppe: bool = True,
         enable_zone: bool = True,
+        enable_fall: bool = False,
     ):
         async for event in video_pipeline.mock_stream_video(
             self,
@@ -310,5 +316,6 @@ class PPEDetector:
             video_name,
             enable_ppe=enable_ppe,
             enable_zone=enable_zone,
+            enable_fall=enable_fall,
         ):
             yield event

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { API_URL, toAbsoluteUrl } from "@/lib/ppe-api";
 import { TrackingOverlay, ViolationReport } from "@/types/detection";
+import { BehaviorIncident, FallLiveDetection, FallLiveSummary } from "@/types/behavior";
 import { PPESuggestion, ZoneSuggestion, ZoneViolation } from "@/types/zone";
 import { AnalysisPhase } from "./camera-panel-types";
 
@@ -8,6 +9,10 @@ export type StreamData = {
   summary: any | null;
   reports: ViolationReport[];
   zone_violations: ZoneViolation[];
+  behavior_incidents: BehaviorIncident[];
+  fall_summary: FallLiveSummary | null;
+  fall_detections: FallLiveDetection[];
+  fall_unavailable: string | null;
   tracking_overlay: TrackingOverlay;
   live_frame: string | null;
 };
@@ -16,6 +21,10 @@ export const emptyStreamData = (): StreamData => ({
   summary: null,
   reports: [],
   zone_violations: [],
+  behavior_incidents: [],
+  fall_summary: null,
+  fall_detections: [],
+  fall_unavailable: null,
   tracking_overlay: {
     fps: 30,
     stride: 1,
@@ -29,12 +38,14 @@ export const emptyStreamData = (): StreamData => ({
 export function useLiveStream({
   ppeEnabled,
   zoneEnabled,
+  fallEnabled,
   setPhase,
   setError,
   setStatus,
 }: {
   ppeEnabled: boolean;
   zoneEnabled: boolean;
+  fallEnabled: boolean;
   setPhase: (phase: AnalysisPhase) => void;
   setError: (message: string) => void;
   setStatus: (status: string) => void;
@@ -59,11 +70,12 @@ export function useLiveStream({
           data: {
             enable_ppe: ppeEnabled,
             enable_zone: zoneEnabled,
+            enable_fall: fallEnabled,
           },
         }),
       );
     }
-  }, [ppeEnabled, zoneEnabled]);
+  }, [fallEnabled, ppeEnabled, zoneEnabled]);
 
   useEffect(() => {
     return () => {
@@ -93,7 +105,7 @@ export function useLiveStream({
       const wsUrlBase = API_URL.replace(/^http/, "ws");
       const wsUrl = `${wsUrlBase}/ws/stream?video_name=${encodeURIComponent(
         videoName,
-      )}&enable_ppe=${ppeEnabled}&enable_zone=${zoneEnabled}`;
+      )}&enable_ppe=${ppeEnabled}&enable_zone=${zoneEnabled}&enable_fall=${fallEnabled}`;
 
       if (wsRef.current) wsRef.current.close();
       const ws = new WebSocket(wsUrl);
@@ -130,9 +142,27 @@ export function useLiveStream({
             return {
               ...prev,
               live_frame: image_base64 ? `data:image/jpeg;base64,${image_base64}` : prev.live_frame,
+              fall_summary: data.fall_summary ?? prev.fall_summary,
+              fall_detections: data.fall_detections ?? prev.fall_detections,
+              fall_unavailable: data.fall_unavailable ?? prev.fall_unavailable,
               tracking_overlay: nextOverlay,
             };
           });
+        } else if (eventType === "behavior_incident") {
+          setStreamData((prev) => ({
+            ...prev,
+            behavior_incidents: [
+              ...prev.behavior_incidents,
+              {
+                ...data,
+                snapshot_url: toAbsoluteUrl(data.snapshot_url),
+                evidence: (data.evidence ?? []).map((item: any) => ({
+                  ...item,
+                  file_url: toAbsoluteUrl(item.file_url),
+                })),
+              },
+            ],
+          }));
         } else if (eventType === "violation") {
           setStreamData((prev) => ({
             ...prev,
