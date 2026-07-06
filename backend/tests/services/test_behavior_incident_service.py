@@ -29,6 +29,9 @@ class _StoredObject:
 
 
 class _FakeStorage:
+    def __init__(self) -> None:
+        self.deleted: list[str] = []
+
     def upload_behavior_snapshot(self, local_file_path: str | Path) -> _StoredObject:
         assert Path(local_file_path).is_file()
         return _StoredObject(
@@ -38,6 +41,9 @@ class _FakeStorage:
 
     def get_object_url(self, object_key: str) -> str:
         return f"http://storage.local/{object_key}"
+
+    def delete_object(self, object_key: str) -> None:
+        self.deleted.append(object_key)
 
 
 @compiles(BigInteger, "sqlite")
@@ -75,9 +81,10 @@ def session() -> Generator[Session, None, None]:
 def test_behavior_service_persists_fall_bundle_and_resolves_camera(session, tmp_path):
     snapshot = tmp_path / "fall.jpg"
     snapshot.write_bytes(b"fake jpeg")
+    storage = _FakeStorage()
     service = BehaviorIncidentService(
         BehaviorIncidentRepository(session),
-        _FakeStorage(),
+        storage,
         CameraRepository(session),
         FactoryRepository(session),
     )
@@ -116,3 +123,7 @@ def test_behavior_service_persists_fall_bundle_and_resolves_camera(session, tmp_
     recent = service.list_recent(limit=10)
     assert [item.id for item in recent] == [incident.id]
     assert service.get_incident(incident.id).id == incident.id
+
+    assert service.delete_all_behavior_incidents() == 1
+    assert storage.deleted == ["behavior-incidents/2026/07/06/fall.jpg"]
+    assert service.list_recent(limit=10) == []

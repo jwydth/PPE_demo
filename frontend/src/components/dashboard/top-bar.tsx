@@ -6,7 +6,7 @@ export type DashboardView = "feeds" | "violations";
 
 const navViewByLabel: Record<string, DashboardView> = {
   "Camera Feeds": "feeds",
-  "Violations Log": "violations",
+  "Incident Log": "violations",
 };
 
 export function TopBar({

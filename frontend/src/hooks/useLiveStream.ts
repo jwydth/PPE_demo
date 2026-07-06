@@ -78,6 +78,16 @@ export function useLiveStream({
   }, [fallEnabled, ppeEnabled, zoneEnabled]);
 
   useEffect(() => {
+    if (fallEnabled) return;
+    setStreamData((prev) => ({
+      ...prev,
+      fall_summary: null,
+      fall_detections: [],
+      fall_unavailable: null,
+    }));
+  }, [fallEnabled]);
+
+  useEffect(() => {
     return () => {
       if (wsRef.current) wsRef.current.close();
     };

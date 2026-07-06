@@ -362,6 +362,9 @@ class FallLiveSession:
         self.active_fall_tracks: set[int] = set()
         self.last_persisted_at_by_track: dict[int, float] = {}
         self.incident_by_track: dict[int, int] = {}
+        self.last_fall_summary: dict[str, Any] | None = None
+        self.last_fall_detections: list[dict[str, Any]] = []
+        self.last_fall_frame_index: int | None = None
         self.sample_index = 0
 
     def process_frame(
@@ -430,13 +433,61 @@ class FallLiveSession:
 
         self.sample_index += 1
         incident_ids = [incident.id for incident in persisted]
+        summary = _summary_schema(payloads, incident_ids).model_dump()
+        summary["source_frame_index"] = frame_index
+        detections_payload = [
+            {
+                **_to_pose_schema(
+                    item,
+                    self.incident_by_track.get(int(item["track_id"])),
+                ).model_dump(),
+                "source_frame_index": frame_index,
+            }
+            for item in payloads
+        ]
+        self.last_fall_summary = summary
+        self.last_fall_detections = detections_payload
+        self.last_fall_frame_index = frame_index
+
+        payload = self.payload_for_frame(
+            frame_index,
+            max_age_frames=max(1, settings.FALL_LIVE_FRAME_STRIDE * 2),
+        )
+        payload["incidents"] = [incident.model_dump() for incident in persisted]
+        return payload
+
+    def payload_for_frame(self, frame_index: int, *, max_age_frames: int) -> dict[str, Any]:
+        if self.last_fall_frame_index is None or self.last_fall_summary is None:
+            return {
+                "summary": None,
+                "detections": [],
+                "incidents": [],
+                "frame_index": frame_index,
+            }
+
+        age_frames = max(0, frame_index - self.last_fall_frame_index)
+        is_stale = age_frames > max_age_frames
+        summary = {
+            **self.last_fall_summary,
+            "frame_index": frame_index,
+            "age_frames": age_frames,
+            "is_stale": is_stale,
+            "is_interpolated": age_frames > 0 and not is_stale,
+        }
         return {
-            "summary": _summary_schema(payloads, incident_ids).model_dump(),
-            "detections": [
-                _to_pose_schema(item, self.incident_by_track.get(int(item["track_id"]))).model_dump()
-                for item in payloads
+            "summary": summary,
+            "detections": [] if is_stale else [
+                {
+                    **detection,
+                    "frame_index": frame_index,
+                    "age_frames": age_frames,
+                    "is_stale": False,
+                    "is_interpolated": age_frames > 0,
+                }
+                for detection in self.last_fall_detections
             ],
-            "incidents": [incident.model_dump() for incident in persisted],
+            "incidents": [],
+            "frame_index": frame_index,
         }
 
 

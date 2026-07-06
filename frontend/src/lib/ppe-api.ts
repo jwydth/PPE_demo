@@ -127,6 +127,7 @@ export async function getSafetyEvents(): Promise<(ViolationReport | ZoneViolatio
 export async function deleteAllIncidents(): Promise<{
   ppe_violations_deleted: number;
   zone_violations_deleted: number;
+  behavior_incidents_deleted: number;
   total_deleted: number;
 }> {
   const res = await fetch(`${API_URL}/violations`, { method: "DELETE" });

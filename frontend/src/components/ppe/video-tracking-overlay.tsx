@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { TrackingOverlay, TrackingOverlayFrame } from "@/types/detection";
+import { FallLiveDetection } from "@/types/behavior";
 import { PPESuggestion, ZoneSuggestion } from "@/types/zone";
 
 export function TrackingOverlayLayer({
@@ -109,6 +110,49 @@ export function VideoTrackingOverlay({
   );
 }
 
+export function FallOverlayLayer({
+  detections,
+  frameWidth,
+  frameHeight,
+  currentFrameIndex,
+  ttlFrames = 10,
+}: {
+  detections: FallLiveDetection[];
+  frameWidth?: number | null;
+  frameHeight?: number | null;
+  currentFrameIndex?: number;
+  ttlFrames?: number;
+}) {
+  const width = frameWidth || 16;
+  const height = frameHeight || 9;
+  const visibleDetections = detections.filter((detection) => {
+    if (!detection.bbox) return false;
+    if (detection.is_stale) return false;
+    if (detection.age_frames !== undefined && detection.age_frames > ttlFrames) return false;
+    if (detection.frame_index === undefined || currentFrameIndex === undefined) return true;
+    return Math.abs(currentFrameIndex - detection.frame_index) <= ttlFrames;
+  });
+
+  if (visibleDetections.length === 0) return null;
+
+  return (
+    <svg
+      className="pointer-events-none absolute inset-0 h-full w-full"
+      viewBox={`0 0 ${width} ${height}`}
+      preserveAspectRatio="none"
+    >
+      {visibleDetections.map((detection, index) => (
+        <FallDetectionShape
+          key={`${detection.track_id}-${detection.status}-${index}`}
+          detection={detection}
+          frameWidth={width}
+          frameHeight={height}
+        />
+      ))}
+    </svg>
+  );
+}
+
 function useCurrentBoxes(overlay: TrackingOverlay | undefined, currentTime: number) {
   const sortedFrameIndexes = useMemo(() => {
     if (!overlay?.frames.length) return [];
@@ -135,6 +179,161 @@ function useCurrentBoxes(overlay: TrackingOverlay | undefined, currentTime: numb
   }, [currentTime, framesByIndex, overlay, sortedFrameIndexes]);
   return currentBoxes;
 }
+
+function FallDetectionShape({
+  detection,
+  frameWidth,
+  frameHeight,
+}: {
+  detection: FallLiveDetection;
+  frameWidth: number;
+  frameHeight: number;
+}) {
+  const color = fallColor(detection.status);
+  const label = fallLabel(detection);
+  const box = detection.bbox;
+  const width = Math.max(0, box.x2 - box.x1);
+  const height = Math.max(0, box.y2 - box.y1);
+  const panelWidth = Math.min(
+    frameWidth - box.x1,
+    Math.max(frameWidth * 0.20, label.length * frameWidth * 0.008),
+  );
+  const panelHeight = frameHeight * 0.052;
+  const panelY =
+    box.y1 > panelHeight + frameHeight * 0.012
+      ? box.y1 - panelHeight - frameHeight * 0.008
+      : Math.min(frameHeight - panelHeight, box.y2 + frameHeight * 0.008);
+  const panelX = Math.min(box.x1, frameWidth - panelWidth);
+
+  return (
+    <g>
+      <rect
+        x={box.x1}
+        y={box.y1}
+        width={width}
+        height={height}
+        fill="transparent"
+        stroke={color}
+        strokeWidth={Math.max(frameWidth, frameHeight) * 0.005}
+        opacity={detection.is_interpolated ? 0.68 : 1}
+      />
+      <FallSkeleton
+        keypoints={detection.keypoints ?? []}
+        color={color}
+        frameWidth={frameWidth}
+        opacity={detection.is_interpolated ? 0.62 : 1}
+      />
+      <rect
+        x={panelX}
+        y={panelY}
+        width={panelWidth}
+        height={panelHeight}
+        rx={frameWidth * 0.006}
+        fill="rgba(2, 6, 23, 0.9)"
+        stroke={color}
+        strokeWidth={Math.max(frameWidth, frameHeight) * 0.0015}
+        opacity={detection.is_interpolated ? 0.82 : 1}
+      />
+      <text
+        x={panelX + frameWidth * 0.008}
+        y={panelY + panelHeight * 0.64}
+        fill="#ffffff"
+        fontSize={frameHeight * 0.024}
+        fontWeight={800}
+        opacity={detection.is_interpolated ? 0.86 : 1}
+      >
+        {label}
+      </text>
+    </g>
+  );
+}
+
+function FallSkeleton({
+  keypoints,
+  color,
+  frameWidth,
+  opacity = 1,
+}: {
+  keypoints: number[][];
+  color: string;
+  frameWidth: number;
+  opacity?: number;
+}) {
+  if (keypoints.length === 0) return null;
+  const usablePoint = (index: number) => {
+    const point = keypoints[index];
+    if (!point || point.length < 3 || point[2] < 0.12 || point[0] <= 0 || point[1] <= 0) return null;
+    return { x: point[0], y: point[1] };
+  };
+
+  return (
+    <>
+      {FALL_SKELETON.map(([a, b]) => {
+        const pointA = usablePoint(a);
+        const pointB = usablePoint(b);
+        if (!pointA || !pointB) return null;
+        return (
+          <line
+            key={`${a}-${b}`}
+            x1={pointA.x}
+            y1={pointA.y}
+            x2={pointB.x}
+            y2={pointB.y}
+            stroke={color}
+            strokeWidth={frameWidth * 0.003}
+            strokeLinecap="round"
+            opacity={opacity}
+          />
+        );
+      })}
+      {keypoints.map((_, index) => {
+        const point = usablePoint(index);
+        if (!point) return null;
+        return (
+          <circle
+            key={index}
+            cx={point.x}
+            cy={point.y}
+            r={frameWidth * 0.004}
+            fill={color}
+            opacity={opacity}
+          />
+        );
+      })}
+    </>
+  );
+}
+
+function fallColor(status: FallLiveDetection["status"]): string {
+  if (status === "fall") return "#ef4444";
+  if (status === "fall_risk") return "#f59e0b";
+  return "#22c55e";
+}
+
+function fallLabel(detection: FallLiveDetection): string {
+  const label =
+    detection.status === "fall"
+      ? "detected"
+      : detection.status === "fall_risk"
+      ? "risk"
+      : "normal";
+  return `Fall: ${label} ${detection.score.toFixed(2)}`;
+}
+
+const FALL_SKELETON: Array<[number, number]> = [
+  [5, 6],
+  [5, 11],
+  [6, 12],
+  [11, 12],
+  [5, 7],
+  [7, 9],
+  [6, 8],
+  [8, 10],
+  [11, 13],
+  [13, 15],
+  [12, 14],
+  [14, 16],
+];
 
 function TrackingBoxes({
   frames,

@@ -156,6 +156,20 @@ class BehaviorIncidentService:
         )
         return [self._to_read(incident) for incident in incidents]
 
+    def delete_all_behavior_incidents(self) -> int:
+        storage = self._require_storage()
+        evidence_rows = self.repository.list_all_evidence()
+        for evidence in evidence_rows:
+            try:
+                storage.delete_object(evidence.object_key)
+            except Exception:
+                logger.warning(
+                    "Could not delete behavior evidence object '%s'.",
+                    evidence.object_key,
+                    exc_info=True,
+                )
+        return self.repository.delete_all()
+
     def _to_read(self, incident: BehaviorIncident) -> BehaviorIncidentRead:
         if incident.id is None:
             raise ServiceValidationError("Persisted behavior incident is missing an ID.")

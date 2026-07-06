@@ -78,6 +78,10 @@ export function IncidentCard({
       ? formatBehaviorType(event.behavior_type)
       : formatZoneType(event.zone_type, event.zone_name);
   const sourceLabel = isPpe ? "PPE" : isBehavior ? "Behavior" : "Zone";
+  const categoryLabel = isBehavior ? "Safety Incident" : "Violation";
+  const categoryClass = isBehavior
+    ? "bg-orange-50 text-orange-700 ring-orange-200"
+    : "bg-red-50 text-red-700 ring-red-200";
   const badgeClass = isPpe
     ? "bg-red-50 text-red-700 ring-red-200"
     : isBehavior
@@ -103,9 +107,14 @@ export function IncidentCard({
             </p>
             <p className="mt-1 text-xs text-slate-500">{formatTime(event.timestamp)}</p>
           </div>
-          <span className={`shrink-0 rounded px-2 py-1 text-xs font-semibold ring-1 ${badgeClass}`}>
-            {sourceLabel}
-          </span>
+          <div className="flex shrink-0 flex-col items-end gap-1">
+            <span className={`rounded px-2 py-1 text-xs font-semibold ring-1 ${categoryClass}`}>
+              {categoryLabel}
+            </span>
+            <span className={`rounded px-2 py-1 text-xs font-semibold ring-1 ${badgeClass}`}>
+              {sourceLabel}
+            </span>
+          </div>
         </div>
         <div className={`${compact ? "mt-2 gap-1 pt-2" : "mt-3 gap-2 pt-3"} grid grid-cols-2 border-t border-slate-100 text-xs text-slate-600`}>
           <span className="truncate">Video: {event.video_name ?? "-"}</span>

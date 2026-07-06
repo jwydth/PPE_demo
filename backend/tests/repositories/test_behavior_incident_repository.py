@@ -70,3 +70,8 @@ def test_behavior_incident_repository_create_read_recent_subjects_and_evidence(s
     assert evidence.id is not None
     assert repository.get_subjects(oldest.id) == [subject]
     assert repository.get_evidence(oldest.id) == [evidence]
+
+    assert repository.list_all_evidence() == [evidence]
+    assert repository.delete_all() == 3
+    assert repository.list_recent(limit=10) == []
+    assert repository.list_all_evidence() == []

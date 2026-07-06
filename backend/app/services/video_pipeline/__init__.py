@@ -465,6 +465,7 @@ async def real_video_pipeline(
         frame = result.orig_img.copy()
         frame_height, frame_width = frame.shape[:2]
         if curr_fall:
+            fall_ttl_frames = max(1, settings.FALL_LIVE_FRAME_STRIDE * 2)
             if fall_unavailable_message is None and fall_live_session is None:
                 fall_live_session = _fall_detector.create_live_session(
                     fps=fps,
@@ -513,6 +514,11 @@ async def real_video_pipeline(
                         "incidents": [],
                     }
                     logger.exception("[FALL] Live fall detection failed")
+            elif fall_unavailable_message is None and fall_live_session is not None:
+                last_fall_payload = fall_live_session.payload_for_frame(
+                    frame_index,
+                    max_age_frames=fall_ttl_frames,
+                )
         else:
             last_fall_payload = None
         used_worker_ids: set[int] = set()

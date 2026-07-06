@@ -14,6 +14,10 @@ from app.services.ppe_violation_service import (
     PPEViolationService,
     get_ppe_violation_service,
 )
+from app.services.behavior_incident_service import (
+    BehaviorIncidentService,
+    get_behavior_incident_service,
+)
 from app.services.zone_violation_service import (
     ZoneViolationService,
     get_zone_violation_service,
@@ -152,14 +156,20 @@ async def delete_all_incidents(
         ZoneViolationService,
         Depends(get_zone_violation_service),
     ],
+    behavior_service: Annotated[
+        BehaviorIncidentService,
+        Depends(get_behavior_incident_service),
+    ],
 ) -> dict[str, int]:
-    """Delete all PPE and zone violations from the database."""
+    """Delete all visible PPE, zone, and behavior incidents."""
     ppe_count = service.delete_all_violations()
     zone_count = zone_service.delete_all_zone_violations()
+    behavior_count = behavior_service.delete_all_behavior_incidents()
     return {
         "ppe_violations_deleted": ppe_count,
         "zone_violations_deleted": zone_count,
-        "total_deleted": ppe_count + zone_count,
+        "behavior_incidents_deleted": behavior_count,
+        "total_deleted": ppe_count + zone_count + behavior_count,
     }
 
 

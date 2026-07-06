@@ -49,6 +49,11 @@ export interface BehaviorIncident {
 export type FallLiveStatus = "normal" | "fall_risk" | "fall" | "no_detection" | "unavailable";
 
 export interface FallLiveSummary {
+  frame_index?: number;
+  source_frame_index?: number;
+  age_frames?: number;
+  is_stale?: boolean;
+  is_interpolated?: boolean;
   status: FallLiveStatus;
   fall_count: number;
   fall_risk_count: number;
@@ -60,6 +65,11 @@ export interface FallLiveSummary {
 }
 
 export interface FallLiveDetection {
+  frame_index?: number;
+  source_frame_index?: number;
+  age_frames?: number;
+  is_stale?: boolean;
+  is_interpolated?: boolean;
   track_id: number;
   status: "normal" | "fall_risk" | "fall";
   score: number;

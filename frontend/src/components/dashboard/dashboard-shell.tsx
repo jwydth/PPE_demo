@@ -15,7 +15,12 @@ import {
 } from "@/lib/ppe-api";
 import { BoundingBoxView } from "@/components/ppe/bounding-box-view";
 import { FileUpload } from "@/components/ppe/file-upload";
-import { PPESuggestionBanner, SuggestionOverlayLayer, TrackingOverlayLayer } from "@/components/ppe/video-tracking-overlay";
+import {
+  FallOverlayLayer,
+  PPESuggestionBanner,
+  SuggestionOverlayLayer,
+  TrackingOverlayLayer,
+} from "@/components/ppe/video-tracking-overlay";
 import {
   DetectionSummary,
   EmptyState,
@@ -202,6 +207,11 @@ function CameraPanel() {
   const feedAspectRatio = visibleTrackingOverlay
     ? `${visibleTrackingOverlay.frame_width ?? 16} / ${visibleTrackingOverlay.frame_height ?? 9}`
     : "16 / 9";
+  const streamFrameWidth = liveStream.streamData.tracking_overlay.frame_width;
+  const streamFrameHeight = liveStream.streamData.tracking_overlay.frame_height;
+  const currentFrameIndex = Math.round(
+    liveStream.currentVideoTime * (liveStream.streamData.tracking_overlay.fps || 30),
+  );
 
   const selectFile = async (nextFile: File) => {
     upload.setFile(nextFile);
@@ -437,6 +447,14 @@ function CameraPanel() {
                         currentTime={liveStream.currentVideoTime}
                       />
                     ) : null}
+                    {fallEnabled && !zoneDrawing.isDrawing ? (
+                      <FallOverlayLayer
+                        detections={liveStream.streamData.fall_detections}
+                        frameWidth={streamFrameWidth}
+                        frameHeight={streamFrameHeight}
+                        currentFrameIndex={currentFrameIndex}
+                      />
+                    ) : null}
                     <SuggestionOverlayLayer
                       suggestions={Object.values(autoZone.zoneSuggestions)}
                       onAccept={(s, name) => void autoZone.handleAcceptSuggestion(s, name)}
@@ -564,6 +582,19 @@ function FallStatusPanel({
   unavailable: string | null;
   latestIncident?: BehaviorIncident;
 }) {
+  if (!enabled) {
+    return (
+      <section className="rounded-md border border-slate-800 bg-slate-950 p-3">
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="text-sm font-semibold text-white">Fall Detection</h3>
+          <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs font-semibold text-slate-300">
+            Disabled
+          </span>
+        </div>
+      </section>
+    );
+  }
+
   const status = unavailable ? "unavailable" : summary?.status ?? (enabled ? "no_detection" : "off");
   const statusClass =
     status === "fall"
@@ -571,6 +602,8 @@ function FallStatusPanel({
       : status === "fall_risk"
       ? "border-amber-300 bg-amber-400/10 text-amber-100"
       : status === "unavailable"
+      ? "border-slate-600 bg-slate-800 text-slate-200"
+      : status === "no_detection"
       ? "border-slate-600 bg-slate-800 text-slate-200"
       : "border-emerald-300 bg-emerald-400/10 text-emerald-100";
   const label =
@@ -580,8 +613,8 @@ function FallStatusPanel({
       ? "Fall risk"
       : status === "unavailable"
       ? "Unavailable"
-      : status === "off"
-      ? "Off"
+      : status === "no_detection"
+      ? "No detection"
       : "Normal";
 
   return (
@@ -596,9 +629,7 @@ function FallStatusPanel({
         </span>
       </div>
 
-      {!enabled ? (
-        <p className="mt-3 text-xs text-slate-500">Enable Fall Detection to process live/video frames.</p>
-      ) : unavailable ? (
+      {unavailable ? (
         <p className="mt-3 text-xs leading-5 text-slate-300">{unavailable}</p>
       ) : (
         <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
@@ -672,14 +703,14 @@ function IncidentPanel() {
   };
 
   const deleteAllEvents = async () => {
-    if (!confirm("Are you sure you want to delete all logged violations? This action cannot be undone.")) return;
+    if (!confirm("Are you sure you want to delete all logged incidents? This action cannot be undone.")) return;
     setLoading(true);
     setError("");
     try {
       await deleteAllIncidents();
       setEvents([]);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not delete violations");
+      setError(err instanceof Error ? err.message : "Could not delete incidents");
     } finally {
       setLoading(false);
     }
@@ -700,7 +731,7 @@ function IncidentPanel() {
             type="button"
           >
             <Trash2 className="size-3.5" />
-            <span>Delete PPE/Zone</span>
+            <span>Delete All</span>
           </button>
           <button
             onClick={() => void loadEvents()}
@@ -733,7 +764,7 @@ export function DashboardShell() {
   const [activeView, setActiveView] = useState<DashboardView>("feeds");
   const pageTitle =
     activeView === "violations"
-        ? "Incidents Log"
+        ? "Incident Log"
         : "Packaging Line 1";
   const pageDescription =
     activeView === "violations"

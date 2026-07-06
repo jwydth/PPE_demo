@@ -1,6 +1,7 @@
 from typing import Annotated, TypeVar
 
 from fastapi import Depends
+from sqlalchemy import delete, func
 from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session, select
 
@@ -93,6 +94,26 @@ class BehaviorIncidentRepository:
         except SQLAlchemyError as exc:
             self.session.rollback()
             raise RepositoryError("Could not list behavior incidents.") from exc
+
+    def list_all_evidence(self) -> list[BehaviorEvidence]:
+        try:
+            statement = select(BehaviorEvidence).order_by(BehaviorEvidence.id)
+            return list(self.session.exec(statement).all())
+        except SQLAlchemyError as exc:
+            self.session.rollback()
+            raise RepositoryError("Could not list behavior evidence.") from exc
+
+    def delete_all(self) -> int:
+        try:
+            count = self.session.exec(select(func.count()).select_from(BehaviorIncident)).one()
+            self.session.exec(delete(BehaviorIncidentSubject))
+            self.session.exec(delete(BehaviorEvidence))
+            self.session.exec(delete(BehaviorIncident))
+            self.session.commit()
+            return int(count or 0)
+        except SQLAlchemyError as exc:
+            self.session.rollback()
+            raise RepositoryError("Could not delete behavior incidents.") from exc
 
     def _commit_and_refresh(
         self,
