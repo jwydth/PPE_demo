@@ -6,6 +6,7 @@ import {
   RefreshCw,
   Trash2,
 } from "lucide-react";
+import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   deleteAllIncidents,
@@ -46,6 +47,11 @@ import { IconButton } from "./icon-button";
 import { ZoneOverlaySvg } from "./zone-overlay-svg";
 import { ZoneConfigPanel } from "./zone-config-panel";
 import { AnalysisResultPanel } from "./analysis-result-panel";
+
+const Factory3DView = dynamic(
+  () => import("@/components/factory3d/factory-3d-view").then((m) => m.Factory3DView),
+  { ssr: false },
+);
 
 const zoneColors: Record<ZoneType, string> = {
   RESTRICTED: "#dc2626",
@@ -764,11 +770,15 @@ export function DashboardShell() {
   const [activeView, setActiveView] = useState<DashboardView>("feeds");
   const pageTitle =
     activeView === "violations"
-        ? "Incident Log"
+      ? "Incident Log"
+      : activeView === "factory3d"
+        ? "Factory 3D Map"
         : "Packaging Line 1";
   const pageDescription =
     activeView === "violations"
-        ? "Review PPE, zone, and behavior incidents recorded by the backend stores."
+      ? "Review PPE, zone, and behavior incidents recorded by the backend stores."
+      : activeView === "factory3d"
+        ? "Explore the factory blueprint in 3D and drill into a zone's incident log."
         : "Upload a camera simulation file, choose which detection models are enabled, and review the model outputs in one place.";
 
   return (
@@ -807,6 +817,7 @@ export function DashboardShell() {
             <div className="grid items-start gap-4">
               <div className="grid h-fit gap-4">
                 {activeView === "violations" ? <IncidentPanel /> : null}
+                {activeView === "factory3d" ? <Factory3DView /> : null}
                 {/* CameraPanel stays mounted (only hidden) when on other tabs so
                     its WebSocket keeps streaming instead of disconnecting on tab switch. */}
                 <div className={activeView === "feeds" ? "grid gap-4" : "hidden"}>

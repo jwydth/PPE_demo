@@ -1,5 +1,6 @@
 import {
   Bell,
+  Boxes,
   Camera,
   ClipboardCheck,
   Clock3,
@@ -109,6 +110,7 @@ export const cameraStats = [
 export const navigation = [
   { label: "Camera Feeds", active: true, icon: Camera },
   { label: "Incident Log", active: false, icon: ClipboardCheck },
+  { label: "3D Map", active: false, icon: Boxes },
 ];
 
 export const appActions = [
