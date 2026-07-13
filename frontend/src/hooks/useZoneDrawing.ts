@@ -259,8 +259,15 @@ export function useZoneDrawing({
     let hasOverlap = false;
     for (let i = 0; i < zonesReadyToSave.length; i++) {
       for (let j = i + 1; j < zonesReadyToSave.length; j++) {
+        const typeA = zonesReadyToSave[i].type;
+        const typeB = zonesReadyToSave[j].type;
+        const isWalkwaySlipperyPair =
+          (typeA === "WALKWAY" && typeB === "SLIPPERY") ||
+          (typeA === "SLIPPERY" && typeB === "WALKWAY");
+
         if (
-          zonesReadyToSave[i].type !== zonesReadyToSave[j].type &&
+          typeA !== typeB &&
+          !isWalkwaySlipperyPair &&
           doPolygonsOverlap(zonesReadyToSave[i].points, zonesReadyToSave[j].points)
         ) {
           hasOverlap = true;
@@ -272,7 +279,7 @@ export function useZoneDrawing({
 
     if (hasOverlap) {
       window.alert(
-        "Cannot save zones: Zones of different types overlap. Please adjust the vertices to avoid overlap.",
+        "Cannot save zones: Zones of different types (excluding Walkway & Slippery) overlap. Please adjust the vertices to avoid overlap.",
       );
       setZoneActionState("error");
       setTimeout(() => setZoneActionState("idle"), 2000);

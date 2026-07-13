@@ -274,8 +274,15 @@ function CameraPanel() {
       let hasOverlap = false;
       for (let i = 0; i < zoneDrawing.zonesReadyToSave.length; i++) {
         for (let j = i + 1; j < zoneDrawing.zonesReadyToSave.length; j++) {
+          const typeA = zoneDrawing.zonesReadyToSave[i].type;
+          const typeB = zoneDrawing.zonesReadyToSave[j].type;
+          const isWalkwaySlipperyPair =
+            (typeA === "WALKWAY" && typeB === "SLIPPERY") ||
+            (typeA === "SLIPPERY" && typeB === "WALKWAY");
+
           if (
-            zoneDrawing.zonesReadyToSave[i].type !== zoneDrawing.zonesReadyToSave[j].type &&
+            typeA !== typeB &&
+            !isWalkwaySlipperyPair &&
             doPolygonsOverlap(zoneDrawing.zonesReadyToSave[i].points, zoneDrawing.zonesReadyToSave[j].points)
           ) {
             hasOverlap = true;
@@ -286,7 +293,7 @@ function CameraPanel() {
       }
 
       if (hasOverlap) {
-        setError("Cannot run analysis: Zones of different types overlap. Please adjust the vertices to avoid overlap.");
+        setError("Cannot run analysis: Zones of different types (excluding Walkway & Slippery) overlap. Please adjust the vertices to avoid overlap.");
         setPhase("error");
         return;
       }

@@ -366,17 +366,7 @@ async def real_video_pipeline(
         return violations
 
     zones = load_zones(video_name)
-    has_walkway = any(z.zone_type == "WALKWAY" for z in zones)
-    logger.info(f"[ZONE] Loaded {len(zones)} zone(s) for '{video_name}': {[(z.zone_name, z.zone_type, z.camera_zone_view_id) for z in zones]} has_walkway={has_walkway}")
-    # Virtual zone used when zone monitoring is on but no WALKWAY zone exists.
-    _no_walkway_zone = ZoneViolationRecord(
-        camera_zone_view_id=_NO_WALKWAY_SENTINEL_ID,
-        physical_zone_id=_NO_WALKWAY_SENTINEL_ID,
-        zone_name="No Walkway Defined",
-        zone_type="WALKWAY",
-        poly=[],  # not used for point-in-polygon; every worker is "outside"
-        threshold=settings.NO_WALKWAY_DWELL_SECONDS,
-    )
+    logger.info(f"[ZONE] Loaded {len(zones)} zone(s) for '{video_name}': {[(z.zone_name, z.zone_type, z.camera_zone_view_id) for z in zones]}")
     sign_registry = SignZoneRegistry()
     ppe_sign_registry = SignPPERegistry()
     sign_classes = list({*settings.SIGN_CLASS_ZONE_MAP, *settings.SIGN_CLASS_PPE_TRIGGER})
@@ -420,8 +410,7 @@ async def real_video_pipeline(
 
         if settings_state and settings_state.pop("reload_zones", False):
             zones = load_zones(video_name)
-            has_walkway = any(z.zone_type == "WALKWAY" for z in zones)
-            logger.info(f"[ZONE] Hot-reloaded {len(zones)} zone(s): {[(z.zone_name, z.zone_type) for z in zones]} has_walkway={has_walkway}")
+            logger.info(f"[ZONE] Hot-reloaded {len(zones)} zone(s): {[(z.zone_name, z.zone_type) for z in zones]}")
             if curr_zone:
                 zone_just_enabled = True  # treat reload same as fresh enable only if zone monitoring is active
 
@@ -615,31 +604,7 @@ async def real_video_pipeline(
                         wz = walkway_zones[0]
                         track_camera_zone_view_id, track_physical_zone_id, track_zone_name, track_zone_type = wz.camera_zone_view_id, wz.physical_zone_id, wz.zone_name, "WALKWAY"
 
-            # --- No-walkway enforcement ---
-            # When zone monitoring is ON but no WALKWAY zone has been drawn,
-            # every detected worker is treated as being outside the walkway.
-            # A violation is raised once the worker has been visible for
-            # NO_WALKWAY_DWELL_SECONDS consecutive seconds.
-            if curr_zone and not has_walkway:
-                nw_id = _NO_WALKWAY_SENTINEL_ID
-                worker.zone_dwell[nw_id] = worker.zone_dwell.get(nw_id, 0) + (stride / fps)
-                dwell = worker.zone_dwell[nw_id]
-                if frame_index % 30 == 0:
-                    logger.info(
-                        f"[ZONE] Frame {frame_index} worker {person.track_id}: "
-                        f"NO_WALKWAY dwell={dwell:.2f}s / threshold={_no_walkway_zone.threshold}s "
-                        f"already_reported={nw_id in worker.reported_zones}"
-                    )
-                if dwell > _no_walkway_zone.threshold and nw_id not in worker.reported_zones:
-                    logger.info(f"[ZONE] Frame {frame_index} worker {person.track_id}: NO_WALKWAY threshold crossed — recording violation")
-                    zv = record_zone_violation(worker, _no_walkway_zone, frame, person, video_name, frame_index, _save_violation_snapshot)
-                    if zv:
-                        yield StreamEvent(event="zone_violation", frame_index=frame_index, data=zv.model_dump())
-                # Mark overlay as outside walkway
-                track_camera_zone_view_id = nw_id
-                track_physical_zone_id = nw_id
-                track_zone_name = "No Walkway Defined"
-                track_zone_type = "WALKWAY"
+            # --- No-walkway enforcement dropped ---
 
             _append_tracking_overlay_frame(
                 overlay_frames=current_frame_overlay,
