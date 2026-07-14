@@ -56,26 +56,35 @@ export function useLiveStream({
   const [liveUrl, setLiveUrl] = useState("rtsp://127.0.0.1:8554/mystream");
   const [zoneSuggestions, setZoneSuggestions] = useState<Record<string, ZoneSuggestion>>({});
   const [ppeSuggestions, setPpeSuggestions] = useState<Record<string, PPESuggestion>>({});
-  const wsRef = useRef<WebSocket | null>(null);
+  
+  // Manage concurrent connections keyed by RTSP URL
+  const wsRefs = useRef<Record<string, WebSocket>>({});
+  const [viewedVideoName, setViewedVideoName] = useState<string | null>(null);
+  const viewedVideoNameRef = useRef<string | null>(null);
 
   const [surfaceVideoTime, setCurrentVideoTime] = useState(0);
   const [videoElement, setVideoElement] = useState<HTMLVideoElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
 
+  // Synchronize settings across all open connections
   useEffect(() => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          event: "update_settings",
-          data: {
-            enable_ppe: ppeEnabled,
-            enable_zone: zoneEnabled,
-            enable_fall: fallEnabled,
-          },
-        }),
-      );
-    }
-  }, [fallEnabled, ppeEnabled, zoneEnabled]);
+    Object.entries(wsRefs.current).forEach(([vidName, ws]) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        const isCurrentlyViewed = vidName === viewedVideoNameRef.current;
+        ws.send(
+          JSON.stringify({
+            event: "update_settings",
+            data: {
+              enable_ppe: ppeEnabled,
+              enable_zone: zoneEnabled,
+              enable_fall: fallEnabled,
+              viewing: isCurrentlyViewed,
+            },
+          }),
+        );
+      }
+    });
+  }, [fallEnabled, ppeEnabled, zoneEnabled, viewedVideoName]);
 
   useEffect(() => {
     if (fallEnabled) return;
@@ -89,75 +98,115 @@ export function useLiveStream({
 
   useEffect(() => {
     return () => {
-      if (wsRef.current) wsRef.current.close();
+      Object.values(wsRefs.current).forEach((ws) => ws.close());
     };
   }, []);
 
   const sendMessage = (payload: object) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(payload));
+    const activeWs = viewedVideoName ? wsRefs.current[viewedVideoName] : null;
+    if (activeWs?.readyState === WebSocket.OPEN) {
+      activeWs.send(JSON.stringify(payload));
     }
   };
 
-  // Full reset used when discarding the current file/stream entirely
-  // (closes the socket, unlike a plain streamData reset on file selection).
   const resetStream = () => {
     setStreamData(emptyStreamData());
     setCurrentVideoTime(0);
-    if (wsRef.current) wsRef.current.close();
+    Object.values(wsRefs.current).forEach((ws) => ws.close());
+    wsRefs.current = {};
+    setViewedVideoName(null);
+    viewedVideoNameRef.current = null;
+  };
+
+  const setViewedCamera = (url: string) => {
+    setViewedVideoName(url);
+    viewedVideoNameRef.current = url;
+    setLiveUrl(url);
+    
+    // Clear the current live frame so we don't display the stale frame of the previous stream
+    setStreamData((prev) => ({
+      ...prev,
+      live_frame: null,
+    }));
+
+    // Instantly toggle viewed stream frames on the backend WebSockets
+    Object.entries(wsRefs.current).forEach(([vidName, ws]) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(
+          JSON.stringify({
+            event: "update_settings",
+            data: {
+              enable_ppe: ppeEnabled,
+              enable_zone: zoneEnabled,
+              enable_fall: fallEnabled,
+              viewing: vidName === url,
+            },
+          }),
+        );
+      }
+    });
   };
 
   const startStreaming = async (videoName: string, isAutoLive = false) => {
     try {
-      setPhase("loading");
-      setStatus(isAutoLive ? "Connecting to live stream..." : "Initializing real-time stream...");
+      if (wsRefs.current[videoName]) {
+        return;
+      }
+
+      const isCurrentlyViewed = viewedVideoNameRef.current === null || viewedVideoNameRef.current === videoName;
+      if (isCurrentlyViewed) {
+        setViewedVideoName(videoName);
+        viewedVideoNameRef.current = videoName;
+        setPhase("loading");
+        setStatus(isAutoLive ? "Connecting to live stream..." : "Initializing real-time stream...");
+      }
 
       const wsUrlBase = API_URL.replace(/^http/, "ws");
       const wsUrl = `${wsUrlBase}/ws/stream?video_name=${encodeURIComponent(
         videoName,
       )}&enable_ppe=${ppeEnabled}&enable_zone=${zoneEnabled}&enable_fall=${fallEnabled}`;
 
-      if (wsRef.current) wsRef.current.close();
       const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
+      wsRefs.current[videoName] = ws;
 
-      setStreamData(emptyStreamData());
-      setZoneSuggestions({});
       setIsStreaming(true);
       setIsLive(isAutoLive);
 
       ws.onmessage = (event) => {
         const msg = JSON.parse(event.data);
         const { event: eventType, data, frame_index, image_base64 } = msg;
+        const isCurrent = videoName === viewedVideoNameRef.current;
 
         if (eventType === "start") {
-          setStreamData((prev) => ({
-            ...prev,
-            tracking_overlay: { ...prev.tracking_overlay, fps: data.fps },
-          }));
-          setStatus(isAutoLive ? "Stream connected." : "Buffering inference…");
-        } else if (eventType === "frame") {
-          setStreamData((prev) => {
-            const nextOverlay = {
-              ...prev.tracking_overlay,
-              frames: isAutoLive ? data.frames : [...prev.tracking_overlay.frames, ...data.frames],
-              frame_width: data.frame_width || prev.tracking_overlay.frame_width,
-              frame_height: data.frame_height || prev.tracking_overlay.frame_height,
-            };
-
-            if (isAutoLive) {
-              setCurrentVideoTime(frame_index / (nextOverlay.fps || 30));
-            }
-
-            return {
+          if (isCurrent) {
+            setStreamData((prev) => ({
               ...prev,
-              live_frame: image_base64 ? `data:image/jpeg;base64,${image_base64}` : prev.live_frame,
-              fall_summary: data.fall_summary ?? prev.fall_summary,
-              fall_detections: data.fall_detections ?? prev.fall_detections,
-              fall_unavailable: data.fall_unavailable ?? prev.fall_unavailable,
-              tracking_overlay: nextOverlay,
-            };
-          });
+              tracking_overlay: { ...prev.tracking_overlay, fps: data.fps },
+            }));
+            setStatus(isAutoLive ? "Stream connected." : "Buffering inference…");
+          }
+        } else if (eventType === "frame") {
+          if (isCurrent) {
+            setStreamData((prev) => {
+              const nextOverlay = {
+                ...prev.tracking_overlay,
+                frames: isAutoLive ? data.frames : [...prev.tracking_overlay.frames, ...data.frames],
+                frame_width: data.frame_width || prev.tracking_overlay.frame_width,
+                frame_height: data.frame_height || prev.tracking_overlay.frame_height,
+              };
+
+              setCurrentVideoTime(frame_index / (nextOverlay.fps || 30));
+
+              return {
+                ...prev,
+                live_frame: image_base64 ? `data:image/jpeg;base64,${image_base64}` : prev.live_frame,
+                fall_summary: data.fall_summary ?? prev.fall_summary,
+                fall_detections: data.fall_detections ?? prev.fall_detections,
+                fall_unavailable: data.fall_unavailable ?? prev.fall_unavailable,
+                tracking_overlay: nextOverlay,
+              };
+            });
+          }
         } else if (eventType === "behavior_incident") {
           setStreamData((prev) => ({
             ...prev,
@@ -196,36 +245,74 @@ export function useLiveStream({
             ],
           }));
         } else if (eventType === "zone_suggestion") {
-          setZoneSuggestions((prev) => ({ ...prev, [data.suggestion_id]: data as ZoneSuggestion }));
+          if (isCurrent) {
+            setZoneSuggestions((prev) => ({ ...prev, [data.suggestion_id]: data as ZoneSuggestion }));
+          }
         } else if (eventType === "ppe_suggestion") {
-          setPpeSuggestions((prev) => ({ ...prev, [data.suggestion_id]: data as PPESuggestion }));
+          if (isCurrent) {
+            setPpeSuggestions((prev) => ({ ...prev, [data.suggestion_id]: data as PPESuggestion }));
+          }
         } else if (eventType === "summary") {
-          setStreamData((prev) => ({ ...prev, summary: data }));
-          setPhase("done");
+          if (isCurrent) {
+            setStreamData((prev) => ({ ...prev, summary: data }));
+            setPhase("done");
+          }
         } else if (eventType === "error") {
-          setError(data.message);
-          setPhase("error");
+          if (isCurrent) {
+            setError(data.message);
+            setPhase("error");
+          }
         } else if (eventType === "end") {
-          setStatus("Stream completed.");
+          if (isCurrent) {
+            setStatus("Stream completed.");
+          }
         }
       };
 
       ws.onclose = (event) => {
-        setIsStreaming(false);
-        console.log("WebSocket closed:", event.code, event.reason);
-        if (!event.wasClean) {
+        delete wsRefs.current[videoName];
+        if (Object.keys(wsRefs.current).length === 0) {
+          setIsStreaming(false);
+        }
+        console.log(`WebSocket closed for ${videoName}:`, event.code, event.reason);
+        if (videoName === viewedVideoNameRef.current && !event.wasClean) {
           setError(`Stream disconnected unexpectedly (Code: ${event.code})`);
         }
       };
       ws.onerror = (event) => {
-        console.error("WebSocket error:", event);
-        setError("WebSocket connection failed. Check browser console for security/CORS errors.");
-        setPhase("error");
+        console.error(`WebSocket error for ${videoName}:`, event);
+        if (videoName === viewedVideoNameRef.current) {
+          setError("WebSocket connection failed. Check browser console for security/CORS errors.");
+          setPhase("error");
+        }
       };
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Streaming failed");
-      setPhase("error");
+      if (videoName === viewedVideoNameRef.current) {
+        setError(err instanceof Error ? err.message : "Streaming failed");
+        setPhase("error");
+      }
     }
+  };
+
+  const syncCameraConnections = (cameras: any[]) => {
+    const activeUrls = new Set(
+      cameras.filter((c) => c.active && c.rtspUrl).map((c) => c.rtspUrl)
+    );
+
+    // 1. Close connections that are no longer active/needed
+    Object.entries(wsRefs.current).forEach(([url, ws]) => {
+      if (!activeUrls.has(url)) {
+        ws.close();
+        delete wsRefs.current[url];
+      }
+    });
+
+    // 2. Start connections for active cameras not yet connected
+    cameras.forEach((c) => {
+      if (c.active && c.rtspUrl && !wsRefs.current[c.rtspUrl]) {
+        void startStreaming(c.rtspUrl, true);
+      }
+    });
   };
 
   const togglePlayback = () => {
@@ -260,8 +347,6 @@ export function useLiveStream({
     return () => cancelAnimationFrame(frameId);
   }, [isPlaying, videoElement]);
 
-  // Buffer-then-sync: wait until inference has a lead before starting playback,
-  // then keep the video paused whenever it gets more than 15 frames ahead of inference.
   useEffect(() => {
     if (!isStreaming || !videoElement) return;
 
@@ -273,18 +358,16 @@ export function useLiveStream({
 
     const latestProcessedFrame = frames[frames.length - 1].frame_index;
     const currentFrame = Math.round(surfaceVideoTime * fps);
-    const lag = currentFrame - latestProcessedFrame; // positive = video ahead of inference
+    const lag = currentFrame - latestProcessedFrame;
 
     const video = videoElement;
 
-    // Phase 1 – buffering: don't play until inference has processed at least 2 s worth of frames
     const bufferFrames = Math.ceil((fps * 2) / stride);
     if (latestProcessedFrame < bufferFrames) {
       setStatus(`Buffering… ${Math.round((latestProcessedFrame / bufferFrames) * 100)}%`);
       return;
     }
 
-    // Phase 2 – playing: start (once) and keep video within 15 frames of inference
     if (video.paused && isPlaying) {
       setStatus("Streaming active.");
       void video.play();
@@ -319,5 +402,7 @@ export function useLiveStream({
     handleVideoPlay,
     handleVideoPause,
     handleVideoTimeSync,
+    setViewedCamera,
+    syncCameraConnections,
   };
 }

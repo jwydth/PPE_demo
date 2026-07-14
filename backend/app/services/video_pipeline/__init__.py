@@ -330,6 +330,12 @@ async def real_video_pipeline(
             )
         return enable_ppe, enable_zone, enable_fall
 
+    # Helper to check if feed is actively viewed
+    def is_viewed():
+        if settings_state:
+            return bool(settings_state.get("viewing", True))
+        return True
+
     def _retroactive_zone_check(new_zones, current_frame_index):
         """Check foot-point history against zones and emit any missed violations.
 
@@ -385,8 +391,16 @@ async def real_video_pipeline(
         import os
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|timeout;3000000"
 
+    from ultralytics import YOLO
+    from pathlib import Path
+
+    if isinstance(detector.model, YOLO):
+        model_instance = YOLO(detector.model.ckpt_path or str(Path(settings.MODEL_PATH).resolve()))
+    else:
+        model_instance = detector.model
+
     tracker_path = _resolve_video_tracker(settings.VIDEO_TRACKER)
-    results = detector.model.track(
+    results = model_instance.track(
         source=source_str,
         stream=True,
         persist=True,
@@ -399,8 +413,15 @@ async def real_video_pipeline(
         stream_buffer=True,  # Use threaded reader for stable RTSP ingestion
     )
 
-    for processed_frames, result in enumerate(results, start=1):
-        await asyncio.sleep(0.01)  # Critical: yield to event loop to keep WebSocket alive
+    results_iter = iter(results)
+    processed_frames = 0
+    while True:
+        # Offload the blocking next() call (which reads frames and runs YOLO inference)
+        # to a background thread to keep the FastAPI main event loop 100% responsive.
+        result = await asyncio.to_thread(next, results_iter, None)
+        if result is None:
+            break
+        processed_frames += 1
         frame_index = (processed_frames - 1) * stride
         curr_ppe, curr_zone, curr_fall = get_flags()
 
@@ -653,19 +674,20 @@ async def real_video_pipeline(
                 for suggestion in ppe_sign_registry.update(signs, frame_width, frame_height, frame_index):
                     yield StreamEvent(event="ppe_suggestion", frame_index=frame_index, data=suggestion.model_dump())
 
+        viewed = is_viewed()
         yield StreamEvent(
             event="frame",
             frame_index=frame_index,
             data={
-                "frames": [f.model_dump() for f in current_frame_overlay],
+                "frames": [f.model_dump() for f in current_frame_overlay] if viewed else [],
                 "processed_frames": processed_frames,
                 "frame_width": frame_width,
                 "frame_height": frame_height,
-                "fall_summary": last_fall_payload.get("summary") if curr_fall and last_fall_payload else None,
-                "fall_detections": last_fall_payload.get("detections") if curr_fall and last_fall_payload else [],
-                "fall_unavailable": fall_unavailable_message if curr_fall else None,
+                "fall_summary": last_fall_payload.get("summary") if curr_fall and last_fall_payload and viewed else None,
+                "fall_detections": last_fall_payload.get("detections") if curr_fall and last_fall_payload and viewed else [],
+                "fall_unavailable": fall_unavailable_message if curr_fall and viewed else None,
             },
-            image_base64=_encode_frame_to_base64(frame) if is_stream else None
+            image_base64=_encode_frame_to_base64(frame) if (is_stream and viewed) else None
         )
 
     elapsed_ms = (time.perf_counter() - start_wall_time) * 1000

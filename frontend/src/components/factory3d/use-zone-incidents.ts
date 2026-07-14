@@ -139,13 +139,17 @@ function computeAggregate(zoneId: ZoneId, incidents: AnyIncident[]): ZoneAggrega
   };
 }
 
-export function useZoneIncidents(options?: { assignUnmatchedToActiveZone?: boolean }): {
+export function useZoneIncidents(options?: {
+  assignUnmatchedToActiveZone?: boolean;
+  zones?: ZoneDef[];
+}): {
   aggregates: Record<ZoneId, ZoneAggregate>;
   loading: boolean;
   error: string | null;
   refresh: () => void;
 } {
   const assignUnmatchedToActiveZone = options?.assignUnmatchedToActiveZone ?? true;
+  const activeZones = options?.zones ?? ZONES;
   const [events, setEvents] = useState<AnyIncident[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -167,15 +171,15 @@ export function useZoneIncidents(options?: { assignUnmatchedToActiveZone?: boole
   }, [load]);
 
   const aggregates = useMemo(() => {
-    const grouped = new Map<ZoneId, AnyIncident[]>(ZONES.map((z) => [z.id, []]));
+    const grouped = new Map<ZoneId, AnyIncident[]>(activeZones.map((z) => [z.id, []]));
     for (const event of events) {
-      const zoneId = resolveZoneId(event, ZONES, assignUnmatchedToActiveZone);
+      const zoneId = resolveZoneId(event, activeZones, assignUnmatchedToActiveZone);
       if (zoneId) grouped.get(zoneId)?.push(event);
     }
     return Object.fromEntries(
-      ZONES.map((z) => [z.id, computeAggregate(z.id, grouped.get(z.id) ?? [])]),
+      activeZones.map((z) => [z.id, computeAggregate(z.id, grouped.get(z.id) ?? [])]),
     ) as Record<ZoneId, ZoneAggregate>;
-  }, [events, assignUnmatchedToActiveZone]);
+  }, [events, activeZones, assignUnmatchedToActiveZone]);
 
   return { aggregates, loading, error, refresh: () => void load() };
 }

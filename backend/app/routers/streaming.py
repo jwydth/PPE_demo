@@ -11,16 +11,13 @@ router = APIRouter(tags=["streaming"])
 logger = logging.getLogger(__name__)
 
 _detector = PPEDetector()
-# Ensures only one model.track() session runs at a time.
-# Page reloads would otherwise start a second concurrent tracker before the first is torn down.
-_stream_lock = asyncio.Lock()
+# Map of video_name -> Lock to serialize connections for the same camera/video.
+# Prevents duplicate trackers for the same source on page reloads/StrictMode double-mounts.
+_stream_locks: dict[str, asyncio.Lock] = {}
 # Monotonic counter so each WebSocket connection has a stable id in the logs.
 _conn_counter = itertools.count(1)
-# Cancel event of the currently active stream. A new connection sets this to tell
-# the previous stream to stop, so a new stream always supersedes the old one
-# instead of waiting (and timing out) on an orphaned WebSocket the browser never
-# closed — which happens on reloads / React StrictMode double-mounts.
-_current_cancel: "asyncio.Event | None" = None
+# Map of video_name -> Event to cancel orphaned connections for a specific camera/video.
+_current_cancels: dict[str, asyncio.Event] = {}
 
 @router.websocket("/ws/stream")
 async def stream_video_ws(
@@ -44,6 +41,7 @@ async def stream_video_ws(
         "dismissed_signatures": [],
         "dismissed_ppe_signatures": [],
         "reload_zones": False,
+        "viewing": True,
     }
 
     # Set when the client disconnects. The settings listener (which calls
@@ -52,14 +50,14 @@ async def stream_video_ws(
     # keeps running forever and never releases _stream_lock.
     disconnect_event = asyncio.Event()
 
-    # Set when a newer connection wants to take over. Allows this stream to be
-    # superseded even if the browser never closed it (orphaned WebSocket).
+    # Set when a newer connection wants to take over for this specific stream.
+    # Allows this stream to be superseded even if the browser never closed it (orphaned WebSocket).
     cancel_event = asyncio.Event()
-    previous_cancel = _current_cancel
-    _current_cancel = cancel_event
+    previous_cancel = _current_cancels.get(video_name)
+    _current_cancels[video_name] = cancel_event
     if previous_cancel is not None:
         previous_cancel.set()
-        logger.info(f"[conn {conn_id}] superseding previous stream — signalled it to stop")
+        logger.info(f"[conn {conn_id}] superseding previous stream for {video_name} — signalled it to stop")
     
     # Resolve the video path
     is_url = video_name.startswith(("rtsp://", "rtmp://", "http://", "https://"))
@@ -105,6 +103,8 @@ async def stream_video_ws(
                     settings_state["enable_zone"] = bool(new_settings["enable_zone"])
                 if "enable_fall" in new_settings:
                     settings_state["enable_fall"] = bool(new_settings["enable_fall"])
+                if "viewing" in new_settings:
+                    settings_state["viewing"] = bool(new_settings["viewing"])
                 logger.info(f"[conn {conn_id}] [SIGNAL] Received dynamic settings update: {settings_state}")
             elif data.get("event") == "dismiss_suggestion":
                 sig = data.get("data", {}).get("suggestion_id")
@@ -126,12 +126,16 @@ async def stream_video_ws(
     # session. The superseded stream breaks within one frame, then tears down
     # (aclose, capped at 6 s) and releases the lock — so 12 s leaves comfortable
     # margin.
-    logger.info(f"[conn {conn_id}] acquiring stream lock (locked={_stream_lock.locked()})")
+    if video_name not in _stream_locks:
+        _stream_locks[video_name] = asyncio.Lock()
+    stream_lock = _stream_locks[video_name]
+
+    logger.info(f"[conn {conn_id}] acquiring stream lock for {video_name} (locked={stream_lock.locked()})")
     try:
-        await asyncio.wait_for(_stream_lock.acquire(), timeout=12.0)
-        logger.info(f"[conn {conn_id}] acquired stream lock")
+        await asyncio.wait_for(stream_lock.acquire(), timeout=12.0)
+        logger.info(f"[conn {conn_id}] acquired stream lock for {video_name}")
     except asyncio.TimeoutError:
-        logger.warning(f"[conn {conn_id}] Stream lock timeout — previous stream did not release in time")
+        logger.warning(f"[conn {conn_id}] Stream lock timeout for {video_name} — previous stream did not release in time")
         try:
             await websocket.send_json({"event": "error", "data": {"message": "Previous stream still shutting down, please try again in a few seconds."}})
             await websocket.close()
@@ -175,8 +179,8 @@ async def stream_video_ws(
         logger.info(f"[conn {conn_id}] entering cleanup (closing generator + releasing lock)")
         # Only clear the global if we're still the active stream — a newer
         # connection may have already replaced it.
-        if _current_cancel is cancel_event:
-            _current_cancel = None
+        if _current_cancels.get(video_name) is cancel_event:
+            _current_cancels.pop(video_name, None)
         settings_task.cancel()
         # Close the generator (fully tears down this model.track() session) BEFORE
         # releasing the lock. PPEDetector is a singleton, so the next stream must
@@ -188,127 +192,9 @@ async def stream_video_ws(
             logger.info(f"[conn {conn_id}] generator closed")
         except (asyncio.TimeoutError, Exception) as e:
             logger.warning(f"[conn {conn_id}] generator aclose did not finish cleanly: {e}")
-        _stream_lock.release()
-        logger.info(f"[conn {conn_id}] released stream lock")
+        stream_lock.release()
+        logger.info(f"[conn {conn_id}] released stream lock for {video_name}")
         try:
             await websocket.close()
         except Exception:
             pass
-
-# for testing /ws/stream
-@router.get("/test-stream", response_class=HTMLResponse)
-async def get_test_page():
-    return """
-    <!DOCTYPE html>
-    <html>
-        <head>
-            <title>FastAPI CV Pipeline Test</title>
-            <style>
-                body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 40px; background: #f8f9fa; color: #333; }
-                .container { max-width: 650px; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
-                .section { margin-bottom: 25px; padding-bottom: 20px; border-bottom: 1px solid #eee; }
-                #messages { border: 1px solid #e0e0e0; height: 250px; overflow-y: auto; background: #282c34; color: #abb2bf; padding: 15px; border-radius: 6px; font-family: monospace; font-size: 0.9em; }
-                button { background: #007bff; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; font-weight: bold; }
-                button:disabled { background: #6c757d; cursor: not-allowed; }
-                input[type="file"] { margin-bottom: 10px; display: block; }
-                .status-badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 0.85em; font-weight: bold; background: #6c757d; color: white; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h2>Continuous Processing Pipeline Test</h2>
-                
-                <div class="section">
-                    <h3>Step 1: Upload Video Template</h3>
-                    <form id="uploadForm">
-                        <input type="file" id="videoFile" accept="video/mp4" required />
-                        <button type="submit" id="uploadBtn">Upload Video</button>
-                    </form>
-                    <p id="uploadStatus"></p>
-                </div>
-
-                <div class="section">
-                    <h3>Step 2: Live Inference Telemetry</h3>
-                    <div style="margin-bottom: 10px;">
-                        Connection: <span id="wsStatus" class="status-badge">Disconnected</span>
-                    </div>
-                    <div id="messages">Waiting for video upload to initiate stream...</div>
-                </div>
-            </div>
-
-            <script>
-                let ws;
-
-                document.getElementById('uploadForm').addEventListener('submit', async (e) => {
-                    e.preventDefault();
-                    const fileInput = document.getElementById('videoFile');
-                    const uploadBtn = document.getElementById('uploadBtn');
-                    const uploadStatus = document.getElementById('uploadStatus');
-
-                    if (!fileInput.files[0]) return;
-
-                    const formData = new FormData();
-                    formData.append('file', fileInput.files[0]);
-
-                    try {
-                        uploadBtn.disabled = true;
-                        uploadStatus.innerText = "Uploading file and initializing feed...";
-                        
-                        // Hit your POST endpoint
-                        const response = await fetch('/upload-video', {
-                            method: 'POST',
-                            body: formData
-                        });
-                        
-                        const result = await response.json();
-                        
-                        if (result.message === 'Video uploaded successfully' || result.filename) {
-                            uploadStatus.innerHTML = `✅ Uploaded successfully as <strong>${result.filename}</strong>`;
-                            // Trigger the WebSocket streaming handshake automatically using the returned parameter
-                            connectToStream(result.filename);
-                        } else {
-                            uploadStatus.innerText = "❌ Upload failed unexpected schema.";
-                            uploadBtn.disabled = false;
-                        }
-                    } catch (error) {
-                        console.error(error);
-                        uploadStatus.innerText = "❌ Network error during upload.";
-                        uploadBtn.disabled = false;
-                    }
-                });
-
-                function connectToStream(videoName) {
-                    const wsStatus = document.getElementById('wsStatus');
-                    const messagesDiv = document.getElementById('messages');
-                    
-                    // Clear previous log lines
-                    messagesDiv.innerText = '';
-
-                    // Construct target URL string dynamically
-                    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                    const wsUrl = `${protocol}//${window.location.host}/ws/stream?video_name=${encodeURIComponent(videoName)}`;
-                    ws = new WebSocket(wsUrl);
-
-                    ws.onopen = () => {
-                        wsStatus.innerText = "Connected";
-                        wsStatus.style.background = "#28a745";
-                    };
-
-                    ws.onmessage = (event) => {
-                        const messageLine = document.createElement('div');
-                        messageLine.style.marginBottom = "6px";
-                        messageLine.innerText = `[${new Date().toLocaleTimeString()}] ${event.data}`;
-                        messagesDiv.appendChild(messageLine);
-                        messagesDiv.scrollTop = messagesDiv.scrollHeight; // Keep view pinned to bottom
-                    };
-
-                    ws.onclose = () => {
-                        wsStatus.innerText = "Disconnected";
-                        wsStatus.style.background = "#dc3545";
-                        document.getElementById('uploadBtn').disabled = false;
-                    };
-                }
-            </script>
-        </body>
-    </html>
-    """

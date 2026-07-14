@@ -4,10 +4,11 @@ import {
   Loader2,
   Maximize2,
   RefreshCw,
+  Settings,
   Trash2,
 } from "lucide-react";
 import dynamic from "next/dynamic";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   deleteAllIncidents,
   deleteViolation,
@@ -99,7 +100,28 @@ function filterTrackingOverlay(
   return { ...overlay, frames };
 }
 
-function CameraPanel() {
+interface CameraConfig {
+  id: number;
+  name: string;
+  rtspUrl: string;
+  zoneId: string;
+  active: boolean;
+}
+
+const DEFAULT_CAMERAS: CameraConfig[] = [
+  { id: 1, name: "Production Area", rtspUrl: "rtsp://127.0.0.1:8554/stream1", zoneId: "Z01", active: true },
+  { id: 2, name: "Warehouse Intake", rtspUrl: "rtsp://127.0.0.1:8554/stream2", zoneId: "Z02", active: false },
+  { id: 3, name: "Packing Area", rtspUrl: "rtsp://127.0.0.1:8554/stream3", zoneId: "Z03", active: false },
+];
+
+interface CameraPanelProps {
+  cameras: CameraConfig[];
+  activeCameraId: number;
+  onCameraChange: (id: number) => void;
+  onCamerasUpdate: (updated: CameraConfig[]) => void;
+}
+
+function CameraPanel({ cameras, activeCameraId, onCameraChange, onCamerasUpdate }: CameraPanelProps) {
   const [phase, setPhase] = useState<AnalysisPhase>("idle");
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
@@ -117,6 +139,9 @@ function CameraPanel() {
     setError,
     setStatus,
   });
+
+  const [isConfiguringCameras, setIsConfiguringCameras] = useState(false);
+  const [tempCameras, setTempCameras] = useState<CameraConfig[]>([]);
 
   const isVideo = upload.isVideo;
   const sourceKey = liveStream.isLive ? liveStream.liveUrl : upload.file?.name;
@@ -153,11 +178,70 @@ function CameraPanel() {
     },
   });
 
+  const handleCameraChange = async (cameraId: number) => {
+    const targetCam = cameras.find((c) => c.id === cameraId);
+    if (!targetCam) return;
+    onCameraChange(cameraId);
+    setError("");
+    setPhase("loading");
+    setStatus(`Switching to ${targetCam.name}...`);
+    try {
+      await zoneDrawing.loadSavedZones(targetCam.rtspUrl);
+      liveStream.setViewedCamera(targetCam.rtspUrl);
+      setPhase("idle");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load camera zones");
+      setPhase("error");
+    }
+  };
+
+  const handleSaveCameraConfig = (updatedCameras: CameraConfig[]) => {
+    onCamerasUpdate(updatedCameras);
+    localStorage.setItem("ppe_demo_cameras", JSON.stringify(updatedCameras));
+    setIsConfiguringCameras(false);
+
+    // Sync all camera connections to open/close sockets as needed
+    liveStream.syncCameraConnections(updatedCameras);
+
+    const currentCam = updatedCameras.find((c) => c.id === activeCameraId);
+    if (currentCam) {
+      if (!currentCam.active) {
+        const firstActive = updatedCameras.find((c) => c.active) || updatedCameras[0];
+        void handleCameraChange(firstActive.id);
+      } else {
+        void handleCameraChange(activeCameraId);
+      }
+    }
+  };
+
+  const initializedRef = useRef(false);
+  const prevActiveCameraIdRef = useRef<number | null>(null);
+
+  // Synchronize stream selection on external activeCameraId change (e.g. from 3D map)
   useEffect(() => {
-    // Automatically connect to RTSP stream on mount
-    void zoneDrawing.loadSavedZones(liveStream.liveUrl);
-    void liveStream.startStreaming(liveStream.liveUrl, true);
-  }, []);
+    if (
+      prevActiveCameraIdRef.current !== null &&
+      prevActiveCameraIdRef.current !== activeCameraId
+    ) {
+      void handleCameraChange(activeCameraId);
+    }
+    prevActiveCameraIdRef.current = activeCameraId;
+  }, [activeCameraId]);
+
+  // Connect to all active cameras on initial load and set the viewed one
+  useEffect(() => {
+    if (cameras.length === 0 || initializedRef.current) return;
+    initializedRef.current = true;
+    const active = cameras.find((c) => c.id === activeCameraId) || cameras[0];
+    prevActiveCameraIdRef.current = active.id;
+    
+    // Open WebSockets for all active cameras
+    liveStream.syncCameraConnections(cameras);
+    
+    // Focus the view on the current active camera
+    liveStream.setViewedCamera(active.rtspUrl);
+    void zoneDrawing.loadSavedZones(active.rtspUrl);
+  }, [cameras]);
 
   const currentIncidents = useMemo(
     () => {
@@ -355,12 +439,96 @@ function CameraPanel() {
               : "Upload a photo or CCTV clip, then choose which detection models run on this camera"}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-3">
+          {liveStream.isLive && cameras.length > 0 && (
+            <select
+              value={activeCameraId}
+              onChange={(e) => handleCameraChange(Number(e.target.value))}
+              className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white outline-none focus:border-slate-500 cursor-pointer"
+            >
+              {cameras.map((c) => (
+                <option key={c.id} value={c.id} disabled={!c.active}>
+                  {c.name} {!c.active ? "(offline)" : ""}
+                </option>
+              ))}
+            </select>
+          )}
+          {liveStream.isLive && (
+            <button
+              type="button"
+              onClick={() => {
+                setTempCameras(cameras);
+                setIsConfiguringCameras(!isConfiguringCameras);
+              }}
+              className="flex items-center gap-1 rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 transition cursor-pointer"
+            >
+              <Settings className="size-3.5" />
+              Configure URLs
+            </button>
+          )}
           <IconButton label="Fullscreen camera feed" icon={Maximize2} />
         </div>
       </div>
 
       <div className="grid gap-4 p-4">
+        {isConfiguringCameras && (
+          <div className="rounded-md border border-slate-800 bg-slate-900/60 p-4">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">
+              Configure Camera Stream URLs
+            </h3>
+            <div className="grid gap-4 md:grid-cols-3">
+              {tempCameras.map((cam, idx) => (
+                <div key={cam.id} className="grid gap-2 rounded border border-slate-800 bg-slate-900 p-3">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-semibold text-white font-medium">
+                      {cam.name} ({cam.zoneId})
+                    </label>
+                    <label className="flex items-center gap-1.5 cursor-pointer text-[10px] text-slate-300">
+                      <input
+                        type="checkbox"
+                        checked={cam.active}
+                        onChange={(e) => {
+                          const updated = [...tempCameras];
+                          updated[idx] = { ...updated[idx], active: e.target.checked };
+                          setTempCameras(updated);
+                        }}
+                        className="rounded border-slate-700 bg-slate-950 text-lime-500 focus:ring-0"
+                      />
+                      Active
+                    </label>
+                  </div>
+                  <input
+                    type="text"
+                    value={cam.rtspUrl}
+                    placeholder="rtsp://address/stream"
+                    onChange={(e) => {
+                      const updated = [...tempCameras];
+                      updated[idx] = { ...updated[idx], rtspUrl: e.target.value };
+                      setTempCameras(updated);
+                    }}
+                    className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white outline-none focus:border-slate-500"
+                  />
+                </div>
+              ))}
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                type="button"
+                onClick={() => setIsConfiguringCameras(false)}
+                className="rounded px-3 py-1.5 text-xs font-semibold text-slate-400 hover:text-white transition cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSaveCameraConfig(tempCameras)}
+                className="rounded bg-lime-600 hover:bg-lime-500 px-3 py-1.5 text-xs font-semibold text-white transition cursor-pointer"
+              >
+                Save Changes
+              </button>
+            </div>
+          </div>
+        )}
         {!liveStream.isLive && !upload.file ? (
           <FileUpload
             label="Upload camera image or video"
@@ -775,6 +943,25 @@ function IncidentPanel() {
 
 export function DashboardShell() {
   const [activeView, setActiveView] = useState<DashboardView>("feeds");
+  const [activeCameraId, setActiveCameraId] = useState<number>(1);
+  const [cameras, setCameras] = useState<CameraConfig[]>([]);
+
+  useEffect(() => {
+    const stored = localStorage.getItem("ppe_demo_cameras");
+    let loaded = DEFAULT_CAMERAS;
+    if (stored) {
+      try {
+        loaded = JSON.parse(stored);
+      } catch (e) {
+        loaded = DEFAULT_CAMERAS;
+      }
+    } else {
+      localStorage.setItem("ppe_demo_cameras", JSON.stringify(DEFAULT_CAMERAS));
+    }
+    setCameras(loaded);
+    const active = loaded.find((c) => c.active) || loaded[0];
+    setActiveCameraId(active.id);
+  }, []);
   const pageTitle =
     activeView === "violations"
       ? "Incident Log"
@@ -824,11 +1011,25 @@ export function DashboardShell() {
             <div className="grid items-start gap-4">
               <div className="grid h-fit gap-4">
                 {activeView === "violations" ? <IncidentPanel /> : null}
-                {activeView === "factory3d" ? <Factory3DView /> : null}
+                {activeView === "factory3d" ? (
+                  <Factory3DView
+                    cameras={cameras}
+                    activeCameraId={activeCameraId}
+                    onSelectActiveCamera={(cam) => {
+                      setActiveCameraId(cam.id);
+                      setActiveView("feeds");
+                    }}
+                  />
+                ) : null}
                 {/* CameraPanel stays mounted (only hidden) when on other tabs so
                     its WebSocket keeps streaming instead of disconnecting on tab switch. */}
                 <div className={activeView === "feeds" ? "grid gap-4" : "hidden"}>
-                  <CameraPanel />
+                  <CameraPanel
+                    cameras={cameras}
+                    activeCameraId={activeCameraId}
+                    onCameraChange={setActiveCameraId}
+                    onCamerasUpdate={setCameras}
+                  />
                 </div>
               </div>
             </div>

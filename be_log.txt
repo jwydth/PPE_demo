@@ -1,0 +1,63 @@
+(.venv) PS D:\Bill\IT\RMIT\Capstone\project\PPE_demo\backend> python -m uvicorn app.main:app --reload --port 8000
+INFO:     Will watch for changes in these directories: ['D:\\Bill\\IT\\RMIT\\Capstone\\project\\PPE_demo\\backend']
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [5960] using WatchFiles
+INFO:     Started server process [16584]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     ('127.0.0.1', 58042) - "WebSocket /ws/stream?video_name=rtsp%3A%2F%2F127.0.0.1%3A8554%2Fstream1&enable_ppe=true&enable_zone=false&enable_fall=false" [accepted]
+INFO:app.routers.streaming:[conn 1] WS accepted (ppe=True, zone=False, fall=False)
+INFO:app.routers.streaming:Starting live stream for rtsp://127.0.0.1:8554/stream1 (initial ppe=True, zone=False, fall=False)
+INFO:app.routers.streaming:[conn 1] acquiring stream lock for rtsp://127.0.0.1:8554/stream1 (locked=False)
+INFO:     connection open
+INFO:app.routers.streaming:[conn 1] [SIGNAL] Settings listener task started
+INFO:app.routers.streaming:[conn 1] acquired stream lock for rtsp://127.0.0.1:8554/stream1
+INFO:app.services.video_pipeline:[ZONE] Loaded 0 zone(s) for 'rtsp://127.0.0.1:8554/stream1': []
+INFO:     ('127.0.0.1', 61676) - "WebSocket /ws/stream?video_name=rtsp%3A%2F%2F127.0.0.1%3A8554%2Fstream2&enable_ppe=true&enable_zone=false&enable_fall=false" [accepted]
+INFO:app.routers.streaming:[conn 2] WS accepted (ppe=True, zone=False, fall=False)
+INFO:app.routers.streaming:Starting live stream for rtsp://127.0.0.1:8554/stream2 (initial ppe=True, zone=False, fall=False)
+INFO:app.routers.streaming:[conn 2] acquiring stream lock for rtsp://127.0.0.1:8554/stream2 (locked=False)
+INFO:     connection open
+INFO:app.routers.streaming:[conn 2] [SIGNAL] Settings listener task started
+INFO:app.routers.streaming:[conn 2] acquired stream lock for rtsp://127.0.0.1:8554/stream2
+1/1: rtsp://127.0.0.1:8554/stream1... Success  (inf frames of shape 1280x720 at 15.00 FPS)
+
+INFO:app.services.video_pipeline:[ZONE] Loaded 0 zone(s) for 'rtsp://127.0.0.1:8554/stream2': []
+INFO:     127.0.0.1:52043 - "GET /zones?video_name=rtsp%3A%2F%2F127.0.0.1%3A8554%2Fstream1 HTTP/1.1" 200 OK
+INFO:app.services.video_pipeline: [PIPELINE] Frame 0 active state: ppe=True, zone=False, fall=False
+INFO:app.routers.streaming:[conn 1] [SIGNAL] Received dynamic settings update: {'enable_ppe': True, 'enable_zone': True, 'enable_fall': False, 'dismissed_signatures': [], 'dismissed_ppe_signatures': [], 'viewing': True}
+INFO:app.routers.streaming:[conn 2] [SIGNAL] Received dynamic settings update: {'enable_ppe': True, 'enable_zone': True, 'enable_fall': False, 'dismissed_signatures': [], 'dismissed_ppe_signatures': [], 'reload_zones': False, 'viewing': False}
+INFO:app.routers.streaming:[conn 1] [SIGNAL] Received dynamic settings update: {'enable_ppe': False, 'enable_zone': True, 'enable_fall': False, 'dismissed_signatures': [], 'dismissed_ppe_signatures': [], 'viewing': True}
+INFO:app.routers.streaming:[conn 2] [SIGNAL] Received dynamic settings update: {'enable_ppe': False, 'enable_zone': True, 'enable_fall': False, 'dismissed_signatures': [], 'dismissed_ppe_signatures': [], 'reload_zones': False, 'viewing': False}
+INFO:     127.0.0.1:61475 - "GET /zones?video_name=rtsp%3A%2F%2F127.0.0.1%3A8554%2Fstream2 HTTP/1.1" 200 OK
+INFO:app.routers.streaming:[conn 1] [SIGNAL] Received dynamic settings update: {'enable_ppe': False, 'enable_zone': True, 'enable_fall': False, 'dismissed_signatures': [], 'dismissed_ppe_signatures': [], 'viewing': False}
+INFO:app.routers.streaming:[conn 1] [SIGNAL] Received dynamic settings update: {'enable_ppe': False, 'enable_zone': True, 'enable_fall': False, 'dismissed_signatures': [], 'dismissed_ppe_signatures': [], 'viewing': False}
+INFO:app.routers.streaming:[conn 2] [SIGNAL] Received dynamic settings update: {'enable_ppe': False, 'enable_zone': True, 'enable_fall': False, 'dismissed_signatures': [], 'dismissed_ppe_signatures': [], 'reload_zones': False, 'viewing': True}
+INFO:app.routers.streaming:[conn 2] [SIGNAL] Received dynamic settings update: {'enable_ppe': False, 'enable_zone': True, 'enable_fall': False, 'dismissed_signatures': [], 'dismissed_ppe_signatures': [], 'reload_zones': False, 'viewing': True}
+INFO:     127.0.0.1:61475 - "GET /zones?video_name=rtsp%3A%2F%2F127.0.0.1%3A8554%2Fstream2 HTTP/1.1" 200 OK
+INFO:app.routers.streaming:[conn 1] [SIGNAL] Received dynamic settings update: {'enable_ppe': False, 'enable_zone': True, 'enable_fall': False, 'dismissed_signatures': [], 'dismissed_ppe_signatures': [], 'viewing': False}
+INFO:app.routers.streaming:[conn 2] [SIGNAL] Received dynamic settings update: {'enable_ppe': False, 'enable_zone': True, 'enable_fall': False, 'dismissed_signatures': [], 'dismissed_ppe_signatures': [], 'reload_zones': False, 'viewing': True}
+[h264 @ 00000254ba5a4640] corrupted macroblock 13 9 (total_coeff=-1)
+[h264 @ 00000254ba5a4640] error while decoding MB 13 9
+[h264 @ 00000254e2f65340] Invalid level prefix
+[h264 @ 00000254e2f65340] error while decoding MB 12 15
+[h264 @ 00000254e2f8e340] Invalid level prefix
+[h264 @ 00000254e2f8e340] error while decoding MB 59 27
+[h264 @ 00000254e50f7700] corrupted macroblock 44 16 (total_coeff=-1)
+[h264 @ 00000254e50f7700] error while decoding MB 44 16
+[h264 @ 00000254e2fc4340] corrupted macroblock 50 20 (total_coeff=-1)
+[h264 @ 00000254e2fc4340] error while decoding MB 50 20
+[h264 @ 00000254ba5a4f40] corrupted macroblock 57 32 (total_coeff=-1)
+[h264 @ 00000254ba5a4f40] error while decoding MB 57 32
+[h264 @ 00000254ba5a4ac0] corrupted macroblock 72 17 (total_coeff=-1)
+[h264 @ 00000254ba5a4ac0] error while decoding MB 72 17
+[h264 @ 00000254e2f657c0] negative number of zero coeffs at 38 13
+[h264 @ 00000254e2f657c0] error while decoding MB 38 13
+[h264 @ 00000254e2f8e340] corrupted macroblock 59 29 (total_coeff=-1)
+[h264 @ 00000254e2f8e340] error while decoding MB 59 29
+[h264 @ 00000254e2fc4340] corrupted macroblock 42 6 (total_coeff=-1)
+[h264 @ 00000254e2fc4340] error while decoding MB 42 6
+[h264 @ 00000254ba5a4ac0] corrupted macroblock 16 41 (total_coeff=-1)
+[h264 @ 00000254ba5a4ac0] error while decoding MB 16 41
+[h264 @ 00000254ba5a4ac0] Invalid level prefix
+[h264 @ 00000254ba5a4ac0] error while decoding MB 57 8

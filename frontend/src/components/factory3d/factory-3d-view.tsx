@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import { RefreshCw } from "lucide-react";
@@ -18,6 +18,20 @@ import { ZoneDetailPanel } from "./zone-detail-panel";
 import { useZoneIncidents } from "./use-zone-incidents";
 
 const REFRESH_INTERVAL_MS = 20_000;
+
+interface CameraConfig {
+  id: number;
+  name: string;
+  rtspUrl: string;
+  zoneId: string;
+  active: boolean;
+}
+
+interface Factory3DViewProps {
+  cameras?: CameraConfig[];
+  activeCameraId?: number;
+  onSelectActiveCamera?: (camera: CameraConfig) => void;
+}
 
 function FloorPad() {
   return (
@@ -64,19 +78,58 @@ function BuildingShell() {
   );
 }
 
-export function Factory3DView() {
-  const { aggregates, loading, error, refresh } = useZoneIncidents();
-  const [selectedZoneId, setSelectedZoneId] = useState<ZoneId | null>(
-    () => ZONES.find((z) => z.active)?.id ?? null,
-  );
+export function Factory3DView({ cameras = [], activeCameraId, onSelectActiveCamera }: Factory3DViewProps) {
+  const mergedZones = useMemo(() => {
+    if (cameras.length === 0) return ZONES;
+    return ZONES.map((z) => {
+      const cam = cameras.find((c) => c.zoneId === z.id);
+      return {
+        ...z,
+        active: cam ? cam.active : false,
+        sources: {
+          ...z.sources,
+          videoNameIncludes: cam && cam.rtspUrl ? [cam.rtspUrl, "mp_"] : z.sources.videoNameIncludes,
+          cameraIds: cam ? [cam.id] : z.sources.cameraIds,
+        },
+      };
+    });
+  }, [cameras]);
+
+  const { aggregates, loading, error, refresh } = useZoneIncidents({ zones: mergedZones });
+  const [selectedZoneId, setSelectedZoneId] = useState<ZoneId | null>(null);
   const [hoveredZoneId, setHoveredZoneId] = useState<ZoneId | null>(null);
+
+  // Synchronize selected zone with active camera
+  useEffect(() => {
+    if (activeCameraId) {
+      const activeCam = cameras.find((c) => c.id === activeCameraId);
+      if (activeCam) {
+        setSelectedZoneId(activeCam.zoneId as ZoneId);
+      }
+    } else {
+      const firstActive = mergedZones.find((z) => z.active);
+      if (firstActive) {
+        setSelectedZoneId(firstActive.id);
+      }
+    }
+  }, [activeCameraId, cameras, mergedZones]);
 
   useEffect(() => {
     const timer = window.setInterval(() => refresh(), REFRESH_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, [refresh]);
 
-  const selectedZone = selectedZoneId ? ZONES.find((z) => z.id === selectedZoneId) ?? null : null;
+  const handleSelectZone = (zoneId: ZoneId) => {
+    setSelectedZoneId(zoneId);
+    if (onSelectActiveCamera) {
+      const cam = cameras.find((c) => c.zoneId === zoneId);
+      if (cam && cam.active) {
+        onSelectActiveCamera(cam);
+      }
+    }
+  };
+
+  const selectedZone = selectedZoneId ? mergedZones.find((z) => z.id === selectedZoneId) ?? null : null;
   const selectedAggregate = selectedZoneId ? aggregates[selectedZoneId] ?? null : null;
 
   return (
@@ -100,7 +153,7 @@ export function Factory3DView() {
 
       {/* Non-3D DOM fallback so the feature is usable without WebGL / with a screen reader. */}
       <div className="flex flex-wrap gap-2" role="tablist" aria-label="Factory zones">
-        {ZONES.map((zone) => {
+        {mergedZones.map((zone) => {
           const total = aggregates[zone.id]?.total ?? 0;
           return (
             <button
@@ -110,7 +163,7 @@ export function Factory3DView() {
               aria-selected={selectedZoneId === zone.id}
               disabled={!zone.active}
               title={zone.active ? undefined : "Camera not connected — monitoring planned"}
-              onClick={() => zone.active && setSelectedZoneId(zone.id)}
+              onClick={() => zone.active && handleSelectZone(zone.id)}
               className={`rounded-md border px-3 py-1.5 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
                 selectedZoneId === zone.id
                   ? "border-lime-300 bg-lime-100 text-green-950"
@@ -137,7 +190,7 @@ export function Factory3DView() {
             <directionalLight position={[6, 12, 8]} intensity={0.55} />
             <FloorPad />
             <BuildingShell />
-            {ZONES.map((zone) => (
+            {mergedZones.map((zone) => (
               <ZoneBlock
                 key={zone.id}
                 zone={zone}
@@ -156,7 +209,7 @@ export function Factory3DView() {
                 selected={selectedZoneId === zone.id}
                 hovered={hoveredZoneId === zone.id}
                 onHover={setHoveredZoneId}
-                onSelect={setSelectedZoneId}
+                onSelect={handleSelectZone}
               />
             ))}
             <OrbitControls
