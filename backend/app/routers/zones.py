@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.schemas.violation import ZoneViolation
-from app.schemas.zone import Zone
+from app.schemas.zone import PhysicalZoneCreate, PhysicalZoneRead, Zone
 from app.services import ServiceNotFoundError, ServiceValidationError
 from app.services.zone_service import ZoneService, get_zone_service
 from app.services.zone_violation_service import (
@@ -12,6 +12,55 @@ from app.services.zone_violation_service import (
 )
 
 router = APIRouter(tags=["zones"])
+
+
+@router.get("/physical-zones", response_model=list[PhysicalZoneRead])
+async def get_physical_zones(
+    service: Annotated[ZoneService, Depends(get_zone_service)],
+) -> list[PhysicalZoneRead]:
+    """List the physical-zone catalog (id/name/type), e.g. for a zone picker."""
+    return [
+        PhysicalZoneRead(
+            id=zone.id,
+            name=zone.name,
+            zone_type=zone.zone_type,
+            is_active=zone.is_active,
+        )
+        for zone in service.list_physical_zones()
+        if zone.id is not None
+    ]
+
+
+@router.post("/physical-zones", response_model=PhysicalZoneRead)
+async def create_physical_zone(
+    body: PhysicalZoneCreate,
+    service: Annotated[ZoneService, Depends(get_zone_service)],
+) -> PhysicalZoneRead:
+    """Create a named zone for camera/analytics grouping — no drawn shape required."""
+    try:
+        zone = service.create_physical_zone(body.name)
+    except ServiceValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if zone.id is None:
+        raise HTTPException(status_code=500, detail="Persisted zone is missing an ID.")
+    return PhysicalZoneRead(
+        id=zone.id,
+        name=zone.name,
+        zone_type=zone.zone_type,
+        is_active=zone.is_active,
+    )
+
+
+@router.delete("/physical-zones/{zone_id}")
+async def delete_physical_zone(
+    zone_id: int,
+    service: Annotated[ZoneService, Depends(get_zone_service)],
+) -> dict[str, str]:
+    try:
+        service.delete_physical_zone(zone_id)
+    except ServiceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"status": "success"}
 
 
 @router.post("/zones", response_model=Zone)
@@ -84,3 +133,17 @@ async def get_zone_violations(
     limit: int = 100,
 ) -> list[ZoneViolation]:
     return service.get_recent_zone_violations(limit=limit)
+
+
+@router.get("/zone-violations/{zone_violation_id}", response_model=ZoneViolation)
+async def get_zone_violation_detail(
+    zone_violation_id: int,
+    service: Annotated[
+        ZoneViolationService,
+        Depends(get_zone_violation_service),
+    ],
+) -> ZoneViolation:
+    try:
+        return service.get_zone_violation(zone_violation_id)
+    except ServiceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc

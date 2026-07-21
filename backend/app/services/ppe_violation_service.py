@@ -15,7 +15,11 @@ from app.models.ppe_violation import PPEViolation, PPEViolationSubject
 from app.repositories.camera_repository import CameraRepository
 from app.repositories.factory_repository import FactoryRepository
 from app.repositories.ppe_violation_repository import PPEViolationRepository
-from app.schemas.violation import ViolationReport
+from app.schemas.violation import (
+    PPEViolationSubjectRead,
+    ViolationDetail,
+    ViolationReport,
+)
 from app.services import ServiceNotFoundError, ServiceValidationError
 from app.storage.evidence_storage import EvidenceStorage, get_evidence_storage
 
@@ -152,6 +156,21 @@ class PPEViolationService:
             track_id=track_id,
             snapshot_url=self._snapshot_url(violation.snapshot_path),
         )
+
+    def get_violation_detail(self, violation_id: int) -> ViolationDetail:
+        report = self.get_violation(violation_id)
+        subjects = [
+            PPEViolationSubjectRead(
+                id=s.id,
+                track_id=s.track_id,
+                person_index=s.person_index,
+                missing_equipment=s.missing_equipment,
+                bounding_box=s.bounding_box,
+                confidence=s.confidence,
+            )
+            for s in self.get_subjects(violation_id)
+        ]
+        return ViolationDetail(**report.model_dump(), subjects=subjects)
 
     def get_recent_violations(self, limit: int = 100) -> list[ViolationReport]:
         normalized_limit = _validate_limit(limit)

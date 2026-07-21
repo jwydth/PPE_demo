@@ -20,6 +20,17 @@ class PPESuggestion(BaseModel):
     bbox: tuple[float, float, float, float]  # normalized x1, y1, x2, y2 in [0, 1]
 
 
+class PhysicalZoneRead(BaseModel):
+    id: int
+    name: str
+    zone_type: str
+    is_active: bool
+
+
+class PhysicalZoneCreate(BaseModel):
+    name: str
+
+
 class Zone(BaseModel):
     id: Optional[int] = None
     video_name: str

@@ -9,6 +9,7 @@ from app.db.session import get_session
 from app.models.camera import Camera
 from app.repositories.camera_repository import CameraRepository
 from app.repositories.factory_repository import FactoryRepository
+from app.repositories.physical_zone_repository import PhysicalZoneRepository
 from app.services import ServiceNotFoundError, ServiceValidationError
 
 
@@ -19,6 +20,7 @@ class CameraDTO:
     source_key: str
     source_uri: str | None
     calibration_source_points: list[Any] | None
+    home_zone_id: int | None
     is_active: bool
     created_at: datetime
     updated_at: datetime
@@ -32,9 +34,14 @@ class CameraService:
             FactoryRepository,
             Depends(FactoryRepository),
         ],
+        physical_zone_repository: Annotated[
+            PhysicalZoneRepository,
+            Depends(PhysicalZoneRepository),
+        ],
     ) -> None:
         self.repository = repository
         self.factory_repository = factory_repository
+        self.physical_zone_repository = physical_zone_repository
 
     def create_camera(
         self,
@@ -71,6 +78,40 @@ class CameraService:
             raise ServiceNotFoundError(f"Camera {camera_id} was not found.")
         return _to_dto(camera)
 
+    def list_cameras(self) -> list[CameraDTO]:
+        return [_to_dto(camera) for camera in self.repository.list_all()]
+
+    def get_or_create_camera(self, *, name: str, source_key: str) -> CameraDTO:
+        normalized_source_key = _require_text(source_key, "source_key")
+        camera = self.repository.get_by_source_key(normalized_source_key)
+        if camera is not None:
+            return _to_dto(camera)
+
+        normalized_name = _require_text(name, "name")
+        factory_id = self._get_default_factory_id()
+        camera = self.repository.create(
+            Camera(
+                factory_id=factory_id,
+                name=normalized_name,
+                source_key=normalized_source_key,
+                is_active=True,
+            )
+        )
+        return _to_dto(camera)
+
+    def set_home_zone(self, camera_id: int, zone_id: int | None) -> CameraDTO:
+        normalized_id = _require_positive_id(camera_id, "camera_id")
+        if zone_id is not None:
+            if zone_id <= 0:
+                raise ServiceValidationError("zone_id must be greater than zero.")
+            if self.physical_zone_repository.get_by_id(zone_id) is None:
+                raise ServiceNotFoundError(f"Physical zone {zone_id} was not found.")
+
+        camera = self.repository.set_home_zone(normalized_id, zone_id)
+        if camera is None:
+            raise ServiceNotFoundError(f"Camera {camera_id} was not found.")
+        return _to_dto(camera)
+
     def get_camera_by_source_key(self, source_key: str) -> CameraDTO:
         normalized_source_key = _require_text(source_key, "source_key")
         camera = self.repository.get_by_source_key(normalized_source_key)
@@ -97,7 +138,11 @@ class CameraService:
 def get_camera_service(
     session: Annotated[Session, Depends(get_session)],
 ) -> CameraService:
-    return CameraService(CameraRepository(session), FactoryRepository(session))
+    return CameraService(
+        CameraRepository(session),
+        FactoryRepository(session),
+        PhysicalZoneRepository(session),
+    )
 
 
 def _to_dto(camera: Camera) -> CameraDTO:
@@ -109,6 +154,7 @@ def _to_dto(camera: Camera) -> CameraDTO:
         source_key=camera.source_key,
         source_uri=camera.source_uri,
         calibration_source_points=camera.calibration_source_points,
+        home_zone_id=camera.home_zone_id,
         is_active=camera.is_active,
         created_at=camera.created_at,
         updated_at=camera.updated_at,

@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Annotated, TypeVar
 
 from fastapi import Depends
@@ -94,6 +95,45 @@ class BehaviorIncidentRepository:
         except SQLAlchemyError as exc:
             self.session.rollback()
             raise RepositoryError("Could not list behavior incidents.") from exc
+
+    def list_between(
+        self,
+        *,
+        date_from: datetime | None,
+        date_to: datetime | None,
+        limit: int,
+    ) -> list[BehaviorIncident]:
+        try:
+            statement = select(BehaviorIncident)
+            if date_from is not None:
+                statement = statement.where(BehaviorIncident.started_at >= date_from)
+            if date_to is not None:
+                statement = statement.where(BehaviorIncident.started_at <= date_to)
+            statement = statement.order_by(
+                BehaviorIncident.started_at.desc(),
+                BehaviorIncident.id.desc(),
+            ).limit(limit)
+            return list(self.session.exec(statement).all())
+        except SQLAlchemyError as exc:
+            self.session.rollback()
+            raise RepositoryError(
+                "Could not list behavior incidents by date range."
+            ) from exc
+
+    def delete(self, incident_id: int) -> bool:
+        incident = self.get_by_id(incident_id)
+        if incident is None:
+            return False
+        try:
+            # subjects/evidence cascade via ondelete="CASCADE" (passive_deletes=True
+            # on the model relationships, so this is a DB-level cascade, not ORM-issued
+            # per-child DELETEs).
+            self.session.delete(incident)
+            self.session.commit()
+            return True
+        except SQLAlchemyError as exc:
+            self.session.rollback()
+            raise RepositoryError("Could not delete behavior incident.") from exc
 
     def list_all_evidence(self) -> list[BehaviorEvidence]:
         try:

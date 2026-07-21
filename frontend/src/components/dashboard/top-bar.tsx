@@ -2,12 +2,13 @@ import { ChevronDown, Factory } from "lucide-react";
 import { appActions, navigation } from "./data";
 import { IconButton } from "./icon-button";
 
-export type DashboardView = "feeds" | "violations" | "factory3d";
+export type DashboardView = "feeds" | "violations" | "factory3d" | "analytics";
 
 const navViewByLabel: Record<string, DashboardView> = {
   "Camera Feeds": "feeds",
   "Incident Log": "violations",
   "3D Map": "factory3d",
+  "Analytics": "analytics",
 };
 
 export function TopBar({

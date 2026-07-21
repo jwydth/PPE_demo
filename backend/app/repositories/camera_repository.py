@@ -61,6 +61,14 @@ class CameraRepository:
         camera.is_active = False
         return self._commit_and_refresh(camera, "deactivate camera")
 
+    def set_home_zone(self, camera_id: int, zone_id: int | None) -> Camera | None:
+        camera = self.get_by_id(camera_id)
+        if camera is None:
+            return None
+
+        camera.home_zone_id = zone_id
+        return self._commit_and_refresh(camera, "set camera home zone")
+
     def _commit_and_refresh(self, camera: Camera, operation: str) -> Camera:
         try:
             self.session.commit()

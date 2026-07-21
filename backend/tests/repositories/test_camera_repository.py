@@ -1,6 +1,7 @@
 import pytest
 
 from app.models.camera import Camera
+from app.models.physical_zone import PhysicalZone
 from app.repositories import RepositoryError
 from app.repositories.camera_repository import CameraRepository
 from app.repositories.factory_repository import FactoryRepository
@@ -67,3 +68,33 @@ def test_camera_repository_rolls_back_failed_create(session):
         )
     )
     assert created.id is not None
+
+
+def test_camera_repository_set_home_zone(session):
+    repository = CameraRepository(session)
+    factory_id = _factory_id(session)
+    camera = repository.create(
+        Camera(
+            factory_id=factory_id,
+            name="Loading Bay",
+            source_key="loading-bay.mp4",
+        )
+    )
+    zone = PhysicalZone(
+        factory_id=factory_id,
+        name="Warehouse Intake",
+        zone_type="WALKWAY",
+    )
+    session.add(zone)
+    session.commit()
+    session.refresh(zone)
+
+    assigned = repository.set_home_zone(camera.id, zone.id)
+    assert assigned is not None
+    assert assigned.home_zone_id == zone.id
+
+    cleared = repository.set_home_zone(camera.id, None)
+    assert cleared is not None
+    assert cleared.home_zone_id is None
+
+    assert repository.set_home_zone(999_999, zone.id) is None

@@ -123,6 +123,21 @@ async def behavior_incident(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.delete("/behavior-incidents/{incident_id}")
+async def delete_behavior_incident(
+    incident_id: int,
+    service: Annotated[
+        BehaviorIncidentService,
+        Depends(get_behavior_incident_service),
+    ],
+) -> dict[str, bool]:
+    """Delete a single behavior incident by ID (hard delete; permanent)."""
+    success = service.delete_incident(incident_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Behavior incident not found")
+    return {"success": success}
+
+
 async def _write_upload_to_temp(file: UploadFile, suffix: str) -> Path:
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp_path = Path(tmp.name)

@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 from sqlalchemy import BigInteger, Column, DateTime, String, func
 from sqlalchemy.dialects.postgresql import JSONB
@@ -8,6 +8,7 @@ from sqlmodel import Field, Relationship, SQLModel
 if TYPE_CHECKING:
     from app.models.camera_zone_view import CameraZoneView
     from app.models.factory import Factory
+    from app.models.physical_zone import PhysicalZone
     from app.models.ppe_violation import PPEViolation
 
 
@@ -35,6 +36,14 @@ class Camera(SQLModel, table=True):
         default=None,
         sa_column=Column(JSONB, nullable=True),
     )
+    home_zone_id: int | None = Field(
+        default=None,
+        foreign_key="physical_zones.id",
+        ondelete="SET NULL",
+        nullable=True,
+        index=True,
+        sa_type=BigInteger,
+    )
     is_active: bool = Field(default=True, nullable=False)
     created_at: datetime = Field(
         default_factory=_utc_now,
@@ -55,6 +64,7 @@ class Camera(SQLModel, table=True):
     )
 
     factory: "Factory" = Relationship(back_populates="cameras")
+    home_zone: Optional["PhysicalZone"] = Relationship(back_populates="cameras")
     camera_zone_views: list["CameraZoneView"] = Relationship(
         back_populates="camera",
         cascade_delete=True,

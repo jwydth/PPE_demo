@@ -157,6 +157,42 @@ class ZoneService:
             )
         return _to_schema(view, physical_zone, camera.source_key)
 
+    def list_physical_zones(self) -> list[PhysicalZone]:
+        factory_id = self._get_default_factory_id()
+        return self.physical_zone_repository.get_by_factory(factory_id)
+
+    def delete_physical_zone(self, zone_id: int) -> None:
+        """Delete a named zone. Cameras pointing at it fall back to
+        home_zone_id=NULL (ON DELETE SET NULL); any drawn CameraZoneViews for
+        it are cascade-deleted."""
+        normalized_id = _require_positive_id(zone_id, "zone_id")
+        zone = self.physical_zone_repository.get_by_id(normalized_id)
+        if zone is None:
+            raise ServiceNotFoundError(f"Zone {zone_id} was not found.")
+        self.physical_zone_repository.delete(normalized_id)
+
+    def create_physical_zone(self, name: str) -> PhysicalZone:
+        """Create a named zone for grouping cameras/analytics — no drawn shape
+        required. Distinct from `create_zone`, which creates a physical zone
+        together with a drawn CameraZoneView for zone-monitoring."""
+        factory_id = self._get_default_factory_id()
+        normalized_name = _require_text(name, "name")
+        existing = self.physical_zone_repository.get_by_factory_and_name(
+            factory_id, normalized_name
+        )
+        if existing is not None:
+            raise ServiceValidationError(
+                f"A zone named '{normalized_name}' already exists."
+            )
+        return self.physical_zone_repository.create(
+            PhysicalZone(
+                factory_id=factory_id,
+                name=normalized_name,
+                zone_type="AREA",
+                is_active=True,
+            )
+        )
+
     def get_zones_by_source_key(self, source_key: str) -> list[Zone]:
         normalized_source_key = _require_text(source_key, "video_name")
         camera = self.camera_repository.get_by_source_key(normalized_source_key)

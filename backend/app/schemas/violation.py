@@ -14,6 +14,19 @@ class ViolationReport(BaseModel):
     track_id: Optional[int] = None
 
 
+class PPEViolationSubjectRead(BaseModel):
+    id: int
+    track_id: Optional[int] = None
+    person_index: Optional[int] = None
+    missing_equipment: list[str]
+    bounding_box: Optional[dict] = None
+    confidence: Optional[float] = None
+
+
+class ViolationDetail(ViolationReport):
+    subjects: list[PPEViolationSubjectRead] = []
+
+
 class ZoneViolation(BaseModel):
     id: Optional[int] = None
     # Backward-compatible API alias for camera_zone_view_id.

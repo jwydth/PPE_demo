@@ -156,6 +156,12 @@ class BehaviorIncidentService:
         )
         return [self._to_read(incident) for incident in incidents]
 
+    def delete_incident(self, incident_id: int) -> bool:
+        # Matches the PPE/zone single-delete precedent: no storage cleanup here
+        # (delete_all_behavior_incidents does that, as a distinct bulk operation).
+        normalized_id = _require_positive_id(incident_id, "incident_id")
+        return self.repository.delete(normalized_id)
+
     def delete_all_behavior_incidents(self) -> int:
         storage = self._require_storage()
         evidence_rows = self.repository.list_all_evidence()

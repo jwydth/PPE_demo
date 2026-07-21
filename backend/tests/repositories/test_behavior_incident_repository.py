@@ -75,3 +75,50 @@ def test_behavior_incident_repository_create_read_recent_subjects_and_evidence(s
     assert repository.delete_all() == 3
     assert repository.list_recent(limit=10) == []
     assert repository.list_all_evidence() == []
+
+
+def test_behavior_incident_repository_delete_cascades_subjects_and_evidence(session):
+    repository = BehaviorIncidentRepository(session)
+    now = datetime.now(timezone.utc)
+    incident = repository.create(_incident(now, 10))
+    repository.create_subject(
+        BehaviorIncidentSubject(
+            behavior_incident_id=incident.id,
+            tracker_id=42,
+            person_index=1,
+        )
+    )
+    repository.create_evidence(
+        BehaviorEvidence(
+            behavior_incident_id=incident.id,
+            evidence_type=BehaviorEvidenceType.SNAPSHOT.value,
+            object_key="behavior-incidents/2026/07/06/test.jpg",
+            occurred_at=now,
+        )
+    )
+
+    assert repository.delete(incident.id) is True
+    assert repository.get_by_id(incident.id) is None
+    assert repository.get_subjects(incident.id) == []
+    assert repository.get_evidence(incident.id) == []
+    assert repository.delete(incident.id) is False
+    assert repository.delete(999_999) is False
+
+
+def test_behavior_incident_repository_list_between(session):
+    repository = BehaviorIncidentRepository(session)
+    now = datetime.now(timezone.utc)
+
+    oldest = repository.create(_incident(now - timedelta(minutes=2), 10))
+    middle = repository.create(_incident(now - timedelta(minutes=1), 20))
+    newest = repository.create(_incident(now, 30))
+
+    assert repository.list_between(date_from=None, date_to=None, limit=10) == [
+        newest,
+        middle,
+        oldest,
+    ]
+    assert repository.list_between(
+        date_from=now - timedelta(minutes=1), date_to=None, limit=10
+    ) == [newest, middle]
+    assert repository.list_between(date_from=None, date_to=None, limit=1) == [newest]

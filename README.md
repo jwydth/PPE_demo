@@ -121,8 +121,13 @@ verification script before starting the API.
 Start the backend API:
 
 ```powershell
-python -m uvicorn app.main:app --reload --port 8000
+python -m uvicorn app.main:app --reload --reload-dir app --port 8000
 ```
+
+`--reload-dir app` restricts the auto-reloader to `backend/app` (the source
+code) instead of watching the whole `backend/` tree. Without it, every
+violation snapshot written to `backend/storage/` during live detection
+triggers a full server restart, which drops every open camera WebSocket.
 
 Backend URLs:
 
@@ -205,7 +210,7 @@ prints CPU/mock-mode status so the environment problem is visible.
 Use the project venv when starting the backend:
 
 ```powershell
-python -m uvicorn app.main:app --reload --port 8000
+python -m uvicorn app.main:app --reload --reload-dir app --port 8000
 ```
 
 ## Useful Backend Commands

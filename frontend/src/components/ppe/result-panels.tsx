@@ -59,14 +59,17 @@ export function PeopleResults({ persons }: { persons: PersonResult[] }) {
 export function IncidentCard({
   event,
   onDelete,
+  onOpenDetail,
   compact = false,
 }: {
   event: ViolationReport | ZoneViolation | BehaviorIncident;
   onDelete?: () => void;
+  onOpenDetail?: (category: "ppe" | "zone" | "behavior", id: number) => void;
   compact?: boolean;
 }) {
   const isPpe = isPpeIncident(event);
   const isBehavior = isBehaviorIncident(event);
+  const category = isPpe ? "ppe" : isBehavior ? "behavior" : "zone";
   const imageUrl = isPpe
     ? event.snapshot_url
     : isBehavior
@@ -89,8 +92,13 @@ export function IncidentCard({
       : "bg-amber-50 text-amber-700 ring-amber-200";
   const frameLabel = isBehavior ? event.frame_start : event.frame_index;
 
+  const canOpenDetail = Boolean(onOpenDetail && event.id != null);
+
   return (
-    <article className="overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm">
+    <article
+      className={`overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm ${canOpenDetail ? "cursor-pointer transition hover:border-slate-300 hover:shadow-md" : ""}`}
+      onClick={canOpenDetail ? () => onOpenDetail!(category, event.id as number) : undefined}
+    >
       {imageUrl ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
@@ -125,7 +133,10 @@ export function IncidentCard({
         {onDelete ? (
           <button
             type="button"
-            onClick={onDelete}
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete();
+            }}
             className="mt-3 inline-flex items-center gap-2 rounded-md border border-red-200 px-3 py-2 text-xs font-semibold text-red-700 transition hover:bg-red-50"
           >
             <Trash2 className="size-3.5" aria-hidden="true" />

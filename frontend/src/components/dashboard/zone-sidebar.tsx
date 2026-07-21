@@ -1,8 +1,29 @@
 import { Shield } from "lucide-react";
-import { zones } from "./data";
+import { deletePhysicalZone } from "@/lib/ppe-api";
+import { PhysicalZone } from "@/types/zone";
 import { ZoneButton } from "./zone-button";
 
-export function ZoneSidebar() {
+export function ZoneSidebar({
+  physicalZones,
+  cameraCounts,
+  onPhysicalZonesUpdate,
+}: {
+  physicalZones: PhysicalZone[];
+  cameraCounts: Record<number, number>;
+  onPhysicalZonesUpdate: (updated: PhysicalZone[]) => void;
+}) {
+  const handleDelete = async (zone: PhysicalZone) => {
+    if (!confirm(`Delete the "${zone.name}" zone? Cameras assigned to it will become unassigned.`)) {
+      return;
+    }
+    try {
+      await deletePhysicalZone(zone.id);
+      onPhysicalZonesUpdate(physicalZones.filter((z) => z.id !== zone.id));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not delete zone");
+    }
+  };
+
   return (
     <aside className="border-b border-slate-200 bg-slate-50 lg:sticky lg:top-16 lg:h-[calc(100vh-4rem)] lg:w-72 lg:shrink-0 lg:border-b-0 lg:border-r">
       <div className="flex h-full flex-col gap-4 p-4">
@@ -21,9 +42,20 @@ export function ZoneSidebar() {
         </div>
 
         <div className="grid gap-2">
-          {zones.map((zone) => (
-            <ZoneButton key={zone.name} zone={zone} active={zone.name === "Packaging Line 1"} />
-          ))}
+          {physicalZones.length === 0 ? (
+            <p className="px-1 text-xs text-slate-400">
+              No zones yet — create one from Camera Feeds → Configure URLs.
+            </p>
+          ) : (
+            physicalZones.map((zone) => (
+              <ZoneButton
+                key={zone.id}
+                zone={zone}
+                cameraCount={cameraCounts[zone.id] ?? 0}
+                onDelete={() => void handleDelete(zone)}
+              />
+            ))
+          )}
         </div>
       </div>
     </aside>

@@ -18,6 +18,13 @@ export interface ZoneConfiguration {
   flattened_coordinates: string;
 }
 
+export interface PhysicalZone {
+  id: number;
+  name: string;
+  zone_type: ZoneType;
+  is_active: boolean;
+}
+
 export interface ZoneSuggestion {
   suggestion_id: string;
   zone_type: ZoneType;
@@ -38,6 +45,9 @@ export interface PPESuggestion {
 export interface ZoneViolation {
   id?: number;
   zone_id?: number;
+  camera_id?: number;
+  physical_zone_id?: number;
+  camera_zone_view_id?: number;
   zone_name?: string;
   zone_type?: ZoneType;
   track_id?: number;
@@ -45,4 +55,6 @@ export interface ZoneViolation {
   video_name: string;
   frame_index: number;
   snapshot_path?: string;
+  status?: string;
+  severity?: string;
 }

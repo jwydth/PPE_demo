@@ -8,12 +8,17 @@ import {
   Trash2,
 } from "lucide-react";
 import dynamic from "next/dynamic";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  createPhysicalZone,
   deleteAllIncidents,
-  deleteViolation,
-  deleteZoneViolation,
+  deleteIncident,
+  ensureCamera,
+  getCameras,
+  getPhysicalZones,
   getSafetyEvents,
+  setCameraHomeZone,
 } from "@/lib/ppe-api";
 import { BoundingBoxView } from "@/components/ppe/bounding-box-view";
 import { FileUpload } from "@/components/ppe/file-upload";
@@ -33,7 +38,7 @@ import {
 } from "@/components/ppe/result-panels";
 import { doPolygonsOverlap } from "@/lib/spatial-utils";
 import { TrackingOverlay, ViolationReport } from "@/types/detection";
-import { ZoneType, ZoneViolation } from "@/types/zone";
+import { PhysicalZone, ZoneType, ZoneViolation } from "@/types/zone";
 import { useDetectionUpload } from "@/hooks/useDetectionUpload";
 import { useZoneDrawing } from "@/hooks/useZoneDrawing";
 import { useLiveStream } from "@/hooks/useLiveStream";
@@ -48,9 +53,15 @@ import { IconButton } from "./icon-button";
 import { ZoneOverlaySvg } from "./zone-overlay-svg";
 import { ZoneConfigPanel } from "./zone-config-panel";
 import { AnalysisResultPanel } from "./analysis-result-panel";
+import { IncidentCategory, IncidentDetailModal } from "./incident-detail-modal";
 
 const Factory3DView = dynamic(
   () => import("@/components/factory3d/factory-3d-view").then((m) => m.Factory3DView),
+  { ssr: false },
+);
+
+const AnalyticsDashboard = dynamic(
+  () => import("@/components/analytics/analytics-dashboard").then((m) => m.AnalyticsDashboard),
   { ssr: false },
 );
 
@@ -105,23 +116,34 @@ interface CameraConfig {
   name: string;
   rtspUrl: string;
   zoneId: string;
+  /** physical_zones.id this camera belongs to, persisted server-side (null = Unassigned). */
+  homeZoneId: number | null;
   active: boolean;
 }
 
 const DEFAULT_CAMERAS: CameraConfig[] = [
-  { id: 1, name: "Production Area", rtspUrl: "rtsp://127.0.0.1:8554/stream1", zoneId: "Z01", active: true },
-  { id: 2, name: "Warehouse Intake", rtspUrl: "rtsp://127.0.0.1:8554/stream2", zoneId: "Z02", active: false },
-  { id: 3, name: "Packing Area", rtspUrl: "rtsp://127.0.0.1:8554/stream3", zoneId: "Z03", active: false },
+  { id: 1, name: "Production Area", rtspUrl: "rtsp://127.0.0.1:8554/stream1", zoneId: "Z01", homeZoneId: null, active: true },
+  { id: 2, name: "Warehouse Intake", rtspUrl: "rtsp://127.0.0.1:8554/stream2", zoneId: "Z02", homeZoneId: null, active: false },
+  { id: 3, name: "Packing Area", rtspUrl: "rtsp://127.0.0.1:8554/stream3", zoneId: "Z03", homeZoneId: null, active: false },
 ];
 
 interface CameraPanelProps {
   cameras: CameraConfig[];
   activeCameraId: number;
+  physicalZones: PhysicalZone[];
   onCameraChange: (id: number) => void;
   onCamerasUpdate: (updated: CameraConfig[]) => void;
+  onPhysicalZonesUpdate: (updated: PhysicalZone[]) => void;
 }
 
-function CameraPanel({ cameras, activeCameraId, onCameraChange, onCamerasUpdate }: CameraPanelProps) {
+function CameraPanel({
+  cameras,
+  activeCameraId,
+  physicalZones,
+  onCameraChange,
+  onCamerasUpdate,
+  onPhysicalZonesUpdate,
+}: CameraPanelProps) {
   const [phase, setPhase] = useState<AnalysisPhase>("idle");
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
@@ -142,6 +164,26 @@ function CameraPanel({ cameras, activeCameraId, onCameraChange, onCamerasUpdate 
 
   const [isConfiguringCameras, setIsConfiguringCameras] = useState(false);
   const [tempCameras, setTempCameras] = useState<CameraConfig[]>([]);
+  const [creatingZoneForIdx, setCreatingZoneForIdx] = useState<number | null>(null);
+  const [newZoneName, setNewZoneName] = useState("");
+  const [newZoneError, setNewZoneError] = useState("");
+
+  const handleCreateZone = async (idx: number) => {
+    const name = newZoneName.trim();
+    if (!name) return;
+    try {
+      const zone = await createPhysicalZone(name);
+      onPhysicalZonesUpdate([...physicalZones, zone]);
+      const updated = [...tempCameras];
+      updated[idx] = { ...updated[idx], homeZoneId: zone.id };
+      setTempCameras(updated);
+      setCreatingZoneForIdx(null);
+      setNewZoneName("");
+      setNewZoneError("");
+    } catch (err) {
+      setNewZoneError(err instanceof Error ? err.message : "Could not create zone");
+    }
+  };
 
   const isVideo = upload.isVideo;
   const sourceKey = liveStream.isLive ? liveStream.liveUrl : upload.file?.name;
@@ -212,6 +254,23 @@ function CameraPanel({ cameras, activeCameraId, onCameraChange, onCamerasUpdate 
         void handleCameraChange(activeCameraId);
       }
     }
+
+    // Persist each camera's home-zone assignment server-side (source of truth
+    // for zone-bucketed analytics), keyed by source_key = rtspUrl. Cameras are
+    // also lazily created when their first incident lands, but we ensure one
+    // exists here so the zone assignment can be made before that happens.
+    void Promise.all(
+      updatedCameras.map(async (cam) => {
+        const backendCamera = await ensureCamera(cam.name, cam.rtspUrl);
+        await setCameraHomeZone(backendCamera.id, cam.homeZoneId);
+      }),
+    ).catch((err) => {
+      setError(
+        err instanceof Error
+          ? `Could not save camera zone assignment: ${err.message}`
+          : "Could not save camera zone assignment",
+      );
+    });
   };
 
   const initializedRef = useRef(false);
@@ -508,6 +567,68 @@ function CameraPanel({ cameras, activeCameraId, onCameraChange, onCamerasUpdate 
                     }}
                     className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white outline-none focus:border-slate-500"
                   />
+                  <label className="grid gap-1 text-[10px] text-slate-400">
+                    Home zone
+                    <select
+                      value={cam.homeZoneId ?? ""}
+                      onChange={(e) => {
+                        if (e.target.value === "__new__") {
+                          setCreatingZoneForIdx(idx);
+                          setNewZoneName("");
+                          setNewZoneError("");
+                          return;
+                        }
+                        const updated = [...tempCameras];
+                        updated[idx] = {
+                          ...updated[idx],
+                          homeZoneId: e.target.value === "" ? null : Number(e.target.value),
+                        };
+                        setTempCameras(updated);
+                      }}
+                      className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white outline-none focus:border-slate-500 cursor-pointer"
+                    >
+                      <option value="">Unassigned</option>
+                      {physicalZones.map((zone) => (
+                        <option key={zone.id} value={zone.id}>
+                          {zone.name}
+                        </option>
+                      ))}
+                      <option value="__new__">+ Create new zone…</option>
+                    </select>
+                  </label>
+                  {creatingZoneForIdx === idx && (
+                    <div className="grid gap-1.5 rounded border border-lime-700/50 bg-slate-950 p-2">
+                      <input
+                        type="text"
+                        autoFocus
+                        value={newZoneName}
+                        placeholder="New zone name"
+                        onChange={(e) => setNewZoneName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") void handleCreateZone(idx);
+                          if (e.key === "Escape") setCreatingZoneForIdx(null);
+                        }}
+                        className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-white outline-none focus:border-lime-500"
+                      />
+                      {newZoneError && <p className="text-[10px] text-red-400">{newZoneError}</p>}
+                      <div className="flex justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setCreatingZoneForIdx(null)}
+                          className="rounded px-2 py-1 text-[10px] font-semibold text-slate-400 hover:text-white transition cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleCreateZone(idx)}
+                          className="rounded bg-lime-600 hover:bg-lime-500 px-2 py-1 text-[10px] font-semibold text-white transition cursor-pointer"
+                        >
+                          Create &amp; assign
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -853,6 +974,10 @@ function IncidentPanel() {
   const [events, setEvents] = useState<(ViolationReport | ZoneViolation | BehaviorIncident)[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [selectedIncident, setSelectedIncident] = useState<{
+    category: IncidentCategory;
+    id: number;
+  } | null>(null);
 
   const loadEvents = useCallback(async () => {
     setLoading(true);
@@ -872,14 +997,15 @@ function IncidentPanel() {
   }, [loadEvents]);
 
   const deleteEvent = async (event: ViolationReport | ZoneViolation | BehaviorIncident) => {
-    if (!event.id || !confirm("Delete this incident?")) return;
-    if ("violation_type" in event) {
-      await deleteViolation(event.id);
-    } else if ("zone_type" in event) {
-      await deleteZoneViolation(event.id);
-    } else {
+    if (
+      !event.id ||
+      !confirm("Mark this incident as a false positive? This permanently deletes the record — this cannot be undone.")
+    ) {
       return;
     }
+    const category: IncidentCategory =
+      "violation_type" in event ? "ppe" : "behavior_type" in event ? "behavior" : "zone";
+    await deleteIncident(category, event.id);
     setEvents((current) => current.filter((item) => item.id !== event.id));
   };
 
@@ -933,22 +1059,56 @@ function IncidentPanel() {
           <IncidentCard
             key={`${event.id ?? index}-${event.timestamp}`}
             event={event}
-            onDelete={"behavior_type" in event ? undefined : () => void deleteEvent(event)}
+            onDelete={() => void deleteEvent(event)}
+            onOpenDetail={(category, id) => setSelectedIncident({ category, id })}
           />
         ))}
       </div>
+      {selectedIncident ? (
+        <IncidentDetailModal
+          key={`${selectedIncident.category}-${selectedIncident.id}`}
+          category={selectedIncident.category}
+          incidentId={selectedIncident.id}
+          onClose={() => setSelectedIncident(null)}
+          onDeleted={() =>
+            setEvents((current) => current.filter((item) => item.id !== selectedIncident.id))
+          }
+        />
+      ) : null}
     </section>
   );
 }
 
+const DASHBOARD_VIEWS: DashboardView[] = ["feeds", "violations", "factory3d", "analytics"];
+
 export function DashboardShell() {
-  const [activeView, setActiveView] = useState<DashboardView>("feeds");
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const [activeView, setActiveViewState] = useState<DashboardView>(() => {
+    const fromUrl = searchParams.get("view");
+    return DASHBOARD_VIEWS.includes(fromUrl as DashboardView) ? (fromUrl as DashboardView) : "feeds";
+  });
+  const setActiveView = useCallback(
+    (view: DashboardView) => {
+      setActiveViewState(view);
+      const params = new URLSearchParams(searchParams.toString());
+      if (view === "feeds") {
+        params.delete("view");
+      } else {
+        params.set("view", view);
+      }
+      const qs = params.toString();
+      router.replace(qs ? `/?${qs}` : "/", { scroll: false });
+    },
+    [router, searchParams],
+  );
   const [activeCameraId, setActiveCameraId] = useState<number>(1);
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
+  const [physicalZones, setPhysicalZones] = useState<PhysicalZone[]>([]);
 
   useEffect(() => {
     const stored = localStorage.getItem("ppe_demo_cameras");
-    let loaded = DEFAULT_CAMERAS;
+    let loaded: CameraConfig[] = DEFAULT_CAMERAS;
     if (stored) {
       try {
         loaded = JSON.parse(stored);
@@ -958,28 +1118,64 @@ export function DashboardShell() {
     } else {
       localStorage.setItem("ppe_demo_cameras", JSON.stringify(DEFAULT_CAMERAS));
     }
+    // Backfill homeZoneId for configs saved before this field existed.
+    loaded = loaded.map((c) => ({ ...c, homeZoneId: c.homeZoneId ?? null }));
     setCameras(loaded);
     const active = loaded.find((c) => c.active) || loaded[0];
     setActiveCameraId(active.id);
+
+    void getPhysicalZones().then(setPhysicalZones).catch(() => {});
+
+    // Reconcile home-zone assignment from the backend (source of truth), so
+    // it survives a reload even though the rest of the camera config is
+    // still cached in localStorage only.
+    void getCameras()
+      .then((backendCameras) => {
+        setCameras((prev) =>
+          prev.map((cam) => {
+            const match = backendCameras.find((bc) => bc.source_key === cam.rtspUrl);
+            return match ? { ...cam, homeZoneId: match.home_zone_id } : cam;
+          }),
+        );
+      })
+      .catch(() => {});
   }, []);
+  const cameraCountsByZone = useMemo(() => {
+    const counts: Record<number, number> = {};
+    for (const cam of cameras) {
+      if (cam.homeZoneId != null) {
+        counts[cam.homeZoneId] = (counts[cam.homeZoneId] ?? 0) + 1;
+      }
+    }
+    return counts;
+  }, [cameras]);
+
   const pageTitle =
     activeView === "violations"
       ? "Incident Log"
       : activeView === "factory3d"
         ? "Factory 3D Map"
-        : "Packaging Line 1";
+        : activeView === "analytics"
+          ? "Incident Analytics"
+          : "Packaging Line 1";
   const pageDescription =
     activeView === "violations"
       ? "Review PPE, zone, and behavior incidents recorded by the backend stores."
       : activeView === "factory3d"
         ? "Explore the factory blueprint in 3D and drill into a zone's incident log."
-        : "Upload a camera simulation file, choose which detection models are enabled, and review the model outputs in one place.";
+        : activeView === "analytics"
+          ? "Trends, zone comparisons, and live incident feed across all cameras."
+          : "Upload a camera simulation file, choose which detection models are enabled, and review the model outputs in one place.";
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-950">
       <TopBar activeView={activeView} onViewChange={setActiveView} />
       <div className="lg:flex">
-        <ZoneSidebar />
+        <ZoneSidebar
+          physicalZones={physicalZones}
+          cameraCounts={cameraCountsByZone}
+          onPhysicalZonesUpdate={setPhysicalZones}
+        />
         <main className="min-w-0 flex-1 p-3 lg:p-4">
           <div className="flex w-full flex-col gap-4">
             <section className="flex flex-col justify-between gap-4 rounded-md border border-slate-200 bg-white p-4 shadow-sm md:flex-row md:items-center">
@@ -1011,6 +1207,7 @@ export function DashboardShell() {
             <div className="grid items-start gap-4">
               <div className="grid h-fit gap-4">
                 {activeView === "violations" ? <IncidentPanel /> : null}
+                {activeView === "analytics" ? <AnalyticsDashboard embedded /> : null}
                 {activeView === "factory3d" ? (
                   <Factory3DView
                     cameras={cameras}
@@ -1027,8 +1224,10 @@ export function DashboardShell() {
                   <CameraPanel
                     cameras={cameras}
                     activeCameraId={activeCameraId}
+                    physicalZones={physicalZones}
                     onCameraChange={setActiveCameraId}
                     onCamerasUpdate={setCameras}
+                    onPhysicalZonesUpdate={setPhysicalZones}
                   />
                 </div>
               </div>

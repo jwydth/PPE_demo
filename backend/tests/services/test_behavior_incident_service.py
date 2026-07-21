@@ -127,3 +127,38 @@ def test_behavior_service_persists_fall_bundle_and_resolves_camera(session, tmp_
     assert service.delete_all_behavior_incidents() == 1
     assert storage.deleted == ["behavior-incidents/2026/07/06/fall.jpg"]
     assert service.list_recent(limit=10) == []
+
+
+def test_behavior_service_delete_incident_removes_row_and_cascades(session, tmp_path):
+    snapshot = tmp_path / "fall.jpg"
+    snapshot.write_bytes(b"fake jpeg")
+    storage = _FakeStorage()
+    repository = BehaviorIncidentRepository(session)
+    service = BehaviorIncidentService(
+        repository,
+        storage,
+        CameraRepository(session),
+        FactoryRepository(session),
+    )
+
+    bundle = service.persist_fall_incident(
+        timestamp=NOW,
+        details="Track 7 fall detected at frame 5",
+        local_snapshot_path=snapshot,
+        video_name="factory-line.mp4",
+        frame_start=5,
+        frame_end=5,
+        track_id=7,
+        person_index=0,
+        bounding_box={"x1": 1, "y1": 2, "x2": 3, "y2": 4},
+        confidence=0.75,
+        keypoints=None,
+        features=None,
+    )
+    incident_id = bundle.incident.id
+
+    assert service.delete_incident(incident_id) is True
+    assert service.delete_incident(incident_id) is False
+    assert repository.get_subjects(incident_id) == []
+    assert repository.get_evidence(incident_id) == []
+    assert service.list_recent(limit=10) == []

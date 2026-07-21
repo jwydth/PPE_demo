@@ -8,7 +8,8 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from PIL import Image
 
 from app.schemas.detection import DetectionResponse, VideoProcessingResponse
-from app.schemas.violation import ViolationReport
+from app.schemas.violation import ViolationDetail, ViolationReport
+from app.services import ServiceNotFoundError
 from app.services.ppe_detector import PPEDetector
 from app.services.ppe_violation_service import (
     PPEViolationService,
@@ -145,6 +146,21 @@ async def violations(
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[ViolationReport]:
     return service.get_recent_violations(limit=limit)
+
+@router.get("/violations/{violation_id}", response_model=ViolationDetail)
+async def get_violation_detail(
+    violation_id: int,
+    service: Annotated[
+        PPEViolationService,
+        Depends(get_ppe_violation_service),
+    ],
+) -> ViolationDetail:
+    """PPE violation detail, including per-subject bbox/missing_equipment/confidence."""
+    try:
+        return service.get_violation_detail(violation_id)
+    except ServiceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
 
 @router.delete("/violations")
 async def delete_all_incidents(

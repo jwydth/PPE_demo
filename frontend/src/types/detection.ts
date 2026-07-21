@@ -60,6 +60,19 @@ export interface ViolationReport {
   track_id?: number;
 }
 
+export interface PPEViolationSubject {
+  id: number;
+  track_id?: number | null;
+  person_index?: number | null;
+  missing_equipment: string[];
+  bounding_box?: BoundingBox | null;
+  confidence?: number | null;
+}
+
+export interface ViolationDetail extends ViolationReport {
+  subjects: PPEViolationSubject[];
+}
+
 export interface VideoSummary {
   video_name: string;
   total_frames: number;

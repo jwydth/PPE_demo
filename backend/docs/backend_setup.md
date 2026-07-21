@@ -27,5 +27,5 @@ cd C:\path\to\PPE_demo\backend
 .\.venv\Scripts\Activate.ps1
 python -m app.db.init_db
 python scripts/check_gpu_runtime.py
-python -m uvicorn app.main:app --reload --port 8000
+python -m uvicorn app.main:app --reload --reload-dir app --port 8000
 ```

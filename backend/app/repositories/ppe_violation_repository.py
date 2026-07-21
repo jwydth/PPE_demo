@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Annotated, TypeVar
 
 from fastapi import Depends
@@ -55,6 +56,28 @@ class PPEViolationRepository:
         except SQLAlchemyError as exc:
             self.session.rollback()
             raise RepositoryError("Could not list recent PPE violations.") from exc
+
+    def list_between(
+        self,
+        *,
+        date_from: datetime | None,
+        date_to: datetime | None,
+        limit: int,
+    ) -> list[PPEViolation]:
+        try:
+            statement = select(PPEViolation)
+            if date_from is not None:
+                statement = statement.where(PPEViolation.occurred_at >= date_from)
+            if date_to is not None:
+                statement = statement.where(PPEViolation.occurred_at <= date_to)
+            statement = statement.order_by(
+                PPEViolation.occurred_at.desc(),
+                PPEViolation.id.desc(),
+            ).limit(limit)
+            return list(self.session.exec(statement).all())
+        except SQLAlchemyError as exc:
+            self.session.rollback()
+            raise RepositoryError("Could not list PPE violations by date range.") from exc
 
     def create_subject(self, subject: PPEViolationSubject) -> PPEViolationSubject:
         self.session.add(subject)

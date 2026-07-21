@@ -1,10 +1,20 @@
 import {
   DetectionResponse,
   VideoProcessingResponse,
+  ViolationDetail,
   ViolationReport,
 } from "@/types/detection";
+import {
+  AnalyticsCompare,
+  AnalyticsRangeParam,
+  AnalyticsSummary,
+  AnalyticsTrend,
+  CompareMode,
+  UnifiedIncident,
+} from "@/types/analytics";
 import { BehaviorIncident } from "@/types/behavior";
-import { ZoneConfiguration, ZoneViolation } from "@/types/zone";
+import { Camera } from "@/types/camera";
+import { PhysicalZone, ZoneConfiguration, ZoneViolation } from "@/types/zone";
 
 export const API_URL =
   process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? "http://127.0.0.1:8000";
@@ -87,6 +97,14 @@ export async function getViolations(): Promise<ViolationReport[]> {
   }));
 }
 
+export async function getViolation(violationId: number): Promise<ViolationDetail> {
+  const res = await fetch(`${API_URL}/violations/${violationId}`);
+  if (!res.ok) throw await readError(res, "Could not load violation detail");
+
+  const detail = (await res.json()) as ViolationDetail;
+  return { ...detail, snapshot_url: toAbsoluteUrl(detail.snapshot_url) };
+}
+
 export async function getZoneViolations(): Promise<ZoneViolation[]> {
   const res = await fetch(`${API_URL}/zone-violations`);
   if (!res.ok) throw await readError(res, "Could not load zone violations");
@@ -96,6 +114,14 @@ export async function getZoneViolations(): Promise<ZoneViolation[]> {
     ...violation,
     snapshot_path: toAbsoluteUrl(violation.snapshot_path),
   }));
+}
+
+export async function getZoneViolation(zoneViolationId: number): Promise<ZoneViolation> {
+  const res = await fetch(`${API_URL}/zone-violations/${zoneViolationId}`);
+  if (!res.ok) throw await readError(res, "Could not load zone violation detail");
+
+  const violation = (await res.json()) as ZoneViolation;
+  return { ...violation, snapshot_path: toAbsoluteUrl(violation.snapshot_path) };
 }
 
 export async function getBehaviorIncidents(): Promise<BehaviorIncident[]> {
@@ -111,6 +137,21 @@ export async function getBehaviorIncidents(): Promise<BehaviorIncident[]> {
       file_url: toAbsoluteUrl(item.file_url ?? undefined),
     })),
   }));
+}
+
+export async function getBehaviorIncident(incidentId: number): Promise<BehaviorIncident> {
+  const res = await fetch(`${API_URL}/behavior-incidents/${incidentId}`);
+  if (!res.ok) throw await readError(res, "Could not load behavior incident detail");
+
+  const incident = (await res.json()) as BehaviorIncident;
+  return {
+    ...incident,
+    snapshot_url: toAbsoluteUrl(incident.snapshot_url ?? undefined),
+    evidence: incident.evidence.map((item) => ({
+      ...item,
+      file_url: toAbsoluteUrl(item.file_url ?? undefined),
+    })),
+  };
 }
 
 export async function getSafetyEvents(): Promise<(ViolationReport | ZoneViolation | BehaviorIncident)[]> {
@@ -153,6 +194,27 @@ export async function deleteZoneViolation(
   return res.json();
 }
 
+export async function deleteBehaviorIncident(
+  incidentId: number,
+): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_URL}/behavior-incidents/${incidentId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw await readError(res, "Could not delete behavior incident");
+  return res.json();
+}
+
+export type IncidentCategory = "ppe" | "zone" | "behavior";
+
+export async function deleteIncident(
+  category: IncidentCategory,
+  id: number,
+): Promise<{ success: boolean }> {
+  if (category === "ppe") return deleteViolation(id);
+  if (category === "zone") return deleteZoneViolation(id);
+  return deleteBehaviorIncident(id);
+}
+
 export async function getZones(videoName: string): Promise<ZoneConfiguration[]> {
   // video_name is a query param so source keys with slashes (RTSP URLs) work.
   const res = await fetch(`${API_URL}/zones?video_name=${encodeURIComponent(videoName)}`);
@@ -175,5 +237,102 @@ export async function saveZone(zone: ZoneConfiguration): Promise<ZoneConfigurati
     body: JSON.stringify(zone),
   });
   if (!res.ok) throw await readError(res, "Could not save zone");
+  return res.json();
+}
+
+export async function getAnalyticsSummary(
+  range: AnalyticsRangeParam,
+  zoneId: number | null,
+): Promise<AnalyticsSummary> {
+  const params = new URLSearchParams({ range });
+  if (zoneId != null) params.set("zone_id", String(zoneId));
+  const res = await fetch(`${API_URL}/analytics/summary?${params}`);
+  if (!res.ok) throw await readError(res, "Could not load analytics summary");
+  return res.json();
+}
+
+export async function getAnalyticsTrend(
+  range: AnalyticsRangeParam,
+  zoneId: number | null,
+): Promise<AnalyticsTrend> {
+  const params = new URLSearchParams({ range });
+  if (zoneId != null) params.set("zone_id", String(zoneId));
+  const res = await fetch(`${API_URL}/analytics/trend?${params}`);
+  if (!res.ok) throw await readError(res, "Could not load analytics trend");
+  return res.json();
+}
+
+export async function getAnalyticsCompare(
+  mode: CompareMode,
+  zoneId: number | null,
+): Promise<AnalyticsCompare> {
+  const params = new URLSearchParams({ mode });
+  if (zoneId != null) params.set("zone_id", String(zoneId));
+  const res = await fetch(`${API_URL}/analytics/compare?${params}`);
+  if (!res.ok) throw await readError(res, "Could not load analytics comparison");
+  return res.json();
+}
+
+export async function getUnifiedIncidents(
+  limit: number,
+  zoneId: number | null,
+): Promise<UnifiedIncident[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (zoneId != null) params.set("zone_id", String(zoneId));
+  const res = await fetch(`${API_URL}/analytics/incidents?${params}`);
+  if (!res.ok) throw await readError(res, "Could not load incident feed");
+  const incidents = (await res.json()) as UnifiedIncident[];
+  return incidents.map((i) => ({ ...i, snapshot_url: toAbsoluteUrl(i.snapshot_url ?? undefined) ?? null }));
+}
+
+export async function getPhysicalZones(): Promise<PhysicalZone[]> {
+  const res = await fetch(`${API_URL}/physical-zones`);
+  if (!res.ok) throw await readError(res, "Could not load physical zones");
+  return res.json();
+}
+
+export async function createPhysicalZone(name: string): Promise<PhysicalZone> {
+  const res = await fetch(`${API_URL}/physical-zones`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) throw await readError(res, "Could not create zone");
+  return res.json();
+}
+
+export async function deletePhysicalZone(zoneId: number): Promise<void> {
+  const res = await fetch(`${API_URL}/physical-zones/${zoneId}`, { method: "DELETE" });
+  if (!res.ok) throw await readError(res, "Could not delete zone");
+}
+
+export async function getCameras(): Promise<Camera[]> {
+  const res = await fetch(`${API_URL}/cameras`);
+  if (!res.ok) throw await readError(res, "Could not load cameras");
+  return res.json();
+}
+
+// Idempotent get-or-create, keyed by source_key. Lets the frontend bind a
+// configured stream to a backend camera before any incident has occurred on it.
+export async function ensureCamera(name: string, sourceKey: string): Promise<Camera> {
+  const res = await fetch(`${API_URL}/cameras`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, source_key: sourceKey }),
+  });
+  if (!res.ok) throw await readError(res, "Could not register camera");
+  return res.json();
+}
+
+export async function setCameraHomeZone(
+  cameraId: number,
+  zoneId: number | null,
+): Promise<Camera> {
+  const res = await fetch(`${API_URL}/cameras/${cameraId}/home-zone`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ zone_id: zoneId }),
+  });
+  if (!res.ok) throw await readError(res, "Could not set camera home zone");
   return res.json();
 }

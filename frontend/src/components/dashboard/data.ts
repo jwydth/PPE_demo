@@ -1,4 +1,5 @@
 import {
+  BarChart3,
   Bell,
   Boxes,
   Camera,
@@ -13,12 +14,6 @@ import {
   Video,
   type LucideIcon,
 } from "lucide-react";
-
-export type Zone = {
-  name: string;
-  cameraCount: number;
-  status: "online" | "warning" | "standby";
-};
 
 export type SafetyMetric = {
   label: string;
@@ -35,14 +30,6 @@ export type Incident = {
   time: string;
   severity: "low" | "medium" | "high";
 };
-
-export const zones: Zone[] = [
-  { name: "Warehouse Intake", cameraCount: 8, status: "online" },
-  { name: "Packaging Line 1", cameraCount: 12, status: "online" },
-  { name: "Production Floor", cameraCount: 16, status: "warning" },
-  { name: "Forklift Loading Zone", cameraCount: 10, status: "online" },
-  { name: "Gate 3", cameraCount: 6, status: "standby" },
-];
 
 export const safetyMetrics: SafetyMetric[] = [
   {
@@ -111,6 +98,7 @@ export const navigation = [
   { label: "Camera Feeds", active: true, icon: Camera },
   { label: "Incident Log", active: false, icon: ClipboardCheck },
   { label: "3D Map", active: false, icon: Boxes },
+  { label: "Analytics", active: false, icon: BarChart3 },
 ];
 
 export const appActions = [

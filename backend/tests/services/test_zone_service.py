@@ -178,6 +178,30 @@ def test_zone_service_reads_updates_and_deletes():
     assert service.update_zone(5, _zone_schema()).id == 5
     assert service.delete_zone(5) is True
 
+
+def test_zone_service_lists_physical_zones_for_default_factory():
+    physical_zone_repository = Mock()
+    camera_zone_view_repository = Mock()
+    camera_repository = Mock()
+    factory_repository = Mock()
+    factory_repository.get_or_create_default_factory.return_value = Factory(
+        id=1,
+        name="Default Factory",
+    )
+    zone = _physical_zone_model()
+    physical_zone_repository.get_by_factory.return_value = [zone]
+    service = ZoneService(
+        physical_zone_repository,
+        camera_zone_view_repository,
+        camera_repository,
+        factory_repository,
+    )
+
+    zones = service.list_physical_zones()
+
+    assert zones == [zone]
+    physical_zone_repository.get_by_factory.assert_called_once_with(1)
+
     camera_zone_view_repository.get_by_id.return_value = None
     with pytest.raises(ServiceNotFoundError):
         service.delete_zone(99)

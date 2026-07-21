@@ -12,3 +12,6 @@ backend/.venv
 backend/venv
 video_debug.log
 videos/*
+be_log.txt
+auto.key
+auto.crt

@@ -41,3 +41,22 @@ def test_zone_violation_repository_create_read_and_recent(session):
     assert repository.delete(middle.id) is False
     assert repository.delete_all() == 2
     assert repository.list_all() == []
+
+
+def test_zone_violation_repository_list_between(session):
+    repository = ZoneViolationRepository(session)
+    now = datetime.now(timezone.utc)
+
+    oldest = repository.create(_violation(now - timedelta(minutes=2), 10))
+    middle = repository.create(_violation(now - timedelta(minutes=1), 20))
+    newest = repository.create(_violation(now, 30))
+
+    assert repository.list_between(date_from=None, date_to=None, limit=10) == [
+        newest,
+        middle,
+        oldest,
+    ]
+    assert repository.list_between(
+        date_from=now - timedelta(minutes=1), date_to=None, limit=10
+    ) == [newest, middle]
+    assert repository.list_between(date_from=None, date_to=None, limit=1) == [newest]

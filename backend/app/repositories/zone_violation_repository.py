@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import Depends
@@ -53,6 +54,28 @@ class ZoneViolationRepository:
         except SQLAlchemyError as exc:
             self.session.rollback()
             raise RepositoryError("Could not list recent zone violations.") from exc
+
+    def list_between(
+        self,
+        *,
+        date_from: datetime | None,
+        date_to: datetime | None,
+        limit: int,
+    ) -> list[ZoneViolation]:
+        try:
+            statement = select(ZoneViolation)
+            if date_from is not None:
+                statement = statement.where(ZoneViolation.occurred_at >= date_from)
+            if date_to is not None:
+                statement = statement.where(ZoneViolation.occurred_at <= date_to)
+            statement = statement.order_by(
+                ZoneViolation.occurred_at.desc(),
+                ZoneViolation.id.desc(),
+            ).limit(limit)
+            return list(self.session.exec(statement).all())
+        except SQLAlchemyError as exc:
+            self.session.rollback()
+            raise RepositoryError("Could not list zone violations by date range.") from exc
 
     def delete(self, violation_id: int) -> bool:
         violation = self.get_by_id(violation_id)

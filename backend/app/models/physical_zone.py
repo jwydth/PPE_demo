@@ -6,6 +6,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, Relationship, SQLModel
 
 if TYPE_CHECKING:
+    from app.models.camera import Camera
     from app.models.camera_zone_view import CameraZoneView
     from app.models.factory import Factory
 
@@ -64,3 +65,4 @@ class PhysicalZone(SQLModel, table=True):
         cascade_delete=True,
         passive_deletes=True,
     )
+    cameras: list["Camera"] = Relationship(back_populates="home_zone")
