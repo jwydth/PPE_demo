@@ -162,6 +162,33 @@ def test_camera_service_get_or_create_camera_creates_when_missing():
     assert result.id == 1
 
 
+def test_camera_service_delete_camera():
+    repository = Mock()
+    repository.delete.return_value = True
+    service = CameraService(repository, Mock(), Mock())
+
+    service.delete_camera(1)
+    repository.delete.assert_called_once_with(1)
+
+    repository.delete.return_value = False
+    with pytest.raises(ServiceNotFoundError):
+        service.delete_camera(999)
+
+
+def test_camera_service_get_or_create_camera_updates_name_if_different():
+    repository = Mock()
+    existing_camera = _camera()
+    repository.get_by_source_key.return_value = existing_camera
+    repository.update.side_effect = lambda camera: camera
+    service = CameraService(repository, Mock(), Mock())
+
+    result = service.get_or_create_camera(name="New Name", source_key="warehouse.mp4")
+
+    assert existing_camera.name == "New Name"
+    assert result.name == "New Name"
+    repository.update.assert_called_once_with(existing_camera)
+
+
 def _persist_camera(camera: Camera) -> Camera:
     camera.id = 1
     return camera

@@ -336,3 +336,11 @@ export async function setCameraHomeZone(
   if (!res.ok) throw await readError(res, "Could not set camera home zone");
   return res.json();
 }
+
+export async function deleteCamera(cameraId: number): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_URL}/cameras/${cameraId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw await readError(res, "Could not delete camera");
+  return res.json();
+}

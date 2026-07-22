@@ -98,3 +98,19 @@ def test_camera_repository_set_home_zone(session):
     assert cleared.home_zone_id is None
 
     assert repository.set_home_zone(999_999, zone.id) is None
+
+
+def test_camera_repository_delete(session):
+    repository = CameraRepository(session)
+    factory_id = _factory_id(session)
+    camera = repository.create(
+        Camera(
+            factory_id=factory_id,
+            name="Loading Bay",
+            source_key="loading-bay.mp4",
+        )
+    )
+
+    assert repository.delete(camera.id) is True
+    assert repository.get_by_id(camera.id) is None
+    assert repository.delete(999_999) is False
