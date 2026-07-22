@@ -35,6 +35,7 @@ import {
 import { IncidentDetailModal, type IncidentCategory } from "@/components/dashboard/incident-detail-modal";
 import { MetricCard } from "@/components/dashboard/metric-card";
 import type { SafetyMetric } from "@/components/dashboard/data";
+import { CONFIRM_DELETE_INCIDENT } from "@/lib/messages";
 import {
   deleteIncident,
   getAnalyticsCompare,
@@ -296,7 +297,7 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
       label: "PPE Compliance",
       value: "—",
       helper: "No compliance data source yet",
-      trend: "TODO: not tracked",
+      trend: "Not yet tracked",
       icon: HardHat,
       tone: "slate",
     },
@@ -320,7 +321,7 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
       label: "People On Shift",
       value: "—",
       helper: "No occupancy data source yet",
-      trend: "TODO: not tracked",
+      trend: "Not yet tracked",
       icon: Users,
       tone: "slate",
     },
@@ -366,11 +367,7 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
   const maxZoneComparisonTotal = Math.max(...comparisonData.map((z) => z.total), 1);
 
   const handleDeleteFromFeed = async (item: UnifiedIncident) => {
-    if (
-      !confirm(
-        "Mark this incident as a false positive? This permanently deletes the record — this cannot be undone.",
-      )
-    ) {
+    if (!confirm(CONFIRM_DELETE_INCIDENT)) {
       return;
     }
     await deleteIncident(item.category, item.id);
@@ -497,8 +494,8 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
 
           <div className="mb-5 grid grid-cols-1 gap-4 xl:grid-cols-3">
             <div className={`${panel} p-4 xl:col-span-2`}>
-              <h3 className="text-sm font-semibold text-slate-950">Zone Pulse</h3>
-              <p className="text-xs text-slate-500">Incident volume by camera zone — click a zone to filter</p>
+              <h3 className="text-sm font-semibold text-slate-950">Incidents by zone</h3>
+              <p className="text-xs text-slate-500">Total incident volume per camera zone</p>
               <div style={{ height: 340 }} className="mt-2">
                 <svg viewBox="0 0 400 400" style={{ width: "100%", height: "100%" }}>
                   {nodePositions.map((z) => (

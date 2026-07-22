@@ -37,6 +37,7 @@ import {
   PeopleResults,
 } from "@/components/ppe/result-panels";
 import { doPolygonsOverlap } from "@/lib/spatial-utils";
+import { CONFIRM_DELETE_ALL_INCIDENTS, CONFIRM_DELETE_INCIDENT } from "@/lib/messages";
 import { TrackingOverlay, ViolationReport } from "@/types/detection";
 import { PhysicalZone, ZoneType, ZoneViolation } from "@/types/zone";
 import { useDetectionUpload } from "@/hooks/useDetectionUpload";
@@ -997,10 +998,7 @@ function IncidentPanel() {
   }, [loadEvents]);
 
   const deleteEvent = async (event: ViolationReport | ZoneViolation | BehaviorIncident) => {
-    if (
-      !event.id ||
-      !confirm("Mark this incident as a false positive? This permanently deletes the record — this cannot be undone.")
-    ) {
+    if (!event.id || !confirm(CONFIRM_DELETE_INCIDENT)) {
       return;
     }
     const category: IncidentCategory =
@@ -1010,7 +1008,7 @@ function IncidentPanel() {
   };
 
   const deleteAllEvents = async () => {
-    if (!confirm("Are you sure you want to delete all logged incidents? This action cannot be undone.")) return;
+    if (!confirm(CONFIRM_DELETE_ALL_INCIDENTS)) return;
     setLoading(true);
     setError("");
     try {
@@ -1088,9 +1086,14 @@ export function DashboardShell() {
     const fromUrl = searchParams.get("view");
     return DASHBOARD_VIEWS.includes(fromUrl as DashboardView) ? (fromUrl as DashboardView) : "feeds";
   });
+  // Mount once on first visit, then keep mounted (only hidden) so switching
+  // back to this tab doesn't re-fetch the summary/trend/compare/feed from
+  // scratch every time — same reasoning as CameraPanel below.
+  const [analyticsMounted, setAnalyticsMounted] = useState(() => searchParams.get("view") === "analytics");
   const setActiveView = useCallback(
     (view: DashboardView) => {
       setActiveViewState(view);
+      if (view === "analytics") setAnalyticsMounted(true);
       const params = new URLSearchParams(searchParams.toString());
       if (view === "feeds") {
         params.delete("view");
@@ -1207,7 +1210,13 @@ export function DashboardShell() {
             <div className="grid items-start gap-4">
               <div className="grid h-fit gap-4">
                 {activeView === "violations" ? <IncidentPanel /> : null}
-                {activeView === "analytics" ? <AnalyticsDashboard embedded /> : null}
+                {/* Stays mounted (only hidden) once visited so its polling keeps the
+                    data warm and switching back doesn't refetch from scratch. */}
+                {analyticsMounted ? (
+                  <div className={activeView === "analytics" ? "grid gap-4" : "hidden"}>
+                    <AnalyticsDashboard embedded />
+                  </div>
+                ) : null}
                 {activeView === "factory3d" ? (
                   <Factory3DView
                     cameras={cameras}

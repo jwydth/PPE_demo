@@ -2,6 +2,7 @@
 
 import { Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
+import { CONFIRM_DELETE_INCIDENT } from "@/lib/messages";
 import {
   deleteIncident,
   getBehaviorIncident,
@@ -65,11 +66,7 @@ export function IncidentDetailModal({
   }, [category, incidentId]);
 
   const handleDelete = async () => {
-    if (
-      !confirm(
-        "Mark this incident as a false positive? This permanently deletes the record — this cannot be undone.",
-      )
-    ) {
+    if (!confirm(CONFIRM_DELETE_INCIDENT)) {
       return;
     }
     setDeleting(true);

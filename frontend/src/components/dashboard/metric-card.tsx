@@ -20,7 +20,11 @@ export function MetricCard({ metric }: { metric: SafetyMetric }) {
         </div>
       </div>
       <p className="mt-2 text-sm text-slate-600">{metric.helper}</p>
-      <p className="mt-1 text-xs font-semibold uppercase tracking-wide text-emerald-700">
+      <p
+        className={`mt-1 text-xs font-semibold uppercase tracking-wide ${
+          metric.tone === "slate" ? "text-slate-400" : "text-emerald-700"
+        }`}
+      >
         {metric.trend}
       </p>
     </section>

@@ -13,8 +13,6 @@ export interface ZoneAggregate {
   ppeCount: number;
   zoneCount: number;
   fallCount: number;
-  /** single derived sentence, rule-based from the aggregate counts */
-  insight: string;
   /** incident count in the most recent 24h minus the previous 24h */
   trendDelta: number;
   incidents: AnyIncident[];
@@ -78,40 +76,6 @@ function resolveZoneId(
   return assignUnmatchedToActiveZone ? zones.find((z) => z.active)?.id ?? null : null;
 }
 
-function mostCommonViolationType(incidents: ViolationReport[]): string | null {
-  const counts = new Map<string, number>();
-  for (const incident of incidents) {
-    counts.set(incident.violation_type, (counts.get(incident.violation_type) ?? 0) + 1);
-  }
-  let top: string | null = null;
-  let topCount = 0;
-  for (const [type, count] of counts) {
-    if (count > topCount) {
-      top = type;
-      topCount = count;
-    }
-  }
-  return top;
-}
-
-function buildInsight(
-  ppeIncidents: ViolationReport[],
-  zoneCount: number,
-  fallCount: number,
-): string {
-  const total = ppeIncidents.length + zoneCount + fallCount;
-  if (total === 0) return "No incidents recorded.";
-  if (fallCount > 0) {
-    return `${fallCount} fall event${fallCount === 1 ? "" : "s"} detected — highest-severity behavior this period.`;
-  }
-  if (ppeIncidents.length >= zoneCount) {
-    const topType = mostCommonViolationType(ppeIncidents);
-    const label = topType ? topType.replaceAll("_", " ") : "PPE gear";
-    return `${ppeIncidents.length} PPE violation${ppeIncidents.length === 1 ? "" : "s"} dominate; most common: ${label}.`;
-  }
-  return `${zoneCount} zone incursion${zoneCount === 1 ? "" : "s"}, mostly around the restricted area.`;
-}
-
 function computeAggregate(zoneId: ZoneId, incidents: AnyIncident[]): ZoneAggregate {
   const ppeIncidents = incidents.filter(isPpeIncident);
   const zoneIncidents = incidents.filter(isZoneViolation);
@@ -133,7 +97,6 @@ function computeAggregate(zoneId: ZoneId, incidents: AnyIncident[]): ZoneAggrega
     ppeCount: ppeIncidents.length,
     zoneCount: zoneIncidents.length,
     fallCount: fallIncidents.length,
-    insight: buildInsight(ppeIncidents, zoneIncidents.length, fallIncidents.length),
     trendDelta: recent - previous,
     incidents,
   };

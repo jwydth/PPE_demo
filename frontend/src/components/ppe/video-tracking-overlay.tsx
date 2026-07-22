@@ -1,9 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Check, Signpost, X } from "lucide-react";
 import { TrackingOverlay, TrackingOverlayFrame } from "@/types/detection";
 import { FallLiveDetection } from "@/types/behavior";
 import { PPESuggestion, ZoneSuggestion } from "@/types/zone";
+import { countLabel } from "@/lib/format";
+import { ChipActionButton, DetectionChip } from "@/components/ppe/detection-chip";
 
 export function TrackingOverlayLayer({
   overlay,
@@ -34,7 +37,7 @@ export function TrackingOverlayLayer({
         </svg>
       ) : null}
       <div className="pointer-events-none absolute left-3 top-3 rounded bg-black/65 px-2 py-1 text-xs font-semibold text-white ring-1 ring-white/10">
-        Tracking {currentBoxes.length} worker{currentBoxes.length === 1 ? "" : "s"}
+        Tracking {countLabel(currentBoxes.length, "worker")}
       </div>
     </>
   );
@@ -103,7 +106,7 @@ export function VideoTrackingOverlay({
 
       {overlay ? (
         <div className="pointer-events-none absolute left-3 top-3 rounded bg-black/65 px-2 py-1 text-xs font-semibold text-white ring-1 ring-white/10">
-          Tracking {currentBoxes.length} worker{currentBoxes.length === 1 ? "" : "s"}
+          Tracking {countLabel(currentBoxes.length, "worker")}
         </div>
       ) : null}
     </div>
@@ -521,8 +524,8 @@ export function SuggestionOverlayLayer({
             <path
               key={s.suggestion_id}
               d={d}
-              fill="rgba(251,146,60,0.15)"
-              stroke="#f97316"
+              fill="rgba(56,189,248,0.15)"
+              stroke="#38bdf8"
               strokeWidth={0.005}
               strokeDasharray="0.02 0.01"
             />
@@ -547,41 +550,30 @@ export function SuggestionOverlayLayer({
         return (
           <div
             key={s.suggestion_id}
-            className="pointer-events-auto absolute"
+            className="absolute w-48"
             style={{
               left: `${centerX * 100}%`,
               top: `${anchorY * 100}%`,
               transform: `translate(-50%, ${translateY})`,
             }}
           >
-            <div className="flex flex-col items-center gap-1 rounded-md border border-orange-400 bg-slate-950/90 px-2 py-1.5 text-xs shadow-lg">
-              <span className="whitespace-nowrap font-semibold text-orange-300">
-                ⚠ Suggested: {humanName}
-              </span>
+            <DetectionChip
+              icon={Signpost}
+              title={`${humanName} sign detected`}
+              actions={[
+                { label: "Add zone", icon: Check, onClick: () => onAccept(s, editableName), primary: true },
+                { label: "Dismiss", icon: X, onClick: () => onDismiss(s) },
+              ]}
+            >
               <input
                 value={editableName}
                 onChange={(e) =>
                   setEditableNames((prev) => ({ ...prev, [s.suggestion_id]: e.target.value }))
                 }
-                className="w-full rounded border border-slate-700 bg-slate-900 px-1.5 py-0.5 text-[10px] text-white outline-none focus:border-orange-400"
+                aria-label="Zone name"
+                className="w-full rounded border border-slate-700 bg-slate-900 px-1.5 py-1 text-[11px] text-white outline-none focus-visible:border-sky-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-sky-400"
               />
-              <div className="flex gap-1">
-                <button
-                  type="button"
-                  onClick={() => onAccept(s, editableName)}
-                  className="rounded bg-orange-500 px-2 py-0.5 text-[10px] font-bold text-white hover:bg-orange-400"
-                >
-                  Accept ✓
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onDismiss(s)}
-                  className="rounded border border-slate-600 px-2 py-0.5 text-[10px] font-bold text-slate-300 hover:bg-white/10"
-                >
-                  Dismiss ✕
-                </button>
-              </div>
-            </div>
+            </DetectionChip>
           </div>
         );
       })}
@@ -615,8 +607,8 @@ export function PPESuggestionBanner({
               x={x1} y={y1}
               width={x2 - x1}
               height={y2 - y1}
-              fill="rgba(250,204,21,0.12)"
-              stroke="#facc15"
+              fill="rgba(56,189,248,0.12)"
+              stroke="#38bdf8"
               strokeWidth={0.004}
               strokeDasharray="0.015 0.008"
             />
@@ -624,32 +616,24 @@ export function PPESuggestionBanner({
         })}
       </svg>
 
-      <div className="pointer-events-auto absolute left-0 right-0 top-0 flex flex-col gap-1 p-2">
+      <div className="pointer-events-none absolute left-0 right-0 top-0 flex flex-col gap-1.5 p-2">
         {suggestions.map((s) => {
           const humanName = SIGN_HUMAN_NAMES[s.source_class] ?? s.source_class;
           return (
             <div
               key={s.suggestion_id}
-              className="flex items-center justify-between gap-2 rounded-md border border-yellow-400/60 bg-slate-950/90 px-3 py-2 text-xs shadow-lg"
+              className="detection-chip-enter pointer-events-auto flex flex-wrap items-center justify-between gap-2 rounded-md border border-sky-400/50 bg-slate-950/95 px-3 py-2 text-xs shadow-lg shadow-black/40"
             >
-              <span className="font-semibold text-yellow-300">
-                ⚠ Sign detected: <span className="text-white">{humanName}</span> — PPE monitoring required
+              <span className="flex items-center gap-1.5">
+                <Signpost className="size-3.5 shrink-0 text-sky-300" aria-hidden="true" />
+                <span className="font-semibold text-white">{humanName} sign detected</span>
+                <span className="text-slate-400">PPE Detection is off</span>
               </span>
               <div className="flex shrink-0 gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => onEnable(s)}
-                  className="rounded bg-yellow-400 px-2 py-1 text-[10px] font-bold text-slate-950 hover:bg-yellow-300"
-                >
-                  Enable PPE ✓
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onDismiss(s)}
-                  className="rounded border border-slate-600 px-2 py-1 text-[10px] font-bold text-slate-300 hover:bg-white/10"
-                >
-                  Dismiss ✕
-                </button>
+                <ChipActionButton
+                  action={{ label: "Enable PPE Detection", icon: Check, onClick: () => onEnable(s), primary: true }}
+                />
+                <ChipActionButton action={{ label: "Dismiss", icon: X, onClick: () => onDismiss(s) }} />
               </div>
             </div>
           );

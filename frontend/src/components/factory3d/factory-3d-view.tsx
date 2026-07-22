@@ -201,7 +201,6 @@ export function Factory3DView({ cameras = [], activeCameraId, onSelectActiveCame
                     ppeCount: 0,
                     zoneCount: 0,
                     fallCount: 0,
-                    insight: "No incidents recorded.",
                     trendDelta: 0,
                     incidents: [],
                   }

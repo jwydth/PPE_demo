@@ -1,8 +1,18 @@
-import { Check, Loader2, Pause, Play } from "lucide-react";
+import { Check, Loader2, Pause, PenLine, Play } from "lucide-react";
 import { useZoneDrawing } from "@/hooks/useZoneDrawing";
 import { EmptyState } from "@/components/ppe/result-panels";
 import { AnalysisPhase } from "@/hooks/camera-panel-types";
 import { ZoneType } from "@/types/zone";
+import { countLabel } from "@/lib/format";
+
+function DraftZoneStatus({ count }: { count: number }) {
+  return (
+    <div className="flex items-center gap-1.5 rounded-md border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-xs font-semibold text-amber-200">
+      <PenLine className="size-3.5 shrink-0" aria-hidden="true" />
+      {countLabel(count, "zone")} unsaved
+    </div>
+  );
+}
 
 export function ZoneConfigPanel({
   zoneDrawing,
@@ -76,10 +86,7 @@ export function ZoneConfigPanel({
             </button>
           </div>
           {zoneDrawing.pendingAutoZoneIds.size > 0 && (
-            <div className="rounded-md border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-xs text-amber-200">
-              Auto-zone accepted — adjust the vertices, then click{" "}
-              <span className="font-semibold">Save zones</span> to confirm.
-            </div>
+            <DraftZoneStatus count={zoneDrawing.pendingAutoZoneIds.size} />
           )}
           {zoneDrawing.configMode === "modify" && zoneDrawing.selectedZoneId && (
             <div className="grid grid-cols-2 gap-2">
@@ -233,10 +240,7 @@ export function ZoneConfigPanel({
       ) : (
         <div className="grid gap-3">
           {zoneDrawing.pendingAutoZoneIds.size > 0 && (
-            <div className="rounded-md border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-xs text-amber-200">
-              {zoneDrawing.pendingAutoZoneIds.size} auto-zone{zoneDrawing.pendingAutoZoneIds.size > 1 ? "s" : ""} accepted — open{" "}
-              <span className="font-semibold">Configure zones</span> to adjust, then save.
-            </div>
+            <DraftZoneStatus count={zoneDrawing.pendingAutoZoneIds.size} />
           )}
           {!zoneEnabled && zoneDrawing.pendingAutoZoneIds.size === 0 ? (
             <EmptyState text="Enable Zone Monitoring to view saved areas or start drawing." />

@@ -2,8 +2,15 @@
 
 import { TrendingDown, TrendingUp } from "lucide-react";
 import { IncidentCard } from "@/components/ppe/result-panels";
+import { countLabel } from "@/lib/format";
 import type { ZoneDef } from "./factory-layout";
 import type { ZoneAggregate } from "./use-zone-incidents";
+
+const CATEGORY_READOUT: { key: "ppeCount" | "zoneCount" | "fallCount"; label: string }[] = [
+  { key: "ppeCount", label: "PPE" },
+  { key: "zoneCount", label: "Zone" },
+  { key: "fallCount", label: "Fall" },
+];
 
 interface ZoneDetailPanelProps {
   zone: ZoneDef | null;
@@ -42,14 +49,17 @@ export function ZoneDetailPanel({ zone, aggregate, loading }: ZoneDetailPanelPro
           ) : null}
         </div>
         {zone.active ? (
-          <p className="mt-1 text-xs text-slate-600">
-            {total} incident{total === 1 ? "" : "s"} logged
-          </p>
+          <p className="mt-1 text-xs text-slate-600">{countLabel(total, "incident")} logged</p>
         ) : null}
-        {zone.active && aggregate ? (
-          <p className="mt-2 rounded-md border border-slate-200 bg-white p-2 text-xs leading-5 text-slate-700">
-            {aggregate.insight}
-          </p>
+        {zone.active && aggregate && total > 0 ? (
+          <dl className="mt-2 grid grid-cols-3 gap-2 rounded-md border border-slate-200 bg-white p-2">
+            {CATEGORY_READOUT.map(({ key, label }) => (
+              <div key={key} className="text-center">
+                <dt className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">{label}</dt>
+                <dd className="font-mono text-sm font-semibold text-slate-900">{aggregate[key]}</dd>
+              </div>
+            ))}
+          </dl>
         ) : null}
       </div>
 

@@ -4,6 +4,7 @@ import { useMemo } from "react";
 import type { ThreeEvent } from "@react-three/fiber";
 import { Html, RoundedBox, Text } from "@react-three/drei";
 import { Color } from "three";
+import { countLabel } from "@/lib/format";
 import type { ZoneDef, ZoneId } from "./factory-layout";
 import type { ZoneAggregate } from "./use-zone-incidents";
 
@@ -32,7 +33,7 @@ export function ZoneBlock({ zone, aggregate, selected, hovered, onHover, onSelec
   const opacity = zone.active ? (selected ? 1 : 0.9) : 0.35;
 
   const tooltipText = zone.active
-    ? `${zone.label} — ${aggregate.total} incident${aggregate.total === 1 ? "" : "s"}\n${aggregate.insight}`
+    ? `${zone.label}\n${countLabel(aggregate.total, "incident")} · PPE ${aggregate.ppeCount} · Zone ${aggregate.zoneCount} · Fall ${aggregate.fallCount}`
     : "Camera not connected — monitoring planned";
 
   const handlePointerOver = (event: ThreeEvent<PointerEvent>) => {
