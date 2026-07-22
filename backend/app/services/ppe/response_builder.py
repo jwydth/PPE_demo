@@ -381,10 +381,12 @@ def _video_metadata(video_path: str | Path) -> tuple[float, int]:
     path_str = str(video_path)
     is_stream = path_str.startswith(("rtsp://", "rtmp://", "http://", "https://"))
 
-    # Force TCP for RTSP to avoid UDP packet loss/hangs
+    # Force TCP for RTSP to avoid UDP packet loss/hangs, and cap the connect/read
+    # timeout — without it, a stalled or unreachable source blocks this call
+    # (and the caller's event loop) indefinitely.
     if is_stream and path_str.startswith("rtsp://"):
         import os
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|timeout;5000000"
 
     cap = cv2.VideoCapture(path_str)
     if not cap.isOpened():

@@ -300,7 +300,11 @@ async def real_video_pipeline(
     settings_state: dict | None = None,
 ):
     """Unified internal generator for video processing (real model path)."""
-    fps, total_frames = _video_metadata(video_path)
+    # cv2.VideoCapture() blocks synchronously to connect/probe the source — for an
+    # RTSP stream this can stall for seconds (or hang, absent a capture timeout).
+    # Run it off the event loop so a slow/unreachable camera doesn't freeze every
+    # other WS connection and HTTP request on the server.
+    fps, total_frames = await asyncio.to_thread(_video_metadata, video_path)
     is_stream = total_frames <= 0
     start_wall_time = time.perf_counter()
     cases: list[ViolationCase] = []
@@ -371,7 +375,9 @@ async def real_video_pipeline(
                     violations.append((worker, zone, track_id))
         return violations
 
-    zones = load_zones(video_name)
+    # load_zones() opens a synchronous DB connection — a slow or unreachable
+    # database must not freeze the whole event loop, so run it off-thread.
+    zones = await asyncio.to_thread(load_zones, video_name)
     logger.info(f"[ZONE] Loaded {len(zones)} zone(s) for '{video_name}': {[(z.zone_name, z.zone_type, z.camera_zone_view_id) for z in zones]}")
     sign_registry = SignZoneRegistry()
     ppe_sign_registry = SignPPERegistry()
@@ -395,7 +401,12 @@ async def real_video_pipeline(
     from pathlib import Path
 
     if isinstance(detector.model, YOLO):
-        model_instance = YOLO(detector.model.ckpt_path or str(Path(settings.MODEL_PATH).resolve()))
+        # Loading weights from disk blocks for multiple seconds — run it off
+        # the event loop so other WS connections / HTTP requests stay responsive
+        # while this stream's isolated model instance spins up.
+        model_instance = await asyncio.to_thread(
+            YOLO, detector.model.ckpt_path or str(Path(settings.MODEL_PATH).resolve())
+        )
     else:
         model_instance = detector.model
 
@@ -430,7 +441,7 @@ async def real_video_pipeline(
         prev_zone_enabled = curr_zone
 
         if settings_state and settings_state.pop("reload_zones", False):
-            zones = load_zones(video_name)
+            zones = await asyncio.to_thread(load_zones, video_name)
             logger.info(f"[ZONE] Hot-reloaded {len(zones)} zone(s): {[(z.zone_name, z.zone_type) for z in zones]}")
             if curr_zone:
                 zone_just_enabled = True  # treat reload same as fresh enable only if zone monitoring is active
