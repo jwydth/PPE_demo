@@ -38,12 +38,23 @@ class PPEDetector:
     model = None
     sign_model = None  # set by _load_sign_model; stays None when weights are absent
 
-    def __init__(self) -> None:
+    def __init__(self, *, enable_stream_pool: bool = True) -> None:
+        """
+        enable_stream_pool: pre-warm the concurrent-stream model pool (Tier 1.1).
+            Only the detector instance actually used for `/ws/stream` needs this —
+            other PPEDetector instances (e.g. the one backing `/predict-video`)
+            never call `acquire_model_instance`, so building a pool for them
+            would just load extra unused copies of the weights into VRAM.
+        """
         self.model = None
         self.sign_model = None
         self.device = _select_inference_device(settings.INFERENCE_DEVICE)
+        self._model_pool: asyncio.Queue | None = None
+        self._pool_size = 0
         self._load_model()
         self._load_sign_model()
+        if enable_stream_pool:
+            self._init_model_pool()
 
     def _load_model(self) -> None:
         model_path = Path(settings.MODEL_PATH).expanduser()
@@ -67,6 +78,93 @@ class PPEDetector:
         except Exception as e:
             logger.error(f"Failed to load YOLO model: {e}", exc_info=True)
 
+    def _init_model_pool(self) -> None:
+        """Pre-warm a bounded pool of tracker-isolated model instances for the
+        live streaming path (PERF_PLAN.md Tier 1.1/1.4).
+
+        `track(persist=True)` keeps tracker state on the model/predictor, so
+        concurrent streams can't safely share one instance. Loading a fresh
+        instance per websocket connection instead re-reads the weights from
+        disk every time and holds N copies in VRAM under N concurrent
+        streams. A fixed-size pool caps VRAM at a known ceiling and removes
+        the per-connect disk load.
+        """
+        if self.model is None:
+            return
+
+        try:
+            from ultralytics import YOLO
+            import numpy as np
+
+            # ultralytics.engine.predictor.BasePredictor.stream_inference only
+            # imports torchvision the first time it sees a *stream*-type source
+            # (webcam/RTSP) — never for the static dummy array used to warm up
+            # below. Left lazy, that ~3s import happens on the first real
+            # stream connection instead of here, adding multi-second latency
+            # to "first frame" for whichever stream(s) hit it first (and, since
+            # Python serializes concurrent imports of the same module, every
+            # stream connecting around the same time pays it too).
+            import torchvision  # noqa: F401
+
+            pool_size = max(1, settings.MAX_CONCURRENT_STREAMS)
+            model_path = self.model.ckpt_path or str(
+                Path(settings.MODEL_PATH).resolve()
+            )
+            half = bool(settings.INFERENCE_HALF) and self.device.startswith("cuda")
+            imgsz = settings.INFERENCE_IMGSZ
+            dummy_square = np.zeros((imgsz, imgsz, 3), dtype=np.uint8)
+            # Also warm up at a realistic 16:9 camera shape (the letterboxed
+            # tensor shape a real RTSP frame produces differs from the square
+            # dummy above). Measured on this repo's own RTSP demo setup: the
+            # first real inference at a shape the GPU hasn't seen yet costs an
+            # extra ~2.9s (CUDA allocator/kernel cache growing for that size),
+            # on top of the RTSP connect itself — that cost lands on whichever
+            # stream(s) connect first if we don't pay it here instead.
+            dummy_wide = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+            pool: asyncio.Queue = asyncio.Queue(maxsize=pool_size)
+            for i in range(pool_size):
+                instance = self.model if i == 0 else YOLO(model_path)
+                for dummy in (dummy_square, dummy_wide):
+                    instance.predict(
+                        dummy, device=self.device, half=half, imgsz=imgsz, verbose=False
+                    )
+                pool.put_nowait(instance)
+
+            self._model_pool = pool
+            self._pool_size = pool_size
+            logger.info(
+                f"Pre-warmed model pool: {pool_size} instance(s) on {self.device} "
+                f"(half={half}, imgsz={imgsz})"
+            )
+        except Exception as e:
+            logger.error(f"Failed to initialize model pool: {e}", exc_info=True)
+
+    async def acquire_model_instance(self, timeout: float = 30.0):
+        """Borrow a pre-warmed model instance from the pool for one stream.
+
+        Falls back to the shared `self.model` when no pool was built (model
+        failed to load). Blocks up to `timeout` seconds when every pool
+        instance is in use — queueing new connections rather than silently
+        loading another copy of the weights and growing VRAM usage.
+        """
+        pool = getattr(self, "_model_pool", None)
+        if pool is None:
+            return self.model
+        try:
+            return await asyncio.wait_for(pool.get(), timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(
+                f"All {getattr(self, '_pool_size', 0)} model instance(s) are busy; "
+                "too many concurrent streams."
+            ) from exc
+
+    def release_model_instance(self, instance) -> None:
+        """Return a borrowed model instance to the pool."""
+        pool = getattr(self, "_model_pool", None)
+        if pool is not None and instance is not None:
+            pool.put_nowait(instance)
+
     def _load_sign_model(self) -> None:
         sign_path = Path(settings.SIGN_MODEL_PATH).expanduser()
         if not sign_path.is_absolute():
@@ -79,8 +177,22 @@ class PPEDetector:
 
         try:
             from ultralytics import YOLO
+            import numpy as np
 
             self.sign_model = YOLO(str(sign_path))
+            # Warm up at both a square and a realistic 16:9 camera shape — same
+            # reasoning as the main model's pool warmup above. Unlike the main
+            # model, sign_model is never pooled/reused, so without this its
+            # very first call (which happens on frame 0 of the first stream,
+            # since frame_index % SIGN_PASS_FRAME_INTERVAL == 0 there) pays the
+            # full cold-start cost live: measured ~6.3s on this repo's own RTSP
+            # demo setup.
+            for dummy in (
+                np.zeros((640, 640, 3), dtype=np.uint8),
+                np.zeros((720, 1280, 3), dtype=np.uint8),
+            ):
+                self.sign_model.predict(dummy, device=self.device, verbose=False)
+            logger.info(f"Sign model loaded and warmed up on {self.device}")
         except Exception as e:
             logger.error(f"Failed to load sign model: {e}", exc_info=True)
 

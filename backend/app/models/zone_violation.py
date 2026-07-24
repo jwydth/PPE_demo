@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, CheckConstraint, Column, DateTime, String, func
+from sqlalchemy import BigInteger, CheckConstraint, Column, DateTime, Index, String, func
 from sqlmodel import Field, SQLModel
 
 
@@ -15,6 +15,11 @@ class ZoneViolation(SQLModel, table=True):
             "frame_index >= 0",
             name="ck_zone_violations_frame_index_nonnegative",
         ),
+        # Matches real query shapes: status-filtered incident lists ordered by
+        # recency, and date-range reads joined by camera (see PERF_PLAN.md
+        # Tier 3.3).
+        Index("ix_zone_violations_status_occurred_at", "status", "occurred_at"),
+        Index("ix_zone_violations_occurred_at_camera_id", "occurred_at", "camera_id"),
     )
 
     id: int | None = Field(default=None, primary_key=True, sa_type=BigInteger)

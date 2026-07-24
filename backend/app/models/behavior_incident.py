@@ -2,7 +2,17 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from sqlalchemy import BigInteger, CheckConstraint, Column, DateTime, Float, String, Text, func
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    Column,
+    DateTime,
+    Float,
+    Index,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, Relationship, SQLModel
 
@@ -51,6 +61,11 @@ class BehaviorIncident(SQLModel, table=True):
             "frame_end IS NULL OR frame_end >= 0",
             name="ck_behavior_incidents_frame_end_nonnegative",
         ),
+        # Matches real query shapes: status-filtered incident lists ordered by
+        # recency, and date-range reads joined by camera (see PERF_PLAN.md
+        # Tier 3.3).
+        Index("ix_behavior_incidents_status_started_at", "status", "started_at"),
+        Index("ix_behavior_incidents_started_at_camera_id", "started_at", "camera_id"),
     )
 
     id: int | None = Field(default=None, primary_key=True, sa_type=BigInteger)

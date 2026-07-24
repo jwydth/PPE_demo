@@ -8,6 +8,10 @@ __pycache__/
 *.pack.gz
 backend/storage/
 backend/weights/*.pt
+# TensorRT engines are hardware/driver-specific (PERF_PLAN.md Tier 2.1/6) and
+# .onnx are just export intermediates — neither belongs in git.
+backend/weights/*.engine
+backend/weights/*.onnx
 backend/.venv
 backend/venv
 video_debug.log
@@ -15,3 +19,6 @@ videos/*
 be_log.txt
 auto.key
 auto.crt
+# Working notes from this session's performance/debugging pass — not meant
+# to be a tracked project doc.
+PERF_PLAN.md

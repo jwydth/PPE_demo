@@ -92,9 +92,14 @@ def _append_tracking_overlay_frame(
     )
 
 
-def _encode_frame_to_base64(frame: np.ndarray) -> str:
+def _encode_frame_to_jpeg(frame: np.ndarray) -> bytes:
+    """Encode a frame to raw JPEG bytes for the live-stream binary WS frame.
+
+    Sent as-is via `websocket.send_bytes` (PERF_PLAN.md Tier 2.2) instead of
+    base64-embedding it in the JSON event, which avoids the ~33% base64
+    inflation plus the encode/decode cost on both ends.
+    """
     import cv2
-    import base64
 
     # Resize to 640px width while maintaining aspect ratio to reduce payload size
     h, w = frame.shape[:2]
@@ -105,9 +110,9 @@ def _encode_frame_to_base64(frame: np.ndarray) -> str:
     else:
         display_frame = frame
 
-    # Lower JPEG quality (e.g., 60) to significantly reduce string size
+    # Lower JPEG quality (e.g., 60) to significantly reduce payload size
     _, buffer = cv2.imencode(".jpg", display_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
-    return base64.b64encode(buffer).decode("utf-8")
+    return buffer.tobytes()
 
 
 def _box_track_id(box) -> int | None:

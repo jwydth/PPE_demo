@@ -1,5 +1,10 @@
 import logging
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s:%(name)s:%(message)s",
+)
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -15,11 +20,6 @@ from app.routers import (
     zones,
 )
 from app.storage.local_paths import SNAPSHOT_DIR, ensure_snapshot_dir, ensure_upload_dir
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(levelname)s:%(name)s:%(message)s",
-)
 
 app = FastAPI(
     title="De Heus PPE Detection API",

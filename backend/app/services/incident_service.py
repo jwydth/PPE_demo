@@ -9,6 +9,7 @@ import boundary rule); those are detection-pipeline internals, not incident
 storage.
 """
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated
@@ -16,8 +17,9 @@ from typing import Annotated
 from fastapi import Depends
 from sqlmodel import Session
 
+from app.core.config import settings
 from app.db.session import get_session
-from app.models.behavior_incident import BehaviorIncident
+from app.models.behavior_incident import BehaviorEvidence, BehaviorIncident
 from app.models.camera import Camera
 from app.models.physical_zone import PhysicalZone
 from app.models.ppe_violation import PPEViolation
@@ -39,6 +41,8 @@ from app.services.incident_normalization import (
 from app.storage.evidence_storage import EvidenceStorage, get_evidence_storage
 
 UNASSIGNED_ZONE_NAME = "Unassigned"
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -98,25 +102,40 @@ class UnifiedIncidentService:
 
         incidents: list[UnifiedIncident] = []
         if category is None or category == "ppe":
-            for violation in self.ppe_repository.list_between(
+            ppe_rows = self.ppe_repository.list_between(
                 date_from=date_from, date_to=date_to, limit=normalized_limit
-            ):
+            )
+            _warn_if_category_hit_limit("ppe", len(ppe_rows), normalized_limit, date_from, date_to)
+            for violation in ppe_rows:
                 incidents.append(
                     self._ppe_to_unified(violation, camera_cache, zone_cache)
                 )
         if category is None or category == "zone":
-            for violation in self.zone_repository.list_between(
+            zone_rows = self.zone_repository.list_between(
                 date_from=date_from, date_to=date_to, limit=normalized_limit
-            ):
+            )
+            _warn_if_category_hit_limit("zone", len(zone_rows), normalized_limit, date_from, date_to)
+            for violation in zone_rows:
                 incidents.append(
                     self._zone_to_unified(violation, camera_cache, zone_cache)
                 )
         if category is None or category == "behavior":
-            for incident in self.behavior_repository.list_between(
+            behavior_rows = self.behavior_repository.list_between(
                 date_from=date_from, date_to=date_to, limit=normalized_limit
-            ):
+            )
+            _warn_if_category_hit_limit(
+                "behavior", len(behavior_rows), normalized_limit, date_from, date_to
+            )
+            # Batch-fetch evidence for every row in one query instead of one
+            # get_evidence() round trip per incident (PERF_PLAN.md Tier 3.3).
+            evidence_by_incident = self.behavior_repository.get_evidence_for_incidents(
+                [_require_id(incident.id) for incident in behavior_rows]
+            )
+            for incident in behavior_rows:
                 incidents.append(
-                    self._behavior_to_unified(incident, camera_cache, zone_cache)
+                    self._behavior_to_unified(
+                        incident, camera_cache, zone_cache, evidence_by_incident
+                    )
                 )
 
         if zone_id is not None:
@@ -125,6 +144,22 @@ class UnifiedIncidentService:
             incidents = [i for i in incidents if i.severity == severity]
 
         incidents.sort(key=lambda i: i.timestamp, reverse=True)
+        if len(incidents) > normalized_limit:
+            # The merged set across categories alone exceeds normalized_limit
+            # (independent of any single category hitting its own limit above)
+            # — the final slice below drops the oldest rows. Surface it instead
+            # of returning silently-wrong aggregates.
+            logger.warning(
+                "UnifiedIncidentService.list_incidents truncated %d merged row(s) "
+                "(limit=%d, date_from=%s, date_to=%s, zone_id=%s, category=%s) — "
+                "counts/aggregates over this range may undercount.",
+                len(incidents) - normalized_limit,
+                normalized_limit,
+                date_from,
+                date_to,
+                zone_id,
+                category,
+            )
         return incidents[:normalized_limit]
 
     def _ppe_to_unified(
@@ -174,11 +209,12 @@ class UnifiedIncidentService:
         incident: BehaviorIncident,
         camera_cache: dict[int, Camera | None],
         zone_cache: dict[int, PhysicalZone | None],
+        evidence_by_incident: dict[int, list[BehaviorEvidence]],
     ) -> UnifiedIncident:
         camera = self._camera_for(incident.camera_id, camera_cache)
         zone = self._zone_for(camera, zone_cache)
         incident_id = _require_id(incident.id)
-        newest_evidence = self.behavior_repository.get_evidence(incident_id)
+        newest_evidence = evidence_by_incident.get(incident_id, [])
         object_key = newest_evidence[0].object_key if newest_evidence else None
         return UnifiedIncident(
             id=incident_id,
@@ -261,12 +297,37 @@ def _require_id(value: int | None) -> int:
 
 def _validate_limit(limit: int) -> int:
     # Upper bound covers both small feed reads (~30-100) and analytics
-    # aggregation reads (up to a few thousand rows per category per range).
-    # This service aggregates in Python rather than in SQL (see module
-    # docstring), so it isn't built for unbounded scale past this cap.
-    if not 1 <= limit <= 5000:
-        raise ServiceValidationError("limit must be between 1 and 5000.")
+    # aggregation reads (configurable via settings.ANALYTICS_LIMIT — see its
+    # docstring). This service aggregates in Python rather than in SQL (see
+    # module docstring), so it isn't built for unbounded scale past this cap;
+    # list_incidents logs a warning when a call actually hits it.
+    if not 1 <= limit <= settings.ANALYTICS_LIMIT:
+        raise ServiceValidationError(f"limit must be between 1 and {settings.ANALYTICS_LIMIT}.")
     return limit
+
+
+def _warn_if_category_hit_limit(
+    category: str,
+    row_count: int,
+    normalized_limit: int,
+    date_from: datetime | None,
+    date_to: datetime | None,
+) -> None:
+    # A category's list_between() call returning exactly `normalized_limit`
+    # rows means it was cut off by its own LIMIT — older rows within the range
+    # never made it into this call, independent of any truncation from
+    # merging categories together (see list_incidents' final-slice warning).
+    if row_count < normalized_limit:
+        return
+    logger.warning(
+        "UnifiedIncidentService.list_incidents: '%s' category hit its limit "
+        "(%d rows, date_from=%s, date_to=%s) — older rows in this range were "
+        "dropped before merging; counts/aggregates over this range may undercount.",
+        category,
+        normalized_limit,
+        date_from,
+        date_to,
+    )
 
 
 def get_unified_incident_service(

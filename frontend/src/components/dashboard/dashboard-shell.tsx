@@ -10,6 +10,7 @@ import {
 import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   createPhysicalZone,
   deleteAllIncidents,
@@ -47,7 +48,7 @@ import { useLiveStream } from "@/hooks/useLiveStream";
 import { useAutoZoneSuggestions } from "@/hooks/useAutoZoneSuggestions";
 import { AnalysisPhase } from "@/hooks/camera-panel-types";
 import { BehaviorIncident, FallLiveSummary } from "@/types/behavior";
-import { safetyMetrics } from "./data";
+import { useSafetyKpis } from "@/hooks/useSafetyKpis";
 import { TopBar, type DashboardView } from "./top-bar";
 import { ZoneSidebar } from "./zone-sidebar";
 import { MetricCard } from "./metric-card";
@@ -1066,31 +1067,40 @@ function MetricMini({ label, value }: { label: string; value: string }) {
   );
 }
 
+const SAFETY_EVENTS_QUERY_KEY = ["safety-events"] as const;
+
 function IncidentPanel() {
-  const [events, setEvents] = useState<(ViolationReport | ZoneViolation | BehaviorIncident)[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const queryClient = useQueryClient();
+  const eventsQuery = useQuery({
+    queryKey: SAFETY_EVENTS_QUERY_KEY,
+    queryFn: getSafetyEvents,
+  });
+  const events = eventsQuery.data ?? [];
+  const [deleteAllError, setDeleteAllError] = useState("");
+  const [deletingAll, setDeletingAll] = useState(false);
   const [selectedIncident, setSelectedIncident] = useState<{
     category: IncidentCategory;
     id: number;
   } | null>(null);
 
-  const loadEvents = useCallback(async () => {
-    setLoading(true);
-    setError("");
-    try {
-      setEvents(await getSafetyEvents());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load violations");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  // isFetching (not isPending) so the spinner also shows on the manual
+  // refresh button click below, matching the previous setLoading(true)-on-
+  // every-call behavior.
+  const loading = eventsQuery.isFetching || deletingAll;
+  const error =
+    deleteAllError ||
+    (eventsQuery.isError
+      ? eventsQuery.error instanceof Error
+        ? eventsQuery.error.message
+        : "Could not load violations"
+      : "");
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => void loadEvents(), 0);
-    return () => window.clearTimeout(timer);
-  }, [loadEvents]);
+  const removeEventFromCache = (id: number) => {
+    queryClient.setQueryData<(ViolationReport | ZoneViolation | BehaviorIncident)[]>(
+      SAFETY_EVENTS_QUERY_KEY,
+      (current) => current?.filter((item) => item.id !== id),
+    );
+  };
 
   const deleteEvent = async (event: ViolationReport | ZoneViolation | BehaviorIncident) => {
     if (!event.id || !confirm(CONFIRM_DELETE_INCIDENT)) {
@@ -1099,20 +1109,20 @@ function IncidentPanel() {
     const category: IncidentCategory =
       "violation_type" in event ? "ppe" : "behavior_type" in event ? "behavior" : "zone";
     await deleteIncident(category, event.id);
-    setEvents((current) => current.filter((item) => item.id !== event.id));
+    removeEventFromCache(event.id);
   };
 
   const deleteAllEvents = async () => {
     if (!confirm(CONFIRM_DELETE_ALL_INCIDENTS)) return;
-    setLoading(true);
-    setError("");
+    setDeletingAll(true);
+    setDeleteAllError("");
     try {
       await deleteAllIncidents();
-      setEvents([]);
+      queryClient.setQueryData(SAFETY_EVENTS_QUERY_KEY, []);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not delete incidents");
+      setDeleteAllError(err instanceof Error ? err.message : "Could not delete incidents");
     } finally {
-      setLoading(false);
+      setDeletingAll(false);
     }
   };
 
@@ -1134,7 +1144,7 @@ function IncidentPanel() {
             <span>Delete All</span>
           </button>
           <button
-            onClick={() => void loadEvents()}
+            onClick={() => void eventsQuery.refetch()}
             className="rounded-md border border-slate-200 bg-white p-2 text-xs font-semibold text-slate-700 transition hover:border-slate-300 hover:text-slate-950"
             type="button"
           >
@@ -1163,9 +1173,7 @@ function IncidentPanel() {
           category={selectedIncident.category}
           incidentId={selectedIncident.id}
           onClose={() => setSelectedIncident(null)}
-          onDeleted={() =>
-            setEvents((current) => current.filter((item) => item.id !== selectedIncident.id))
-          }
+          onDeleted={() => removeEventFromCache(selectedIncident.id)}
         />
       ) : null}
     </section>
@@ -1203,6 +1211,10 @@ export function DashboardShell() {
   const [activeCameraId, setActiveCameraId] = useState<number>(1);
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
   const [physicalZones, setPhysicalZones] = useState<PhysicalZone[]>([]);
+  // Same hook and default range/zone (7D, all zones) as the Incident
+  // Analytics tab's KPI row, so the two stay in sync instead of this one
+  // showing static placeholder data.
+  const { kpis } = useSafetyKpis();
 
   useEffect(() => {
     const stored = localStorage.getItem("ppe_demo_cameras");
@@ -1297,7 +1309,7 @@ export function DashboardShell() {
             </section>
 
             <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-              {safetyMetrics.map((metric) => (
+              {kpis.map((metric) => (
                 <MetricCard key={metric.label} metric={metric} />
               ))}
             </section>

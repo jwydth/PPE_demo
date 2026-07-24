@@ -1,9 +1,11 @@
 import asyncio
 import itertools
 import logging
+from collections import deque
 from pathlib import Path
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import HTMLResponse
+from app.schemas.streaming import StreamEvent
 from app.services.ppe_detector import PPEDetector
 from app.storage.local_paths import UPLOAD_DIR, ensure_upload_dir
 
@@ -18,6 +20,12 @@ _stream_locks: dict[str, asyncio.Lock] = {}
 _conn_counter = itertools.count(1)
 # Map of video_name -> Event to cancel orphaned connections for a specific camera/video.
 _current_cancels: dict[str, asyncio.Event] = {}
+# How long listen_for_settings() waits for a client message before probing
+# liveness with a ping. Bounds how long a truly-dead connection (dropped
+# network, sleep, a hard reload that skips a clean WS close frame) can hold
+# a camera's stream_lock — without this, a plain receive_json() call just
+# blocks forever, and nothing else in the connection detects the disconnect.
+_LIVENESS_PROBE_SECONDS = 15.0
 
 @router.websocket("/ws/stream")
 async def stream_video_ws(
@@ -82,7 +90,23 @@ async def stream_video_ws(
         logger.info(f"[conn {conn_id}] [SIGNAL] Settings listener task started")
         while True:
             try:
-                data = await websocket.receive_json()
+                data = await asyncio.wait_for(
+                    websocket.receive_json(), timeout=_LIVENESS_PROBE_SECONDS
+                )
+            except asyncio.TimeoutError:
+                # No message in a while — probe liveness instead of blocking
+                # forever. A truly-dead peer (dropped network, sleep, a hard
+                # reload that skips a clean WS close frame) makes this send
+                # fail, which is treated the same as a disconnect below. A
+                # live-but-idle client just gets an unrecognized "ping" event
+                # it silently ignores (see useLiveStream.ts's onmessage).
+                try:
+                    await websocket.send_json({"event": "ping", "data": {}})
+                except Exception as e:
+                    logger.info(f"[conn {conn_id}] [SIGNAL] Liveness probe failed ({type(e).__name__}: {e}) — treating as disconnect")
+                    disconnect_event.set()
+                    break
+                continue
             except WebSocketDisconnect:
                 logger.info(f"[conn {conn_id}] [SIGNAL] Client disconnected (WebSocketDisconnect) — signalling stream to stop")
                 disconnect_event.set()
@@ -150,23 +174,110 @@ async def stream_video_ws(
         settings_state=settings_state,
     )
     sent = 0
+    dropped_frames = 0
+    # Set when this connection loses its slot to a newer one for the same
+    # camera (see cancel_event above). The frontend's auto-reconnect (which
+    # retries any *unexpected* close, e.g. React StrictMode's dev-mode double
+    # mount) must NOT retry this case — reconnecting here would just re-cancel
+    # the newer connection right back, an infinite ping-pong between the two
+    # tabs/sessions. A distinct close code lets it tell the difference.
+    superseded = False
+
+    # Decouples pulling from the pipeline generator (inference, tracking,
+    # violation recording) from sending over the websocket (PERF_PLAN.md Tier
+    # 4.2). Before this, both happened in one sequential loop: a slow client
+    # (backgrounded tab, poor network) stalled the *next* pipeline call too,
+    # pausing inference/tracking, and once the client caught up it received a
+    # burst of stale frames instead of the current one. Now a producer task
+    # drives the pipeline at full speed regardless of send speed — "frame"
+    # (preview-image) events are coalesced into a single latest-only slot, so
+    # a slow client only ever gets the newest one and older ones are dropped,
+    # never queued. Every other event type (violation/zone_violation/
+    # behavior_incident/summary/error/start/end/...) represents something
+    # already persisted and must never be dropped, so those go on an unbounded
+    # FIFO instead.
+    latest_frame: StreamEvent | None = None
+    reliable_events: deque[StreamEvent] = deque()
+    new_event = asyncio.Event()
+    producer_done = asyncio.Event()
+    producer_exc: list[BaseException] = []
+
+    async def send_event(event: StreamEvent) -> None:
+        # Binary JPEG frame first, then the JSON envelope referencing it via
+        # has_image — same connection, so WS delivers them to the client in
+        # this order (PERF_PLAN.md Tier 2.2: raw bytes instead of base64-in-JSON).
+        if event.image_bytes is not None:
+            await websocket.send_bytes(event.image_bytes)
+        await websocket.send_text(event.model_dump_json())
+
+    async def produce() -> None:
+        nonlocal latest_frame, dropped_frames
+        try:
+            async for event in stream_gen:
+                if disconnect_event.is_set() or cancel_event.is_set():
+                    break
+                if event.event == "frame":
+                    if latest_frame is not None:
+                        dropped_frames += 1
+                    latest_frame = event
+                else:
+                    reliable_events.append(event)
+                new_event.set()
+        except Exception as e:
+            producer_exc.append(e)
+        finally:
+            # Close the generator (fully tears down this model.track() session)
+            # here, in the same task that was iterating it, before the sender's
+            # finally releases stream_lock. PPEDetector is a singleton, so the
+            # next stream must not start model.track() on the shared pooled
+            # instance while this one is still tearing down — that corrupts the
+            # predictor and the new stream stalls. The 3s RTSP read timeout caps
+            # how long aclose() can block here.
+            try:
+                await asyncio.wait_for(stream_gen.aclose(), timeout=6.0)
+                logger.info(f"[conn {conn_id}] generator closed")
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.warning(f"[conn {conn_id}] generator aclose did not finish cleanly: {e}")
+            producer_done.set()
+            new_event.set()
+
+    producer_task = asyncio.create_task(produce())
+
     try:
-        async for event in stream_gen:
+        while True:
             if disconnect_event.is_set():
                 logger.info(f"[conn {conn_id}] disconnect_event set — stopping stream loop after {sent} events")
                 break
             if cancel_event.is_set():
                 logger.info(f"[conn {conn_id}] superseded by a newer stream — stopping after {sent} events")
+                superseded = True
                 break
-            await websocket.send_text(event.model_dump_json())
-            sent += 1
+            if not reliable_events and latest_frame is None:
+                if producer_done.is_set():
+                    break
+                new_event.clear()
+                await new_event.wait()
+                continue
+
+            while reliable_events and not disconnect_event.is_set() and not cancel_event.is_set():
+                await send_event(reliable_events.popleft())
+                sent += 1
+            if latest_frame is not None and not disconnect_event.is_set() and not cancel_event.is_set():
+                event, latest_frame = latest_frame, None
+                await send_event(event)
+                sent += 1
             # Force a yield to the event loop. send_text() often completes without
             # suspending (send buffer has room), which would starve the settings
             # listener task and prevent it from ever reading the client's close
             # frame — leaving this infinite stream running forever.
             await asyncio.sleep(0)
             if sent % 120 == 0:
-                logger.info(f"[conn {conn_id}] sent {sent} events (client_state={websocket.client_state.name}, disconnect_event={disconnect_event.is_set()})")
+                logger.info(
+                    f"[conn {conn_id}] sent {sent} events, dropped {dropped_frames} stale frame(s) "
+                    f"(client_state={websocket.client_state.name}, disconnect_event={disconnect_event.is_set()})"
+                )
+        if producer_exc:
+            raise producer_exc[0]
     except WebSocketDisconnect:
         logger.info(f"[conn {conn_id}] WebSocketDisconnect raised in send loop after {sent} events")
     except Exception as e:
@@ -182,19 +293,21 @@ async def stream_video_ws(
         if _current_cancels.get(video_name) is cancel_event:
             _current_cancels.pop(video_name, None)
         settings_task.cancel()
-        # Close the generator (fully tears down this model.track() session) BEFORE
-        # releasing the lock. PPEDetector is a singleton, so the next stream must
-        # not start model.track() on the shared model while this one is still
-        # tearing down — that corrupts the predictor and the new stream stalls.
-        # The 3s RTSP read timeout caps how long aclose() can block here.
+        # Make sure produce() stops even if we got here via an exception path
+        # where neither flag was set yet, then wait for it to actually finish
+        # (it closes stream_gen itself in its own finally — see produce()).
+        disconnect_event.set()
         try:
-            await asyncio.wait_for(stream_gen.aclose(), timeout=6.0)
-            logger.info(f"[conn {conn_id}] generator closed")
+            await asyncio.wait_for(producer_task, timeout=8.0)
         except (asyncio.TimeoutError, Exception) as e:
-            logger.warning(f"[conn {conn_id}] generator aclose did not finish cleanly: {e}")
+            logger.warning(f"[conn {conn_id}] producer task did not finish cleanly: {e}")
+        logger.info(f"[conn {conn_id}] sent {sent} event(s), dropped {dropped_frames} stale frame(s) total")
         stream_lock.release()
         logger.info(f"[conn {conn_id}] released stream lock for {video_name}")
         try:
-            await websocket.close()
+            if superseded:
+                await websocket.close(code=4001, reason="superseded")
+            else:
+                await websocket.close()
         except Exception:
             pass

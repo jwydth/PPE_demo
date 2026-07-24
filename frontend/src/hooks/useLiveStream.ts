@@ -62,6 +62,40 @@ export function useLiveStream({
   const [viewedVideoName, setViewedVideoName] = useState<string | null>(null);
   const viewedVideoNameRef = useRef<string | null>(null);
 
+  // Video names whose *next* close event is expected (we asked for it, e.g.
+  // deactivating a camera or resetting) — so onclose knows not to reconnect.
+  // Any close that isn't in this set is treated as unexpected and retried;
+  // this is what makes a connection survive React StrictMode's dev-mode
+  // double-invoke of mount effects (mount -> cleanup -> mount), which closes
+  // every open socket once immediately after opening it with no dependent
+  // effect left to reopen it.
+  const intentionalCloseRef = useRef<Set<string>>(new Set());
+  const reconnectAttemptsRef = useRef<Record<string, number>>({});
+  const MAX_RECONNECT_ATTEMPTS = 5;
+
+  // Object URL for the most recent binary JPEG frame received per stream (see
+  // ws.onmessage below — the server sends the frame as a raw binary WS message
+  // immediately before the "frame" JSON envelope that references it via
+  // has_image, instead of embedding it as base64 inside the JSON). Object URLs
+  // must be explicitly revoked or they leak for the life of the tab.
+  const pendingImageUrlRef = useRef<Record<string, string>>({});
+
+  const revokePendingImage = (videoName: string) => {
+    const url = pendingImageUrlRef.current[videoName];
+    if (url) {
+      URL.revokeObjectURL(url);
+      delete pendingImageUrlRef.current[videoName];
+    }
+  };
+
+  const closeSocket = (videoName: string) => {
+    const ws = wsRefs.current[videoName];
+    if (ws) {
+      intentionalCloseRef.current.add(videoName);
+      ws.close();
+    }
+  };
+
   const [surfaceVideoTime, setCurrentVideoTime] = useState(0);
   const [videoElement, setVideoElement] = useState<HTMLVideoElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -97,6 +131,9 @@ export function useLiveStream({
   }, [fallEnabled]);
 
   useEffect(() => {
+    // Deliberately NOT marked via closeSocket/intentionalCloseRef: this cleanup
+    // also fires on React StrictMode's simulated dev-mode unmount, and we want
+    // that specific close to be treated as unexpected so onclose reconnects it.
     return () => {
       Object.values(wsRefs.current).forEach((ws) => ws.close());
     };
@@ -110,9 +147,13 @@ export function useLiveStream({
   };
 
   const resetStream = () => {
-    setStreamData(emptyStreamData());
+    setStreamData((prev) => {
+      if (prev.live_frame) URL.revokeObjectURL(prev.live_frame);
+      return emptyStreamData();
+    });
+    Object.keys(pendingImageUrlRef.current).forEach(revokePendingImage);
     setCurrentVideoTime(0);
-    Object.values(wsRefs.current).forEach((ws) => ws.close());
+    Object.keys(wsRefs.current).forEach(closeSocket);
     wsRefs.current = {};
     setViewedVideoName(null);
     viewedVideoNameRef.current = null;
@@ -122,12 +163,12 @@ export function useLiveStream({
     setViewedVideoName(url);
     viewedVideoNameRef.current = url;
     setLiveUrl(url);
-    
+
     // Clear the current live frame so we don't display the stale frame of the previous stream
-    setStreamData((prev) => ({
-      ...prev,
-      live_frame: null,
-    }));
+    setStreamData((prev) => {
+      if (prev.live_frame) URL.revokeObjectURL(prev.live_frame);
+      return { ...prev, live_frame: null };
+    });
 
     // Instantly toggle viewed stream frames on the backend WebSockets
     Object.entries(wsRefs.current).forEach(([vidName, ws]) => {
@@ -167,17 +208,39 @@ export function useLiveStream({
       )}&enable_ppe=${ppeEnabled}&enable_zone=${zoneEnabled}&enable_fall=${fallEnabled}`;
 
       const ws = new WebSocket(wsUrl);
+      ws.binaryType = "blob";
       wsRefs.current[videoName] = ws;
 
       setIsStreaming(true);
       setIsLive(isAutoLive);
 
       ws.onmessage = (event) => {
+        if (event.data instanceof Blob) {
+          // Raw JPEG for the "frame" event that follows on this same
+          // connection (see routers/streaming.py) — stash it as an object URL
+          // for the "frame" handler below to pick up via has_image. Deliberately
+          // NOT revoking the previous pending URL here: it may still be the one
+          // rendered as live_frame, and revoking it while the <img> element is
+          // showing it can blank the frame in some browsers. The frame handler
+          // below revokes it once it's confirmed superseded in state.
+          pendingImageUrlRef.current[videoName] = URL.createObjectURL(event.data);
+          return;
+        }
+
         const msg = JSON.parse(event.data);
-        const { event: eventType, data, frame_index, image_base64 } = msg;
+        const { event: eventType, data, frame_index, has_image } = msg;
         const isCurrent = videoName === viewedVideoNameRef.current;
 
         if (eventType === "start") {
+          // NOT where we clear the reconnect-attempt count — "start" fires
+          // before the backend has actually tried to open the video source
+          // (see real_video_pipeline in video_pipeline/__init__.py), so a
+          // camera whose source never opens still gets a "start" on every
+          // attempt right before it errors out. Resetting here made a
+          // permanently-broken camera retry forever, once every ~500ms,
+          // since the counter never got a chance to reach
+          // MAX_RECONNECT_ATTEMPTS. The "frame" branch below resets it
+          // instead — actual frame data is real proof the connection works.
           if (isCurrent) {
             setStreamData((prev) => ({
               ...prev,
@@ -186,6 +249,10 @@ export function useLiveStream({
             setStatus(isAutoLive ? "Stream connected." : "Buffering inference…");
           }
         } else if (eventType === "frame") {
+          // The first successfully processed frame is real proof this
+          // connection is healthy — clear any reconnect-attempt count so a
+          // later drop gets the full retry budget again.
+          delete reconnectAttemptsRef.current[videoName];
           if (isCurrent) {
             setStreamData((prev) => {
               const nextOverlay = {
@@ -197,9 +264,16 @@ export function useLiveStream({
 
               setCurrentVideoTime(frame_index / (nextOverlay.fps || 30));
 
+              const nextLiveFrame = has_image
+                ? (pendingImageUrlRef.current[videoName] ?? prev.live_frame)
+                : prev.live_frame;
+              if (nextLiveFrame !== prev.live_frame && prev.live_frame) {
+                URL.revokeObjectURL(prev.live_frame);
+              }
+
               return {
                 ...prev,
-                live_frame: image_base64 ? `data:image/jpeg;base64,${image_base64}` : prev.live_frame,
+                live_frame: nextLiveFrame,
                 fall_summary: data.fall_summary ?? prev.fall_summary,
                 fall_detections: data.fall_detections ?? prev.fall_detections,
                 fall_unavailable: data.fall_unavailable ?? prev.fall_unavailable,
@@ -266,17 +340,54 @@ export function useLiveStream({
           if (isCurrent) {
             setStatus("Stream completed.");
           }
+        } else if (eventType === "ping") {
+          // Server-side liveness probe (routers/streaming.py) — sent when the
+          // connection has been idle a while, just to confirm the socket is
+          // still alive. No client-side action needed; merely receiving it
+          // (or failing to) is what the server cares about.
         }
       };
 
       ws.onclose = (event) => {
+        // Revoke a binary frame that arrived but whose paired "frame" JSON
+        // envelope never did (connection dropped between the two messages).
+        revokePendingImage(videoName);
+        const wasIntentional = intentionalCloseRef.current.delete(videoName);
+        // The backend uses this code when a *newer* connection takes over this
+        // same camera (see streaming.py's cancel_event/supersede logic, used
+        // for page reloads and duplicate tabs/mounts). Reconnecting here would
+        // just cancel that newer connection right back — an infinite ping-pong
+        // between the two sessions — so treat it like an intentional close.
+        const wasSuperseded = event.code === 4001;
         delete wsRefs.current[videoName];
         if (Object.keys(wsRefs.current).length === 0) {
           setIsStreaming(false);
         }
-        console.log(`WebSocket closed for ${videoName}:`, event.code, event.reason);
+        console.log(
+          `WebSocket closed for ${videoName}:`,
+          event.code,
+          event.reason,
+          wasIntentional ? "(intentional)" : wasSuperseded ? "(superseded)" : "(unexpected)",
+        );
         if (videoName === viewedVideoNameRef.current && !event.wasClean) {
           setError(`Stream disconnected unexpectedly (Code: ${event.code})`);
+        }
+
+        if (!wasIntentional && !wasSuperseded) {
+          const attempts = reconnectAttemptsRef.current[videoName] ?? 0;
+          if (attempts < MAX_RECONNECT_ATTEMPTS) {
+            reconnectAttemptsRef.current[videoName] = attempts + 1;
+            // Short delay covers both a genuine transient drop and React
+            // StrictMode's dev-mode double-invoke (mount -> cleanup -> mount),
+            // which closes this socket moments after opening it with nothing
+            // else left to reopen it — by the time this fires, that cycle has
+            // long finished, so the reconnect sticks.
+            setTimeout(() => {
+              if (!wsRefs.current[videoName]) {
+                void startStreaming(videoName, isAutoLive);
+              }
+            }, 500);
+          }
         }
       };
       ws.onerror = (event) => {
@@ -300,9 +411,9 @@ export function useLiveStream({
     );
 
     // 1. Close connections that are no longer active/needed
-    Object.entries(wsRefs.current).forEach(([url, ws]) => {
+    Object.keys(wsRefs.current).forEach((url) => {
       if (!activeUrls.has(url)) {
-        ws.close();
+        closeSocket(url);
         delete wsRefs.current[url];
       }
     });
