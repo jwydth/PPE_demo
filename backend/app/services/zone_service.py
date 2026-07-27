@@ -193,6 +193,26 @@ class ZoneService:
             )
         )
 
+    def update_physical_zone_name(self, zone_id: int, name: str) -> PhysicalZone:
+        normalized_id = _require_positive_id(zone_id, "zone_id")
+        normalized_name = _require_text(name, "name")
+        factory_id = self._get_default_factory_id()
+        
+        zone = self.physical_zone_repository.get_by_id(normalized_id)
+        if zone is None:
+            raise ServiceNotFoundError(f"Physical zone {zone_id} was not found.")
+            
+        existing = self.physical_zone_repository.get_by_factory_and_name(
+            factory_id, normalized_name
+        )
+        if existing is not None and existing.id != normalized_id:
+            raise ServiceValidationError(
+                f"A zone named '{normalized_name}' already exists."
+            )
+            
+        zone.name = normalized_name
+        return self.physical_zone_repository.update(zone)
+
     def get_zones_by_source_key(self, source_key: str) -> list[Zone]:
         normalized_source_key = _require_text(source_key, "video_name")
         camera = self.camera_repository.get_by_source_key(normalized_source_key)
