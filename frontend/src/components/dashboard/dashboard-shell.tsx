@@ -10,6 +10,7 @@ import {
 import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   createPhysicalZone,
   deleteAllIncidents,
@@ -47,7 +48,7 @@ import { useLiveStream } from "@/hooks/useLiveStream";
 import { useAutoZoneSuggestions } from "@/hooks/useAutoZoneSuggestions";
 import { AnalysisPhase } from "@/hooks/camera-panel-types";
 import { BehaviorIncident, FallLiveSummary } from "@/types/behavior";
-import { safetyMetrics } from "./data";
+import { useSafetyKpis } from "@/hooks/useSafetyKpis";
 import { TopBar, type DashboardView } from "./top-bar";
 import { ZoneSidebar } from "./zone-sidebar";
 import { MetricCard } from "./metric-card";
@@ -294,6 +295,7 @@ function CameraPanel({
         return match ? { ...cam, homeZoneId: match.home_zone_id } : cam;
       });
       onCamerasUpdate(reconciled);
+      window.alert("Camera configuration saved successfully.");
     } catch (err) {
       setError(
         err instanceof Error
@@ -545,17 +547,17 @@ function CameraPanel({
           {liveStream.isLive && (
             <button
               type="button"
+              disabled={isConfiguringCameras}
               onClick={() => {
                 setTempCameras(cameras);
-                setIsConfiguringCameras(!isConfiguringCameras);
+                setIsConfiguringCameras(true);
               }}
-              className="flex items-center gap-1 rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 transition cursor-pointer"
+              className="flex items-center gap-1 rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition cursor-pointer"
             >
               <Settings className="size-3.5" />
-              Configure URLs
+              Configure cameras
             </button>
           )}
-          <IconButton label="Fullscreen camera feed" icon={Maximize2} />
         </div>
       </div>
 
@@ -564,7 +566,7 @@ function CameraPanel({
           <div className="rounded-md border border-slate-800 bg-slate-900/60 p-4">
             <div className="flex items-center justify-between mb-3 border-b border-slate-800 pb-2">
               <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                Configure Camera Stream URLs
+                Configure cameras
               </h3>
               <button
                 type="button"
@@ -582,30 +584,33 @@ function CameraPanel({
                 }}
                 className="flex items-center gap-1 rounded bg-lime-600 hover:bg-lime-500 px-2.5 py-1 text-xs font-semibold text-white transition cursor-pointer"
               >
-                + Add Stream
+                + Add camera
               </button>
             </div>
             {tempCameras.length === 0 ? (
               <div className="text-center py-6 text-xs text-slate-500">
-                No camera streams configured. Click "+ Add Stream" to add one.
+                No camera streams configured. Click "+ Add camera" to add one.
               </div>
             ) : (
               <div className="grid gap-4 md:grid-cols-3">
                 {tempCameras.map((cam, idx) => (
                   <div key={cam.id} className="grid gap-2 rounded border border-slate-800 bg-slate-900 p-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <input
-                        type="text"
-                        value={cam.name}
-                        placeholder="Camera Name"
-                        onChange={(e) => {
-                          const updated = [...tempCameras];
-                          updated[idx] = { ...updated[idx], name: e.target.value };
-                          setTempCameras(updated);
-                        }}
-                        className="rounded border border-slate-700 bg-slate-950 px-2 py-0.5 text-xs text-white font-semibold outline-none focus:border-slate-500 flex-1 min-w-0"
-                      />
-                      <div className="flex items-center gap-1.5 shrink-0">
+                    <div className="flex items-start justify-between gap-2">
+                      <label className="grid gap-0.5 text-[10px] text-slate-400 flex-1 min-w-0">
+                        Camera name
+                        <input
+                          type="text"
+                          value={cam.name}
+                          placeholder="Camera Name"
+                          onChange={(e) => {
+                            const updated = [...tempCameras];
+                            updated[idx] = { ...updated[idx], name: e.target.value };
+                            setTempCameras(updated);
+                          }}
+                          className="rounded border border-slate-700 bg-slate-950 px-2 py-0.5 text-xs text-white font-semibold outline-none focus:border-slate-500 w-full"
+                        />
+                      </label>
+                      <div className="flex items-center gap-1.5 shrink-0 pt-3.5">
                         <label className="flex items-center gap-1 cursor-pointer text-[10px] text-slate-300">
                           <input
                             type="checkbox"
@@ -632,17 +637,20 @@ function CameraPanel({
                         </button>
                       </div>
                     </div>
-                    <input
-                      type="text"
-                      value={cam.rtspUrl}
-                      placeholder="rtsp://address/stream"
-                      onChange={(e) => {
-                        const updated = [...tempCameras];
-                        updated[idx] = { ...updated[idx], rtspUrl: e.target.value };
-                        setTempCameras(updated);
-                      }}
-                      className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white outline-none focus:border-slate-500"
-                    />
+                    <label className="grid gap-0.5 text-[10px] text-slate-400">
+                      Camera URL
+                      <input
+                        type="text"
+                        value={cam.rtspUrl}
+                        placeholder="rtsp://address/stream"
+                        onChange={(e) => {
+                          const updated = [...tempCameras];
+                          updated[idx] = { ...updated[idx], rtspUrl: e.target.value };
+                          setTempCameras(updated);
+                        }}
+                        className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white outline-none focus:border-slate-500"
+                      />
+                    </label>
                     <div className="grid grid-cols-2 gap-2">
                       <label className="grid gap-0.5 text-[10px] text-slate-400">
                         3D Blueprint Zone
@@ -731,7 +739,11 @@ function CameraPanel({
             <div className="flex justify-end gap-2 mt-4">
               <button
                 type="button"
-                onClick={() => setIsConfiguringCameras(false)}
+                onClick={() => {
+                  if (window.confirm("All changes have not been saved yet. Are you sure you want to discard them?")) {
+                    setIsConfiguringCameras(false);
+                  }
+                }}
                 className="rounded px-3 py-1.5 text-xs font-semibold text-slate-400 hover:text-white transition cursor-pointer"
               >
                 Cancel
@@ -1066,31 +1078,40 @@ function MetricMini({ label, value }: { label: string; value: string }) {
   );
 }
 
+const SAFETY_EVENTS_QUERY_KEY = ["safety-events"] as const;
+
 function IncidentPanel() {
-  const [events, setEvents] = useState<(ViolationReport | ZoneViolation | BehaviorIncident)[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const queryClient = useQueryClient();
+  const eventsQuery = useQuery({
+    queryKey: SAFETY_EVENTS_QUERY_KEY,
+    queryFn: getSafetyEvents,
+  });
+  const events = eventsQuery.data ?? [];
+  const [deleteAllError, setDeleteAllError] = useState("");
+  const [deletingAll, setDeletingAll] = useState(false);
   const [selectedIncident, setSelectedIncident] = useState<{
     category: IncidentCategory;
     id: number;
   } | null>(null);
 
-  const loadEvents = useCallback(async () => {
-    setLoading(true);
-    setError("");
-    try {
-      setEvents(await getSafetyEvents());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load violations");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  // isFetching (not isPending) so the spinner also shows on the manual
+  // refresh button click below, matching the previous setLoading(true)-on-
+  // every-call behavior.
+  const loading = eventsQuery.isFetching || deletingAll;
+  const error =
+    deleteAllError ||
+    (eventsQuery.isError
+      ? eventsQuery.error instanceof Error
+        ? eventsQuery.error.message
+        : "Could not load violations"
+      : "");
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => void loadEvents(), 0);
-    return () => window.clearTimeout(timer);
-  }, [loadEvents]);
+  const removeEventFromCache = (id: number) => {
+    queryClient.setQueryData<(ViolationReport | ZoneViolation | BehaviorIncident)[]>(
+      SAFETY_EVENTS_QUERY_KEY,
+      (current) => current?.filter((item) => item.id !== id),
+    );
+  };
 
   const deleteEvent = async (event: ViolationReport | ZoneViolation | BehaviorIncident) => {
     if (!event.id || !confirm(CONFIRM_DELETE_INCIDENT)) {
@@ -1099,20 +1120,20 @@ function IncidentPanel() {
     const category: IncidentCategory =
       "violation_type" in event ? "ppe" : "behavior_type" in event ? "behavior" : "zone";
     await deleteIncident(category, event.id);
-    setEvents((current) => current.filter((item) => item.id !== event.id));
+    removeEventFromCache(event.id);
   };
 
   const deleteAllEvents = async () => {
     if (!confirm(CONFIRM_DELETE_ALL_INCIDENTS)) return;
-    setLoading(true);
-    setError("");
+    setDeletingAll(true);
+    setDeleteAllError("");
     try {
       await deleteAllIncidents();
-      setEvents([]);
+      queryClient.setQueryData(SAFETY_EVENTS_QUERY_KEY, []);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not delete incidents");
+      setDeleteAllError(err instanceof Error ? err.message : "Could not delete incidents");
     } finally {
-      setLoading(false);
+      setDeletingAll(false);
     }
   };
 
@@ -1134,7 +1155,7 @@ function IncidentPanel() {
             <span>Delete All</span>
           </button>
           <button
-            onClick={() => void loadEvents()}
+            onClick={() => void eventsQuery.refetch()}
             className="rounded-md border border-slate-200 bg-white p-2 text-xs font-semibold text-slate-700 transition hover:border-slate-300 hover:text-slate-950"
             type="button"
           >
@@ -1163,9 +1184,7 @@ function IncidentPanel() {
           category={selectedIncident.category}
           incidentId={selectedIncident.id}
           onClose={() => setSelectedIncident(null)}
-          onDeleted={() =>
-            setEvents((current) => current.filter((item) => item.id !== selectedIncident.id))
-          }
+          onDeleted={() => removeEventFromCache(selectedIncident.id)}
         />
       ) : null}
     </section>
@@ -1203,6 +1222,10 @@ export function DashboardShell() {
   const [activeCameraId, setActiveCameraId] = useState<number>(1);
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
   const [physicalZones, setPhysicalZones] = useState<PhysicalZone[]>([]);
+  // Same hook and default range/zone (7D, all zones) as the Incident
+  // Analytics tab's KPI row, so the two stay in sync instead of this one
+  // showing static placeholder data.
+  const { kpis } = useSafetyKpis();
 
   useEffect(() => {
     const stored = localStorage.getItem("ppe_demo_cameras");
@@ -1297,7 +1320,7 @@ export function DashboardShell() {
             </section>
 
             <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-              {safetyMetrics.map((metric) => (
+              {kpis.map((metric) => (
                 <MetricCard key={metric.label} metric={metric} />
               ))}
             </section>

@@ -28,7 +28,7 @@ from app.storage.local_paths import UPLOAD_DIR, ensure_upload_dir
 router = APIRouter(tags=["detection"])
 logger = logging.getLogger(__name__)
 
-_detector = PPEDetector()
+_detector = PPEDetector(enable_stream_pool=False)  # no /ws/stream traffic on this instance
 
 _ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/bmp"}
 _ALLOWED_VIDEO_TYPES = {

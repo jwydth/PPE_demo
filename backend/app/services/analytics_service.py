@@ -5,7 +5,10 @@ buckets and counts already-normalized UnifiedIncident rows.
 Aggregation happens in Python (fetch once per call, bucket/group in memory)
 rather than in SQL, per the plan's documented tradeoff — see
 UnifiedIncidentService's module docstring for why, and its `_validate_limit`
-for the resulting scale cap.
+for the resulting scale cap (settings.ANALYTICS_LIMIT). Past that cap, rows
+are dropped and list_incidents logs a warning rather than returning
+silently-wrong aggregates — raise the setting if real incident volume
+approaches it.
 """
 
 from collections import defaultdict
@@ -15,6 +18,7 @@ from typing import Annotated
 from fastapi import Depends
 from sqlmodel import Session
 
+from app.core.config import settings
 from app.db.session import get_session
 from app.repositories.behavior_incident_repository import BehaviorIncidentRepository
 from app.repositories.camera_repository import CameraRepository
@@ -41,7 +45,7 @@ from app.services.incident_service import (
 )
 from app.storage.evidence_storage import EvidenceStorage, get_evidence_storage
 
-_ANALYTICS_LIMIT = 5000
+_ANALYTICS_LIMIT = settings.ANALYTICS_LIMIT
 # A zone counts as "active" if it recorded an incident within this window.
 _ACTIVE_ZONE_WINDOW = timedelta(minutes=15)
 

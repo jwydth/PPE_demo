@@ -17,6 +17,13 @@ class Settings(BaseSettings):
     # "auto" uses the first CUDA GPU when PyTorch can access one, otherwise CPU.
     # You can also force "cpu", "cuda", "cuda:0", "0", etc.
     INFERENCE_DEVICE: str = "auto"
+    # Bounded pool of pre-warmed model instances for the live streaming path —
+    # caps VRAM/connect-latency instead of loading a fresh copy of the weights
+    # per websocket connection. Connections beyond this count queue for a free
+    # instance (see PPEDetector.acquire_model_instance).
+    MAX_CONCURRENT_STREAMS: int = 4
+    INFERENCE_HALF: bool = False   # set True only on a CUDA GPU
+    INFERENCE_IMGSZ: int = 640     # pin inference resolution for predictable latency
     CONFIDENCE_THRESHOLD: float = 0.3
     # Minimum fraction of an equipment box that must overlap its person box
     # for the two to be considered associated (0.0 – 1.0)
@@ -83,6 +90,12 @@ class Settings(BaseSettings):
     FALL_INCIDENT_COOLDOWN_SECONDS: float = 10.0
     FALL_MODEL_NAME: str = "yolo26m-pose"
     FALL_MODEL_VERSION: str = "v8.4.0"
+    # Upper bound on rows UnifiedIncidentService will read per category per call.
+    # Analytics aggregates in Python (see analytics_service.py's module docstring
+    # for why), so a date range with more incidents than this gets its oldest
+    # rows silently dropped from the counts. Raise this if real incident volume
+    # approaches it; a truncation warning is logged when it's hit either way.
+    ANALYTICS_LIMIT: int = 20000
 
     @model_validator(mode="after")
     def _coerce_sign_dict_keys(self) -> "Settings":

@@ -1,7 +1,17 @@
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import BigInteger, CheckConstraint, Column, DateTime, Float, String, Text, func
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    Column,
+    DateTime,
+    Float,
+    Index,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, Relationship, SQLModel
 
@@ -20,6 +30,12 @@ class PPEViolation(SQLModel, table=True):
             "frame_index IS NULL OR frame_index >= 0",
             name="ck_ppe_violations_frame_index_nonnegative",
         ),
+        # Matches the real query shape: date-range reads filtered/joined by
+        # camera (list_between / analytics range queries) — see PERF_PLAN.md
+        # Tier 3.3. Single-column indexes on occurred_at/camera_id already
+        # existed but can't satisfy a (range + camera) filter as efficiently
+        # as one composite index covering both.
+        Index("ix_ppe_violations_occurred_at_camera_id", "occurred_at", "camera_id"),
     )
 
     id: int | None = Field(default=None, primary_key=True, sa_type=BigInteger)

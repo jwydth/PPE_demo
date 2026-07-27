@@ -1,5 +1,6 @@
-import { Shield } from "lucide-react";
-import { deletePhysicalZone } from "@/lib/ppe-api";
+import { useState } from "react";
+import { Plus, Shield } from "lucide-react";
+import { createPhysicalZone, deletePhysicalZone, updatePhysicalZone } from "@/lib/ppe-api";
 import { PhysicalZone } from "@/types/zone";
 import { ZoneButton } from "./zone-button";
 
@@ -12,6 +13,9 @@ export function ZoneSidebar({
   cameraCounts: Record<number, number>;
   onPhysicalZonesUpdate: (updated: PhysicalZone[]) => void;
 }) {
+  const [newZoneName, setNewZoneName] = useState("");
+  const [loading, setLoading] = useState(false);
+
   const handleDelete = async (zone: PhysicalZone) => {
     if (!confirm(`Delete the "${zone.name}" zone? Cameras assigned to it will become unassigned.`)) {
       return;
@@ -21,6 +25,32 @@ export function ZoneSidebar({
       onPhysicalZonesUpdate(physicalZones.filter((z) => z.id !== zone.id));
     } catch (err) {
       alert(err instanceof Error ? err.message : "Could not delete zone");
+    }
+  };
+
+  const handleCreateZone = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const name = newZoneName.trim();
+    if (!name) return;
+    setLoading(true);
+    try {
+      const newZone = await createPhysicalZone(name);
+      onPhysicalZonesUpdate([...physicalZones, newZone]);
+      setNewZoneName("");
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not create zone");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleUpdate = async (zone: PhysicalZone, newName: string) => {
+    try {
+      const updatedZone = await updatePhysicalZone(zone.id, newName);
+      onPhysicalZonesUpdate(physicalZones.map((z) => (z.id === zone.id ? updatedZone : z)));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not update zone");
+      throw err;
     }
   };
 
@@ -41,10 +71,28 @@ export function ZoneSidebar({
           </div>
         </div>
 
-        <div className="grid gap-2">
+        <form onSubmit={handleCreateZone} className="flex gap-1.5 px-1">
+          <input
+            type="text"
+            placeholder="New zone name..."
+            value={newZoneName}
+            disabled={loading}
+            onChange={(e) => setNewZoneName(e.target.value)}
+            className="flex-1 rounded border border-slate-300 bg-white px-2.5 py-1.5 text-xs text-slate-950 placeholder-slate-400 outline-none focus:border-slate-400 transition"
+          />
+          <button
+            type="submit"
+            disabled={loading || !newZoneName.trim()}
+            className="flex items-center justify-center rounded bg-slate-900 hover:bg-slate-800 disabled:opacity-50 disabled:bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white transition cursor-pointer"
+          >
+            <Plus className="size-4" />
+          </button>
+        </form>
+
+        <div className="flex flex-col gap-2 overflow-y-auto flex-1 pr-1">
           {physicalZones.length === 0 ? (
             <p className="px-1 text-xs text-slate-400">
-              No zones yet — create one from Camera Feeds → Configure URLs.
+              No zones yet — create one from Camera Feeds → Configure cameras.
             </p>
           ) : (
             physicalZones.map((zone) => (
@@ -53,6 +101,7 @@ export function ZoneSidebar({
                 zone={zone}
                 cameraCount={cameraCounts[zone.id] ?? 0}
                 onDelete={() => void handleDelete(zone)}
+                onUpdate={(newName) => handleUpdate(zone, newName)}
               />
             ))
           )}

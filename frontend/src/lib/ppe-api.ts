@@ -306,6 +306,16 @@ export async function deletePhysicalZone(zoneId: number): Promise<void> {
   if (!res.ok) throw await readError(res, "Could not delete zone");
 }
 
+export async function updatePhysicalZone(zoneId: number, name: string): Promise<PhysicalZone> {
+  const res = await fetch(`${API_URL}/physical-zones/${zoneId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) throw await readError(res, "Could not update zone");
+  return res.json();
+}
+
 export async function getCameras(): Promise<Camera[]> {
   const res = await fetch(`${API_URL}/cameras`);
   if (!res.ok) throw await readError(res, "Could not load cameras");

@@ -70,6 +70,29 @@ class BehaviorIncidentRepository:
             self.session.rollback()
             raise RepositoryError("Could not list behavior incident evidence.") from exc
 
+    def get_evidence_for_incidents(
+        self, incident_ids: list[int]
+    ) -> dict[int, list[BehaviorEvidence]]:
+        """Batched form of get_evidence() for multiple incidents in one query —
+        avoids an N+1 when building a unified incident list (PERF_PLAN.md
+        Tier 3.3). Each incident's evidence list is ordered newest-first, same
+        as get_evidence()."""
+        if not incident_ids:
+            return {}
+        try:
+            statement = (
+                select(BehaviorEvidence)
+                .where(BehaviorEvidence.behavior_incident_id.in_(incident_ids))
+                .order_by(BehaviorEvidence.occurred_at.desc(), BehaviorEvidence.id.desc())
+            )
+            by_incident: dict[int, list[BehaviorEvidence]] = {}
+            for evidence in self.session.exec(statement).all():
+                by_incident.setdefault(evidence.behavior_incident_id, []).append(evidence)
+            return by_incident
+        except SQLAlchemyError as exc:
+            self.session.rollback()
+            raise RepositoryError("Could not list behavior incident evidence.") from exc
+
     def list_recent(
         self,
         *,

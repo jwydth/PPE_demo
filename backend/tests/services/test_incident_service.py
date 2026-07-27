@@ -13,6 +13,7 @@ from app.models.camera import Camera
 from app.models.physical_zone import PhysicalZone
 from app.models.ppe_violation import PPEViolation
 from app.models.zone_violation import ZoneViolation
+from app.core.config import settings
 from app.services import ServiceValidationError
 from app.services.incident_service import UnifiedIncidentService
 
@@ -94,6 +95,10 @@ def _service(
     behavior_repository = Mock()
     behavior_repository.list_between.return_value = behavior or []
     behavior_repository.get_evidence.return_value = behavior_evidence or []
+    evidence_by_incident: dict[int, list[BehaviorEvidence]] = {}
+    for evidence in behavior_evidence or []:
+        evidence_by_incident.setdefault(evidence.behavior_incident_id, []).append(evidence)
+    behavior_repository.get_evidence_for_incidents.return_value = evidence_by_incident
     camera_repository = Mock()
     camera_repository.get_by_id.side_effect = lambda cid: (cameras or {}).get(cid)
     zone_repository_physical = Mock()
@@ -219,4 +224,4 @@ def test_list_incidents_rejects_invalid_limit():
     with pytest.raises(ServiceValidationError):
         service.list_incidents(limit=0)
     with pytest.raises(ServiceValidationError):
-        service.list_incidents(limit=5001)
+        service.list_incidents(limit=settings.ANALYTICS_LIMIT + 1)

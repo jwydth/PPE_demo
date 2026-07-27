@@ -51,6 +51,26 @@ async def create_physical_zone(
     )
 
 
+@router.put("/physical-zones/{zone_id}", response_model=PhysicalZoneRead)
+async def update_physical_zone(
+    zone_id: int,
+    body: PhysicalZoneCreate,
+    service: Annotated[ZoneService, Depends(get_zone_service)],
+) -> PhysicalZoneRead:
+    try:
+        zone = service.update_physical_zone_name(zone_id, body.name)
+    except ServiceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ServiceValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return PhysicalZoneRead(
+        id=zone.id,
+        name=zone.name,
+        zone_type=zone.zone_type,
+        is_active=zone.is_active,
+    )
+
+
 @router.delete("/physical-zones/{zone_id}")
 async def delete_physical_zone(
     zone_id: int,

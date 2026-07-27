@@ -52,7 +52,7 @@ from app.services.ppe.geometry import _bbox_aspect_ratio
 from app.services.ppe.response_builder import (
     _append_tracking_overlay_frame,
     _build_response,
-    _encode_frame_to_base64,
+    _encode_frame_to_jpeg,
     _extract_result_boxes,
     _video_metadata,
 )
@@ -288,6 +288,42 @@ def save_violation(
         )
 
 
+def _prepare_pooled_model_instance(model_instance) -> None:
+    """Clear tracker state left over from a previous stream on a pooled instance.
+
+    `track(..., persist=True)` deliberately keeps tracker state across calls on
+    the *same* video so track IDs don't reset every frame. The pool reuses the
+    same instance across *different* streams, though, and Ultralytics only
+    auto-resets trackers when persist=False (see
+    ultralytics/trackers/track.py::on_predict_postprocess_end) — so we reset
+    them ourselves before starting a new source.
+    """
+    predictor = getattr(model_instance, "predictor", None)
+    for tracker in getattr(predictor, "trackers", []) or []:
+        tracker.reset()
+
+
+def _release_pooled_model_instance(model_instance) -> None:
+    """Stop the background stream reader before a pooled instance is reused.
+
+    Without this, a pooled instance handed to a new stream would leave the
+    previous stream's RTSP-reading daemon thread running forever in the
+    background (ultralytics/data/loaders.py::LoadStreams keeps polling until
+    `.close()` is called explicitly).
+    """
+    predictor = getattr(model_instance, "predictor", None)
+    dataset = getattr(predictor, "dataset", None)
+    close = getattr(dataset, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            logger.warning(
+                "Failed to close stream reader for pooled model instance",
+                exc_info=True,
+            )
+
+
 async def real_video_pipeline(
     detector,
     video_path: str | Path,
@@ -300,10 +336,12 @@ async def real_video_pipeline(
     settings_state: dict | None = None,
 ):
     """Unified internal generator for video processing (real model path)."""
-    # cv2.VideoCapture() blocks synchronously to connect/probe the source — for an
-    # RTSP stream this can stall for seconds (or hang, absent a capture timeout).
-    # Run it off the event loop so a slow/unreachable camera doesn't freeze every
-    # other WS connection and HTTP request on the server.
+    # _video_metadata() opens its own cv2.VideoCapture to read fps/frame-count
+    # (separate from the one model.track() opens below) and is fully
+    # synchronous — for an RTSP source that connection handshake alone takes
+    # 1-3s, and without offloading it here it blocks the *entire* event loop,
+    # so concurrent streams starting around the same time queue up behind
+    # each other instead of connecting in parallel.
     fps, total_frames = await asyncio.to_thread(_video_metadata, video_path)
     is_stream = total_frames <= 0
     start_wall_time = time.perf_counter()
@@ -397,320 +435,361 @@ async def real_video_pipeline(
         import os
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|timeout;3000000"
 
-    from ultralytics import YOLO
-    from pathlib import Path
-
-    if isinstance(detector.model, YOLO):
-        # Loading weights from disk blocks for multiple seconds — run it off
-        # the event loop so other WS connections / HTTP requests stay responsive
-        # while this stream's isolated model instance spins up.
-        model_instance = await asyncio.to_thread(
-            YOLO, detector.model.ckpt_path or str(Path(settings.MODEL_PATH).resolve())
+    # Borrow a pre-warmed model instance from the bounded pool instead of loading
+    # a fresh copy of the weights from disk on every connection (see PERF_PLAN.md
+    # Tier 1.1). The pool caps VRAM at a known ceiling and keeps track(persist=True)
+    # state isolated per concurrent stream.
+    acquire_start = time.perf_counter()
+    model_instance = await detector.acquire_model_instance()
+    acquire_ms = (time.perf_counter() - acquire_start) * 1000
+    if acquire_ms > 50:
+        # A warm pool should return near-instantly; a large wait here means every
+        # pooled instance was already checked out (too many concurrent streams).
+        logger.info(f"[PIPELINE] '{video_name}' waited {acquire_ms:.0f}ms for a free pooled model instance")
+    try:
+        _prepare_pooled_model_instance(model_instance)
+        tracker_path = _resolve_video_tracker(settings.VIDEO_TRACKER)
+        # half precision is CUDA-only; silently ignored (and a no-op) on CPU.
+        half = bool(settings.INFERENCE_HALF) and str(detector.device).startswith("cuda")
+        track_start = time.perf_counter()
+        results = model_instance.track(
+            source=source_str,
+            stream=True,
+            persist=True,
+            conf=settings.CONFIDENCE_THRESHOLD,
+            tracker=tracker_path,
+            classes=[0, 1, 2, 3],
+            vid_stride=stride,
+            device=detector.device,
+            half=half,
+            imgsz=settings.INFERENCE_IMGSZ,
+            verbose=False,
+            # stream_buffer=False: Ultralytics' LoadStreams still reads via a
+            # threaded background reader either way (that part isn't what this
+            # flag controls) — it decides what next() serves when the reader
+            # has outpaced inference. True FIFO-queues up to 30 captured frames
+            # and always serves the *oldest* first, so any inference slowdown
+            # builds a backlog that takes just as long to drain before the
+            # feed is showing "now" again. False serves the *newest* captured
+            # frame and discards the rest — drop-to-latest at the capture
+            # layer, same principle as the WS-send fix in PERF_PLAN.md Tier
+            # 4.2, just one stage earlier. Right choice for a live dashboard:
+            # continuous PPE/zone violations persist across many frames, so
+            # occasionally skipping one during a slowdown isn't a detection
+            # risk, and it keeps the feed from drifting behind real time.
+            stream_buffer=False,
         )
-    else:
-        model_instance = detector.model
 
-    tracker_path = _resolve_video_tracker(settings.VIDEO_TRACKER)
-    results = model_instance.track(
-        source=source_str,
-        stream=True,
-        persist=True,
-        conf=settings.CONFIDENCE_THRESHOLD,
-        tracker=tracker_path,
-        classes=[0, 1, 2, 3],
-        vid_stride=stride,
-        device=detector.device,
-        verbose=False,
-        stream_buffer=True,  # Use threaded reader for stable RTSP ingestion
-    )
-
-    results_iter = iter(results)
-    processed_frames = 0
-    while True:
-        # Offload the blocking next() call (which reads frames and runs YOLO inference)
-        # to a background thread to keep the FastAPI main event loop 100% responsive.
-        result = await asyncio.to_thread(next, results_iter, None)
-        if result is None:
-            break
-        processed_frames += 1
-        frame_index = (processed_frames - 1) * stride
-        curr_ppe, curr_zone, curr_fall = get_flags()
-
-        # Detect zone being toggled ON mid-stream and retroactively check foot history
-        zone_just_enabled = curr_zone and not prev_zone_enabled
-        prev_zone_enabled = curr_zone
-
-        if settings_state and settings_state.pop("reload_zones", False):
-            zones = await asyncio.to_thread(load_zones, video_name)
-            logger.info(f"[ZONE] Hot-reloaded {len(zones)} zone(s): {[(z.zone_name, z.zone_type) for z in zones]}")
-            if curr_zone:
-                zone_just_enabled = True  # treat reload same as fresh enable only if zone monitoring is active
-
-        if zone_just_enabled and zones and foot_history:
-            logger.info(f"[ZONE] Zone enabled/reloaded at frame {frame_index} — running retroactive check over {len(foot_history)} track(s)")
-            persons_this_frame, _, _, _ = _extract_result_boxes(result)
-            temp_response = _build_response(persons_this_frame, [], [], [], 0.0)
-            retroactively_reported_workers: set[int] = set()
-            for worker, zone, track_id in _retroactive_zone_check(zones, frame_index):
-                cv_id = zone.camera_zone_view_id
-                if cv_id not in worker.reported_zones:
-                    matched_person = next((p for p in temp_response.persons if p.track_id == track_id), None)
-                    if matched_person is None:
-                        # Person not visible in this frame — build a stand-in from worker's last known state
-                        matched_person = PersonResult(
-                            person_id=track_id or 0,
-                            track_id=track_id,
-                            bbox=worker.last_bbox,
-                            confidence=1.0,
-                            equipment=[],
-                            compliant=True,
-                        )
-                    zv = record_zone_violation(worker, zone, result.orig_img.copy(), matched_person, video_name, frame_index, _save_violation_snapshot)
-                    if zv:
-                        retroactively_reported_workers.add(id(worker))
-                        yield StreamEvent(event="zone_violation", frame_index=frame_index, data=zv.model_dump())
-            # Reset zone state for workers that just had a retroactive violation saved so
-            # their ongoing live presence is treated as a fresh entry from this point forward.
-            for worker in workers:
-                if id(worker) in retroactively_reported_workers:
-                    worker.reported_zones = set()
-                    worker.zone_dwell = {}
-                    worker.zone_last_in = {}
-
-        if processed_frames % 60 == 1:
-            logger.info(f" [PIPELINE] Frame {frame_index} active state: ppe={curr_ppe}, zone={curr_zone}, fall={curr_fall}")
-
-        persons, helmets, vests, cleaning_coveralls = _extract_result_boxes(result)
-
-        response = _build_response(persons, helmets, vests, cleaning_coveralls, 0.0)
-        frame = result.orig_img.copy()
-        frame_height, frame_width = frame.shape[:2]
-        if curr_fall:
-            fall_ttl_frames = max(1, settings.FALL_LIVE_FRAME_STRIDE * 2)
-            if fall_unavailable_message is None and fall_live_session is None:
-                fall_live_session = _fall_detector.create_live_session(
-                    fps=fps,
-                    frame_stride=settings.FALL_LIVE_FRAME_STRIDE,
+        results_iter = iter(results)
+        processed_frames = 0
+        while True:
+            # Offload the blocking next() call (which reads frames and runs YOLO inference)
+            # to a background thread to keep the FastAPI main event loop 100% responsive.
+            result = await asyncio.to_thread(next, results_iter, None)
+            if result is None:
+                break
+            processed_frames += 1
+            if processed_frames == 1:
+                # Dominated by the source handshake (RTSP connect + wait for a
+                # keyframe), not model load — the pool already removed that cost.
+                logger.info(
+                    f"[PIPELINE] '{video_name}' first frame ready in "
+                    f"{(time.perf_counter() - track_start) * 1000:.0f}ms "
+                    "(source connect + first inference)"
                 )
-            if fall_unavailable_message is None and frame_index % max(1, settings.FALL_LIVE_FRAME_STRIDE) == 0:
-                try:
-                    last_fall_payload = fall_live_session.process_frame(
-                        frame,
-                        frame_index=frame_index,
-                        source_name=video_name,
-                    )
-                    for incident in last_fall_payload.get("incidents", []):
-                        yield StreamEvent(event="behavior_incident", frame_index=frame_index, data=incident)
-                except FallModelUnavailable as exc:
-                    fall_unavailable_message = str(exc)
-                    last_fall_payload = {
-                        "summary": {
-                            "status": "unavailable",
-                            "fall_count": 0,
-                            "fall_risk_count": 0,
-                            "normal_count": 0,
-                            "person_count": 0,
-                            "top_label": "unavailable",
-                            "top_confidence": 0.0,
-                            "persisted_incident_ids": [],
-                        },
-                        "detections": [],
-                        "incidents": [],
-                    }
-                    logger.warning("[FALL] Live fall detection unavailable: %s", fall_unavailable_message)
-                except Exception:
-                    fall_unavailable_message = "Fall detection failed during live stream processing."
-                    last_fall_payload = {
-                        "summary": {
-                            "status": "unavailable",
-                            "fall_count": 0,
-                            "fall_risk_count": 0,
-                            "normal_count": 0,
-                            "person_count": 0,
-                            "top_label": "unavailable",
-                            "top_confidence": 0.0,
-                            "persisted_incident_ids": [],
-                        },
-                        "detections": [],
-                        "incidents": [],
-                    }
-                    logger.exception("[FALL] Live fall detection failed")
-            elif fall_unavailable_message is None and fall_live_session is not None:
-                last_fall_payload = fall_live_session.payload_for_frame(
-                    frame_index,
-                    max_age_frames=fall_ttl_frames,
-                )
-        else:
-            last_fall_payload = None
-        used_worker_ids: set[int] = set()
-        overlay_person_ids: set[tuple[str, int]] = set()
-        current_frame_overlay: list[TrackingOverlayFrame] = []
+            frame_index = (processed_frames - 1) * stride
+            curr_ppe, curr_zone, curr_fall = get_flags()
 
-        for person in response.persons:
-            decision = _update_worker_status(
-                workers=workers,
-                person=person,
-                frame_index=frame_index,
-                fps=fps,
-                frame_width=frame_width,
-                frame_height=frame_height,
-                used_worker_ids=used_worker_ids,
-            )
-            worker = decision["worker"]
-            if curr_ppe:
-                candidate_violations += int(decision["candidate"])
+            # Detect zone being toggled ON mid-stream and retroactively check foot history
+            zone_just_enabled = curr_zone and not prev_zone_enabled
+            prev_zone_enabled = curr_zone
 
-            track_camera_zone_view_id = None
-            track_physical_zone_id = None
-            track_zone_name = None
-            track_zone_type = None
+            if settings_state and settings_state.pop("reload_zones", False):
+                zones = load_zones(video_name)
+                logger.info(f"[ZONE] Hot-reloaded {len(zones)} zone(s): {[(z.zone_name, z.zone_type) for z in zones]}")
+                if curr_zone:
+                    zone_just_enabled = True  # treat reload same as fresh enable only if zone monitoring is active
 
-            if person.track_id is not None:
-                hist = foot_history.setdefault(person.track_id, [])
-                fp_for_history = get_person_foot_point(person, frame_width, frame_height)
-                hist.append((frame_index, fp_for_history))
-                if len(hist) > _FOOT_HISTORY_FRAMES:
-                    del hist[0]
-
-            if curr_zone and zones:
-                test_point = get_person_foot_point(person, frame_width, frame_height)
-                incursion_zones = check_zone_incursion(zones, test_point)
-                incursion_ids = {z.camera_zone_view_id for z in incursion_zones}
-
-                # Log every 30 frames so we can see whether foot point ever hits the zone
-                if frame_index % 30 == 0:
-                    logger.info(
-                        f"[ZONE] Frame {frame_index} worker {person.track_id}: "
-                        f"foot={test_point} zones_loaded={len(zones)} in_zones={[(z.zone_name, z.zone_type) for z in incursion_zones]}"
-                    )
-                    for z in zones:
-                        logger.info(f"[ZONE]   zone '{z.zone_name}' poly={z.poly[:2]}...  threshold={z.threshold}s")
-
-                for zone in zones:
+            if zone_just_enabled and zones and foot_history:
+                logger.info(f"[ZONE] Zone enabled/reloaded at frame {frame_index} — running retroactive check over {len(foot_history)} track(s)")
+                persons_this_frame, _, _, _ = _extract_result_boxes(result)
+                temp_response = _build_response(persons_this_frame, [], [], [], 0.0)
+                retroactively_reported_workers: set[int] = set()
+                for worker, zone, track_id in _retroactive_zone_check(zones, frame_index):
                     cv_id = zone.camera_zone_view_id
-                    in_z = cv_id in incursion_ids
-                    worker.zone_last_in[cv_id] = in_z  # always record last known position
-                    if zone.zone_type == "WALKWAY":
-                        if in_z:
-                            # Worker back inside walkway — reset so a future exit can trigger a new incident
-                            worker.zone_dwell[cv_id] = 0
-                            worker.reported_zones.discard(cv_id)
+                    if cv_id not in worker.reported_zones:
+                        matched_person = next((p for p in temp_response.persons if p.track_id == track_id), None)
+                        if matched_person is None:
+                            # Person not visible in this frame — build a stand-in from worker's last known state
+                            matched_person = PersonResult(
+                                person_id=track_id or 0,
+                                track_id=track_id,
+                                bbox=worker.last_bbox,
+                                confidence=1.0,
+                                equipment=[],
+                                compliant=True,
+                            )
+                        zv = record_zone_violation(worker, zone, result.orig_img.copy(), matched_person, video_name, frame_index, _save_violation_snapshot)
+                        if zv:
+                            retroactively_reported_workers.add(id(worker))
+                            yield StreamEvent(event="zone_violation", frame_index=frame_index, data=zv.model_dump())
+                # Reset zone state for workers that just had a retroactive violation saved so
+                # their ongoing live presence is treated as a fresh entry from this point forward.
+                for worker in workers:
+                    if id(worker) in retroactively_reported_workers:
+                        worker.reported_zones = set()
+                        worker.zone_dwell = {}
+                        worker.zone_last_in = {}
+
+            if processed_frames % 60 == 1:
+                logger.info(f" [PIPELINE] Frame {frame_index} active state: ppe={curr_ppe}, zone={curr_zone}, fall={curr_fall}")
+
+            persons, helmets, vests, cleaning_coveralls = _extract_result_boxes(result)
+
+            response = _build_response(persons, helmets, vests, cleaning_coveralls, 0.0)
+            frame = result.orig_img.copy()
+            frame_height, frame_width = frame.shape[:2]
+            if curr_fall:
+                fall_ttl_frames = max(1, settings.FALL_LIVE_FRAME_STRIDE * 2)
+                if fall_unavailable_message is None and fall_live_session is None:
+                    fall_live_session = _fall_detector.create_live_session(
+                        fps=fps,
+                        frame_stride=settings.FALL_LIVE_FRAME_STRIDE,
+                    )
+                if fall_unavailable_message is None and frame_index % max(1, settings.FALL_LIVE_FRAME_STRIDE) == 0:
+                    try:
+                        last_fall_payload = fall_live_session.process_frame(
+                            frame,
+                            frame_index=frame_index,
+                            source_name=video_name,
+                        )
+                        for incident in last_fall_payload.get("incidents", []):
+                            yield StreamEvent(event="behavior_incident", frame_index=frame_index, data=incident)
+                    except FallModelUnavailable as exc:
+                        fall_unavailable_message = str(exc)
+                        last_fall_payload = {
+                            "summary": {
+                                "status": "unavailable",
+                                "fall_count": 0,
+                                "fall_risk_count": 0,
+                                "normal_count": 0,
+                                "person_count": 0,
+                                "top_label": "unavailable",
+                                "top_confidence": 0.0,
+                                "persisted_incident_ids": [],
+                            },
+                            "detections": [],
+                            "incidents": [],
+                        }
+                        logger.warning("[FALL] Live fall detection unavailable: %s", fall_unavailable_message)
+                    except Exception:
+                        fall_unavailable_message = "Fall detection failed during live stream processing."
+                        last_fall_payload = {
+                            "summary": {
+                                "status": "unavailable",
+                                "fall_count": 0,
+                                "fall_risk_count": 0,
+                                "normal_count": 0,
+                                "person_count": 0,
+                                "top_label": "unavailable",
+                                "top_confidence": 0.0,
+                                "persisted_incident_ids": [],
+                            },
+                            "detections": [],
+                            "incidents": [],
+                        }
+                        logger.exception("[FALL] Live fall detection failed")
+                elif fall_unavailable_message is None and fall_live_session is not None:
+                    last_fall_payload = fall_live_session.payload_for_frame(
+                        frame_index,
+                        max_age_frames=fall_ttl_frames,
+                    )
+            else:
+                last_fall_payload = None
+            used_worker_ids: set[int] = set()
+            overlay_person_ids: set[tuple[str, int]] = set()
+            current_frame_overlay: list[TrackingOverlayFrame] = []
+
+            for person in response.persons:
+                decision = _update_worker_status(
+                    workers=workers,
+                    person=person,
+                    frame_index=frame_index,
+                    fps=fps,
+                    frame_width=frame_width,
+                    frame_height=frame_height,
+                    used_worker_ids=used_worker_ids,
+                )
+                worker = decision["worker"]
+                if curr_ppe:
+                    candidate_violations += int(decision["candidate"])
+
+                track_camera_zone_view_id = None
+                track_physical_zone_id = None
+                track_zone_name = None
+                track_zone_type = None
+
+                if person.track_id is not None:
+                    hist = foot_history.setdefault(person.track_id, [])
+                    fp_for_history = get_person_foot_point(person, frame_width, frame_height)
+                    hist.append((frame_index, fp_for_history))
+                    if len(hist) > _FOOT_HISTORY_FRAMES:
+                        del hist[0]
+
+                if curr_zone and zones:
+                    test_point = get_person_foot_point(person, frame_width, frame_height)
+                    incursion_zones = check_zone_incursion(zones, test_point)
+                    incursion_ids = {z.camera_zone_view_id for z in incursion_zones}
+
+                    # Log every 30 frames so we can see whether foot point ever hits the zone
+                    if frame_index % 30 == 0:
+                        logger.info(
+                            f"[ZONE] Frame {frame_index} worker {person.track_id}: "
+                            f"foot={test_point} zones_loaded={len(zones)} in_zones={[(z.zone_name, z.zone_type) for z in incursion_zones]}"
+                        )
+                        for z in zones:
+                            logger.info(f"[ZONE]   zone '{z.zone_name}' poly={z.poly[:2]}...  threshold={z.threshold}s")
+
+                    for zone in zones:
+                        cv_id = zone.camera_zone_view_id
+                        in_z = cv_id in incursion_ids
+                        worker.zone_last_in[cv_id] = in_z  # always record last known position
+                        if zone.zone_type == "WALKWAY":
+                            if in_z:
+                                # Worker back inside walkway — reset so a future exit can trigger a new incident
+                                worker.zone_dwell[cv_id] = 0
+                                worker.reported_zones.discard(cv_id)
+                            else:
+                                worker.zone_dwell[cv_id] = worker.zone_dwell.get(cv_id, 0) + (stride / fps)
+                                dwell = worker.zone_dwell[cv_id]
+                                if frame_index % 30 == 0:
+                                    logger.info(f"[ZONE] Frame {frame_index} worker {person.track_id}: WALKWAY '{zone.zone_name}' dwell={dwell:.2f}s / threshold={zone.threshold}s already_reported={cv_id in worker.reported_zones}")
+                                if dwell > zone.threshold and cv_id not in worker.reported_zones:
+                                    logger.info(f"[ZONE] Frame {frame_index} worker {person.track_id}: WALKWAY threshold crossed — recording violation")
+                                    zv = record_zone_violation(worker, zone, frame, person, video_name, frame_index, _save_violation_snapshot)
+                                    logger.info(f"[ZONE] record_zone_violation returned: {zv}")
+                                    if zv:
+                                        yield StreamEvent(event="zone_violation", frame_index=frame_index, data=zv.model_dump())
                         else:
-                            worker.zone_dwell[cv_id] = worker.zone_dwell.get(cv_id, 0) + (stride / fps)
-                            dwell = worker.zone_dwell[cv_id]
-                            if frame_index % 30 == 0:
-                                logger.info(f"[ZONE] Frame {frame_index} worker {person.track_id}: WALKWAY '{zone.zone_name}' dwell={dwell:.2f}s / threshold={zone.threshold}s already_reported={cv_id in worker.reported_zones}")
-                            if dwell > zone.threshold and cv_id not in worker.reported_zones:
-                                logger.info(f"[ZONE] Frame {frame_index} worker {person.track_id}: WALKWAY threshold crossed — recording violation")
-                                zv = record_zone_violation(worker, zone, frame, person, video_name, frame_index, _save_violation_snapshot)
-                                logger.info(f"[ZONE] record_zone_violation returned: {zv}")
-                                if zv:
-                                    yield StreamEvent(event="zone_violation", frame_index=frame_index, data=zv.model_dump())
-                    else:
-                        # Janitors are immune to slippery zone violations
-                        if zone.zone_type == "SLIPPERY" and worker.role == "janitor":
-                            continue
+                            # Janitors are immune to slippery zone violations
+                            if zone.zone_type == "SLIPPERY" and worker.role == "janitor":
+                                continue
 
-                        if in_z:
-                            worker.zone_dwell[cv_id] = worker.zone_dwell.get(cv_id, 0) + (stride / fps)
-                            dwell = worker.zone_dwell[cv_id]
-                            logger.info(f"[ZONE] Frame {frame_index} worker {person.track_id} in role {worker.role}: {zone.zone_type} '{zone.zone_name}' dwell={dwell:.2f}s / threshold={zone.threshold}s already_reported={cv_id in worker.reported_zones}")
-                            if dwell > zone.threshold and cv_id not in worker.reported_zones:
-                                logger.info(f"[ZONE] Frame {frame_index} worker {person.track_id}: {zone.zone_type} threshold crossed — recording violation")
-                                zv = record_zone_violation(worker, zone, frame, person, video_name, frame_index, _save_violation_snapshot)
-                                logger.info(f"[ZONE] record_zone_violation returned: {zv}")
-                                if zv:
-                                    yield StreamEvent(event="zone_violation", frame_index=frame_index, data=zv.model_dump())
-                        else:
-                            # Worker exited the restricted zone — reset so re-entry triggers a new incident
-                            worker.reported_zones.discard(cv_id)
-                            worker.zone_dwell[cv_id] = 0
+                            if in_z:
+                                worker.zone_dwell[cv_id] = worker.zone_dwell.get(cv_id, 0) + (stride / fps)
+                                dwell = worker.zone_dwell[cv_id]
+                                logger.info(f"[ZONE] Frame {frame_index} worker {person.track_id} in role {worker.role}: {zone.zone_type} '{zone.zone_name}' dwell={dwell:.2f}s / threshold={zone.threshold}s already_reported={cv_id in worker.reported_zones}")
+                                if dwell > zone.threshold and cv_id not in worker.reported_zones:
+                                    logger.info(f"[ZONE] Frame {frame_index} worker {person.track_id}: {zone.zone_type} threshold crossed — recording violation")
+                                    zv = record_zone_violation(worker, zone, frame, person, video_name, frame_index, _save_violation_snapshot)
+                                    logger.info(f"[ZONE] record_zone_violation returned: {zv}")
+                                    if zv:
+                                        yield StreamEvent(event="zone_violation", frame_index=frame_index, data=zv.model_dump())
+                            else:
+                                # Worker exited the restricted zone — reset so re-entry triggers a new incident
+                                worker.reported_zones.discard(cv_id)
+                                worker.zone_dwell[cv_id] = 0
 
-                for zone in incursion_zones:
-                    if zone.zone_type in ("RESTRICTED", "SLIPPERY"):
-                        track_camera_zone_view_id, track_physical_zone_id, track_zone_name, track_zone_type = zone.camera_zone_view_id, zone.physical_zone_id, zone.zone_name, zone.zone_type
-                        break
-                if track_zone_type is None:
-                    walkway_zones = [z for z in zones if z.zone_type == "WALKWAY"]
-                    if walkway_zones and not any(z.camera_zone_view_id in incursion_ids for z in walkway_zones):
-                        wz = walkway_zones[0]
-                        track_camera_zone_view_id, track_physical_zone_id, track_zone_name, track_zone_type = wz.camera_zone_view_id, wz.physical_zone_id, wz.zone_name, "WALKWAY"
+                    for zone in incursion_zones:
+                        if zone.zone_type in ("RESTRICTED", "SLIPPERY"):
+                            track_camera_zone_view_id, track_physical_zone_id, track_zone_name, track_zone_type = zone.camera_zone_view_id, zone.physical_zone_id, zone.zone_name, zone.zone_type
+                            break
+                    if track_zone_type is None:
+                        walkway_zones = [z for z in zones if z.zone_type == "WALKWAY"]
+                        if walkway_zones and not any(z.camera_zone_view_id in incursion_ids for z in walkway_zones):
+                            wz = walkway_zones[0]
+                            track_camera_zone_view_id, track_physical_zone_id, track_zone_name, track_zone_type = wz.camera_zone_view_id, wz.physical_zone_id, wz.zone_name, "WALKWAY"
 
-            # --- No-walkway enforcement dropped ---
+                # --- No-walkway enforcement dropped ---
 
-            _append_tracking_overlay_frame(
-                overlay_frames=current_frame_overlay,
-                seen_person_ids=overlay_person_ids,
-                person=person,
-                decision=decision,
+                _append_tracking_overlay_frame(
+                    overlay_frames=current_frame_overlay,
+                    seen_person_ids=overlay_person_ids,
+                    person=person,
+                    decision=decision,
+                    frame_index=frame_index,
+                    fps=fps,
+                    include_ppe=curr_ppe,
+                    camera_zone_view_id=track_camera_zone_view_id,
+                    physical_zone_id=track_physical_zone_id,
+                    zone_name=track_zone_name,
+                    zone_type=track_zone_type,
+                )
+
+                missing_to_report = decision["missing_to_report"]
+                if curr_ppe and missing_to_report:
+                    old_case_count = len(cases)
+                    _record_violation_case(cases=cases, frame=frame, person=person, worker=worker, missing=missing_to_report, video_name=video_name, frame_index=frame_index, worker_match_reason=decision.get("worker_match_reason", "unknown"), confirmed_aspect_ratios=confirmed_aspect_ratios)
+                    if len(cases) > old_case_count:
+                        yield StreamEvent(event="violation", frame_index=frame_index, data=cases[-1].report.model_dump())
+
+            if detector.sign_model is not None and frame_width and frame_height and frame_index % settings.SIGN_PASS_FRAME_INTERVAL == 0:
+                if settings_state:
+                    pending_zone = settings_state.get("dismissed_signatures", [])
+                    if pending_zone:
+                        settings_state["dismissed_signatures"] = []
+                        for sig in pending_zone:
+                            sign_registry.dismiss(sig)
+                    pending_ppe = settings_state.get("dismissed_ppe_signatures", [])
+                    if pending_ppe:
+                        settings_state["dismissed_ppe_signatures"] = []
+                        for sig in pending_ppe:
+                            ppe_sign_registry.dismiss(sig)
+                sign_results = await asyncio.to_thread(
+                    detector.sign_model.predict,
+                    frame,
+                    conf=settings.SIGN_CONFIDENCE_THRESHOLD,
+                    classes=sign_classes,
+                    device=detector.device,
+                    verbose=False,
+                )
+                if sign_results:
+                    signs = extract_signs(sign_results[0])
+                    for suggestion in sign_registry.update(signs, frame_width, frame_height, frame_index, fps):
+                        yield StreamEvent(event="zone_suggestion", frame_index=frame_index, data=suggestion.model_dump())
+                    for suggestion in ppe_sign_registry.update(signs, frame_width, frame_height, frame_index):
+                        yield StreamEvent(event="ppe_suggestion", frame_index=frame_index, data=suggestion.model_dump())
+
+            viewed = is_viewed()
+            has_image = is_stream and viewed
+            # Offload the resize+encode (cv2, CPU-bound) to a thread instead of
+            # running it inline on the event loop — same reasoning as the main
+            # inference and sign-model calls above (PERF_PLAN.md Tier 7): keeps
+            # this stream's encode from adding scheduling jitter to other
+            # concurrent streams sharing the loop.
+            image_bytes = (
+                await asyncio.to_thread(_encode_frame_to_jpeg, frame) if has_image else None
+            )
+            yield StreamEvent(
+                event="frame",
                 frame_index=frame_index,
-                fps=fps,
-                include_ppe=curr_ppe,
-                camera_zone_view_id=track_camera_zone_view_id,
-                physical_zone_id=track_physical_zone_id,
-                zone_name=track_zone_name,
-                zone_type=track_zone_type,
+                data={
+                    "frames": [f.model_dump() for f in current_frame_overlay] if viewed else [],
+                    "processed_frames": processed_frames,
+                    "frame_width": frame_width,
+                    "frame_height": frame_height,
+                    "fall_summary": last_fall_payload.get("summary") if curr_fall and last_fall_payload and viewed else None,
+                    "fall_detections": last_fall_payload.get("detections") if curr_fall and last_fall_payload and viewed else [],
+                    "fall_unavailable": fall_unavailable_message if curr_fall and viewed else None,
+                },
+                has_image=has_image,
+                image_bytes=image_bytes,
             )
 
-            missing_to_report = decision["missing_to_report"]
-            if curr_ppe and missing_to_report:
-                old_case_count = len(cases)
-                _record_violation_case(cases=cases, frame=frame, person=person, worker=worker, missing=missing_to_report, video_name=video_name, frame_index=frame_index, worker_match_reason=decision.get("worker_match_reason", "unknown"), confirmed_aspect_ratios=confirmed_aspect_ratios)
-                if len(cases) > old_case_count:
-                    yield StreamEvent(event="violation", frame_index=frame_index, data=cases[-1].report.model_dump())
-
-        if detector.sign_model is not None and frame_width and frame_height and frame_index % settings.SIGN_PASS_FRAME_INTERVAL == 0:
-            if settings_state:
-                pending_zone = settings_state.get("dismissed_signatures", [])
-                if pending_zone:
-                    settings_state["dismissed_signatures"] = []
-                    for sig in pending_zone:
-                        sign_registry.dismiss(sig)
-                pending_ppe = settings_state.get("dismissed_ppe_signatures", [])
-                if pending_ppe:
-                    settings_state["dismissed_ppe_signatures"] = []
-                    for sig in pending_ppe:
-                        ppe_sign_registry.dismiss(sig)
-            sign_results = detector.sign_model.predict(
-                frame,
-                conf=settings.SIGN_CONFIDENCE_THRESHOLD,
-                classes=sign_classes,
-                device=detector.device,
-                verbose=False,
-            )
-            if sign_results:
-                signs = extract_signs(sign_results[0])
-                for suggestion in sign_registry.update(signs, frame_width, frame_height, frame_index, fps):
-                    yield StreamEvent(event="zone_suggestion", frame_index=frame_index, data=suggestion.model_dump())
-                for suggestion in ppe_sign_registry.update(signs, frame_width, frame_height, frame_index):
-                    yield StreamEvent(event="ppe_suggestion", frame_index=frame_index, data=suggestion.model_dump())
-
-        viewed = is_viewed()
+        elapsed_ms = (time.perf_counter() - start_wall_time) * 1000
         yield StreamEvent(
-            event="frame",
-            frame_index=frame_index,
-            data={
-                "frames": [f.model_dump() for f in current_frame_overlay] if viewed else [],
-                "processed_frames": processed_frames,
-                "frame_width": frame_width,
-                "frame_height": frame_height,
-                "fall_summary": last_fall_payload.get("summary") if curr_fall and last_fall_payload and viewed else None,
-                "fall_detections": last_fall_payload.get("detections") if curr_fall and last_fall_payload and viewed else [],
-                "fall_unavailable": fall_unavailable_message if curr_fall and viewed else None,
-            },
-            image_base64=_encode_frame_to_base64(frame) if (is_stream and viewed) else None
+            event="summary",
+            data=VideoSummary(
+                video_name=video_name, total_frames=total_frames, processed_frames=processed_frames,
+                fps=round(fps, 2), duration_seconds=round(total_frames / fps if fps > 0 else 0, 2),
+                unique_violations=len(cases), candidate_violations=candidate_violations, inference_ms=round(elapsed_ms, 2),
+            ).model_dump(),
         )
+        yield StreamEvent(event="end", data={})
 
-    elapsed_ms = (time.perf_counter() - start_wall_time) * 1000
-    yield StreamEvent(
-        event="summary",
-        data=VideoSummary(
-            video_name=video_name, total_frames=total_frames, processed_frames=processed_frames,
-            fps=round(fps, 2), duration_seconds=round(total_frames / fps if fps > 0 else 0, 2),
-            unique_violations=len(cases), candidate_violations=candidate_violations, inference_ms=round(elapsed_ms, 2),
-        ).model_dump(),
-    )
-    yield StreamEvent(event="end", data={})
+    finally:
+        _release_pooled_model_instance(model_instance)
+        detector.release_model_instance(model_instance)
 
 
 def mock_process_video(

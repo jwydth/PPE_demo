@@ -1,5 +1,5 @@
 from typing import Literal, Optional, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from app.schemas.detection import TrackingOverlayFrame, VideoSummary
 from app.schemas.violation import ViolationReport, ZoneViolation
 
@@ -18,4 +18,13 @@ class StreamEvent(BaseModel):
     ]
     frame_index: Optional[int] = None
     data: Any
-    image_base64: Optional[str] = None
+    # True when a raw-JPEG binary WS frame for this event was (or is about to
+    # be) sent on the same connection — see `image_bytes` below and
+    # routers/streaming.py. Lets the client pair the binary frame with this
+    # JSON envelope without embedding the image inline.
+    has_image: bool = False
+    # Populated by the pipeline for "frame" events on live streams; excluded
+    # from JSON serialization on purpose — routers/streaming.py pulls it out
+    # and sends it via `websocket.send_bytes` instead (PERF_PLAN.md Tier 2.2:
+    # avoids ~33% base64 inflation + encode/decode cost of embedding it here).
+    image_bytes: Optional[bytes] = Field(default=None, exclude=True)

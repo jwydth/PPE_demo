@@ -9,14 +9,16 @@ async def test():
             print("Connected")
             msg = await ws.recv()
             print("msg 1 keys:", json.loads(msg).keys())
+            # The server now sends the JPEG as a separate binary WS message
+            # immediately before the "frame" JSON envelope (has_image=True),
+            # instead of embedding it as base64 inside the JSON.
             msg = await ws.recv()
+            if isinstance(msg, (bytes, bytearray)):
+                print("msg 2 is binary, length:", len(msg))
+                msg = await ws.recv()
             data = json.loads(msg)
-            print("msg 2 keys:", data.keys())
-            print("image_base64 present?", "image_base64" in data)
-            if "image_base64" in data:
-                print("image_base64 type:", type(data["image_base64"]))
-                if isinstance(data["image_base64"], str):
-                    print("image_base64 length:", len(data["image_base64"]))
+            print("msg keys:", data.keys())
+            print("has_image:", data.get("has_image"))
     except Exception as e:
         print("Error:", e)
 

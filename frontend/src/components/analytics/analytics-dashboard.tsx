@@ -7,17 +7,15 @@ import {
   ChevronDown,
   ClipboardCheck,
   Factory,
-  HardHat,
   Minus,
   Siren,
   Trash2,
   TrendingDown,
   TrendingUp,
-  Users,
-  Video,
 } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Area,
   AreaChart,
@@ -33,21 +31,16 @@ import {
   YAxis,
 } from "recharts";
 import { IncidentDetailModal, type IncidentCategory } from "@/components/dashboard/incident-detail-modal";
-import { MetricCard } from "@/components/dashboard/metric-card";
-import type { SafetyMetric } from "@/components/dashboard/data";
+import { useSafetyKpis } from "@/hooks/useSafetyKpis";
 import { CONFIRM_DELETE_INCIDENT } from "@/lib/messages";
 import {
   deleteIncident,
   getAnalyticsCompare,
-  getAnalyticsSummary,
   getAnalyticsTrend,
   getUnifiedIncidents,
 } from "@/lib/ppe-api";
 import {
-  AnalyticsCompare,
   AnalyticsRangeParam,
-  AnalyticsSummary,
-  AnalyticsTrend,
   CompareMode,
   SeverityCounts,
   SeverityLevel,
@@ -169,112 +162,80 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
   const [selectedZone, setSelectedZone] = useState<number | null>(null);
   const [comparisonMode, setComparisonMode] = useState<CompareMode>("week");
 
-  const [summary, setSummary] = useState<AnalyticsSummary | null>(null);
-  const [trend, setTrend] = useState<AnalyticsTrend | null>(null);
-  const [compare, setCompare] = useState<AnalyticsCompare | null>(null);
-  const [feed, setFeed] = useState<UnifiedIncident[]>([]);
   const [freshKeys, setFreshKeys] = useState<Set<string>>(new Set());
   const [now, setNow] = useState(new Date());
-  const [error, setError] = useState("");
   const [selectedIncident, setSelectedIncident] = useState<{ category: IncidentCategory; id: number } | null>(
     null,
   );
+
+  const queryClient = useQueryClient();
 
   useEffect(() => {
     const t = window.setInterval(() => setNow(new Date()), 1000);
     return () => window.clearInterval(t);
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    const load = () => {
-      getAnalyticsSummary(timeRange, selectedZone)
-        .then((data) => {
-          if (!cancelled) setSummary(data);
-        })
-        .catch((err) => {
-          if (!cancelled) setError(err instanceof Error ? err.message : "Could not load analytics summary");
-        });
-    };
-    load();
-    const t = window.setInterval(load, ANALYTICS_POLL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(t);
-    };
-  }, [timeRange, selectedZone]);
+  // TanStack Query replaces four independent setInterval-polling useEffects
+  // (PERF_PLAN.md Tier 3.2): same refetch cadence per panel, but now cached,
+  // deduped across mounts, and each query tracks its own loading/error state
+  // instead of hand-rolled cancelled/loading/error flags.
+  // Summary comes from useSafetyKpis, shared with the Camera Feeds dashboard
+  // so the two can't show different numbers for the same underlying data
+  // again. This page no longer renders its own KPI row (DashboardShell's
+  // top-of-page row is the only one now — this page's copy was a redundant
+  // duplicate of it), but still needs `summary` for the charts/feed below.
+  const { summary, error } = useSafetyKpis({
+    range: timeRange,
+    zoneId: selectedZone,
+  });
 
   // Trend is intentionally always fetched unfiltered (zoneId=null): the chart
   // always plots every zone, dimming the non-selected ones client-side —
   // matching how the reference design keeps all zone areas visible while
   // filtering only affects emphasis, not what data is fetched.
-  useEffect(() => {
-    let cancelled = false;
-    const load = () => {
-      getAnalyticsTrend(timeRange, null)
-        .then((data) => {
-          if (!cancelled) setTrend(data);
-        })
-        .catch(() => {});
-    };
-    load();
-    const t = window.setInterval(load, ANALYTICS_POLL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(t);
-    };
-  }, [timeRange]);
+  const trendQuery = useQuery({
+    queryKey: ["analytics", "trend", timeRange],
+    queryFn: () => getAnalyticsTrend(timeRange, null),
+    refetchInterval: ANALYTICS_POLL_MS,
+  });
+  const trend = trendQuery.data ?? null;
 
-  useEffect(() => {
-    let cancelled = false;
-    const load = () => {
-      getAnalyticsCompare(comparisonMode, selectedZone)
-        .then((data) => {
-          if (!cancelled) setCompare(data);
-        })
-        .catch(() => {});
-    };
-    load();
-    const t = window.setInterval(load, ANALYTICS_POLL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(t);
-    };
-  }, [comparisonMode, selectedZone]);
+  const compareQuery = useQuery({
+    queryKey: ["analytics", "compare", comparisonMode, selectedZone],
+    queryFn: () => getAnalyticsCompare(comparisonMode, selectedZone),
+    refetchInterval: ANALYTICS_POLL_MS,
+  });
+  const compare = compareQuery.data ?? null;
 
+  const feedQueryKey = ["analytics", "feed", FEED_LIMIT] as const;
+  const feedQuery = useQuery({
+    queryKey: feedQueryKey,
+    queryFn: () => getUnifiedIncidents(FEED_LIMIT, null),
+    refetchInterval: FEED_POLL_MS,
+  });
+  const feed = useMemo(() => feedQuery.data ?? [], [feedQuery.data]);
+
+  // Diffs each new feed fetch against the previous one to flag newly-arrived
+  // rows for the fade-in animation, clearing the flag after FRESH_ROW_MS. Kept
+  // as a ref (not query state) since it's a pure animation trigger, not data.
+  const prevFeedKeysRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    let cancelled = false;
-    const load = () => {
-      getUnifiedIncidents(FEED_LIMIT, null)
-        .then((data) => {
-          if (cancelled) return;
-          setFeed((prev) => {
-            const prevKeys = new Set(prev.map((p) => `${p.category}-${p.id}`));
-            const fresh = data
-              .map((d) => `${d.category}-${d.id}`)
-              .filter((key) => !prevKeys.has(key));
-            if (fresh.length > 0) {
-              setFreshKeys((current) => new Set([...current, ...fresh]));
-              window.setTimeout(() => {
-                setFreshKeys((current) => {
-                  const next = new Set(current);
-                  fresh.forEach((key) => next.delete(key));
-                  return next;
-                });
-              }, FRESH_ROW_MS);
-            }
-            return data;
-          });
-        })
-        .catch(() => {});
-    };
-    load();
-    const t = window.setInterval(load, FEED_POLL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(t);
-    };
-  }, []);
+    const data = feedQuery.data;
+    if (!data) return;
+    const keys = data.map((d) => `${d.category}-${d.id}`);
+    const fresh = keys.filter((key) => !prevFeedKeysRef.current.has(key));
+    prevFeedKeysRef.current = new Set(keys);
+    if (fresh.length === 0) return;
+    setFreshKeys((current) => new Set([...current, ...fresh]));
+    const timer = window.setTimeout(() => {
+      setFreshKeys((current) => {
+        const next = new Set(current);
+        fresh.forEach((key) => next.delete(key));
+        return next;
+      });
+    }, FRESH_ROW_MS);
+    return () => window.clearTimeout(timer);
+  }, [feedQuery.data]);
 
   const zoneMeta = useMemo(() => buildZoneMeta(summary?.zone_totals ?? []), [summary]);
   const zoneLookup = useMemo(
@@ -287,45 +248,6 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
     [summary],
   );
   const filteredFeed = selectedZone != null ? feed.filter((f) => f.zone_id === selectedZone) : feed;
-
-  const totalCameras = summary?.total_cameras ?? 0;
-  const activeCameras = summary?.active_cameras ?? 0;
-  const openIncidents = summary?.open_incidents ?? 0;
-
-  const kpis: SafetyMetric[] = [
-    {
-      label: "PPE Compliance",
-      value: "—",
-      helper: "No compliance data source yet",
-      trend: "Not yet tracked",
-      icon: HardHat,
-      tone: "slate",
-    },
-    {
-      label: "Open Incidents",
-      value: String(openIncidents),
-      helper: "Critical + high severity, in range",
-      trend: selectedZoneMeta ? `${selectedZoneMeta.name} only` : "All zones",
-      icon: Bell,
-      tone: "amber",
-    },
-    {
-      label: "Active Cameras",
-      value: `${activeCameras}/${totalCameras}`,
-      helper: "Cameras with an incident in range",
-      trend: `${timeRange} window`,
-      icon: Video,
-      tone: "blue",
-    },
-    {
-      label: "People On Shift",
-      value: "—",
-      helper: "No occupancy data source yet",
-      trend: "Not yet tracked",
-      icon: Users,
-      tone: "slate",
-    },
-  ];
 
   // Zone Pulse geometry
   const centerX = 200;
@@ -366,12 +288,18 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
   const comparisonData = [...zoneMeta].sort((a, b) => b.total - a.total);
   const maxZoneComparisonTotal = Math.max(...comparisonData.map((z) => z.total), 1);
 
+  const removeFromFeedCache = (category: IncidentCategory, id: number) => {
+    queryClient.setQueryData<UnifiedIncident[]>(feedQueryKey, (current) =>
+      current?.filter((f) => !(f.category === category && f.id === id)),
+    );
+  };
+
   const handleDeleteFromFeed = async (item: UnifiedIncident) => {
     if (!confirm(CONFIRM_DELETE_INCIDENT)) {
       return;
     }
     await deleteIncident(item.category, item.id);
-    setFeed((current) => current.filter((f) => !(f.category === item.category && f.id === item.id)));
+    removeFromFeedCache(item.category, item.id);
   };
 
   const panel = "rounded-md border border-slate-200 bg-white shadow-sm";
@@ -484,12 +412,6 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
                 </button>
               ))}
             </div>
-          </div>
-
-          <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            {kpis.map((k) => (
-              <MetricCard key={k.label} metric={k} />
-            ))}
           </div>
 
           <div className="mb-5 grid grid-cols-1 gap-4 xl:grid-cols-3">
@@ -938,13 +860,7 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
           category={selectedIncident.category}
           incidentId={selectedIncident.id}
           onClose={() => setSelectedIncident(null)}
-          onDeleted={() =>
-            setFeed((current) =>
-              current.filter(
-                (f) => !(f.category === selectedIncident.category && f.id === selectedIncident.id),
-              ),
-            )
-          }
+          onDeleted={() => removeFromFeedCache(selectedIncident.category, selectedIncident.id)}
         />
       ) : null}
     </div>
