@@ -6,13 +6,16 @@ import { CONFIRM_DELETE_INCIDENT } from "@/lib/messages";
 import {
   deleteIncident,
   getBehaviorIncident,
+  getCameras,
+  getPhysicalZones,
   getViolation,
   getZoneViolation,
   IncidentCategory,
 } from "@/lib/ppe-api";
 import { BehaviorIncident } from "@/types/behavior";
+import { Camera } from "@/types/camera";
 import { ViolationDetail } from "@/types/detection";
-import { ZoneViolation } from "@/types/zone";
+import { PhysicalZone, ZoneViolation } from "@/types/zone";
 
 export type { IncidentCategory };
 
@@ -42,6 +45,13 @@ export function IncidentDetailModal({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [deleting, setDeleting] = useState(false);
+  const [cameras, setCameras] = useState<Camera[]>([]);
+  const [physicalZones, setPhysicalZones] = useState<PhysicalZone[]>([]);
+
+  useEffect(() => {
+    getCameras().then(setCameras).catch(() => {});
+    getPhysicalZones().then(setPhysicalZones).catch(() => {});
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -114,7 +124,14 @@ export function IncidentDetailModal({
           {error ? (
             <p className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</p>
           ) : null}
-          {!loading && detail ? <DetailBody category={category} detail={detail} /> : null}
+          {!loading && detail ? (
+            <DetailBody
+              category={category}
+              detail={detail}
+              cameras={cameras}
+              physicalZones={physicalZones}
+            />
+          ) : null}
         </div>
 
         {!loading && detail ? (
@@ -135,9 +152,43 @@ export function IncidentDetailModal({
   );
 }
 
-function DetailBody({ category, detail }: { category: IncidentCategory; detail: IncidentDetail }) {
+function getPpeSeverity(violationType: string): string {
+  const normalized = violationType.trim().toLowerCase();
+  if (normalized.includes("proximity")) return "Low";
+  if (normalized.includes("_and_") || normalized.includes(" and ")) return "High";
+  return "Medium";
+}
+
+function getZoneSeverity(raw: string | null | undefined): string {
+  if (!raw) return "Medium";
+  const titled = raw.trim().charAt(0).toUpperCase() + raw.trim().slice(1).toLowerCase();
+  return ["Critical", "High", "Medium", "Low"].includes(titled) ? titled : "Medium";
+}
+
+function getBehaviorSeverity(raw: string | null | undefined): string {
+  if (!raw) return "High";
+  const titled = raw.trim().charAt(0).toUpperCase() + raw.trim().slice(1).toLowerCase();
+  return ["Critical", "High", "Medium", "Low"].includes(titled) ? titled : "High";
+}
+
+interface DetailBodyProps {
+  category: IncidentCategory;
+  detail: IncidentDetail;
+  cameras: Camera[];
+  physicalZones: PhysicalZone[];
+}
+
+function DetailBody({ category, detail, cameras, physicalZones }: DetailBodyProps) {
   if (category === "ppe") {
     const d = detail as ViolationDetail;
+    const camera = cameras.find((c) => c.source_key === d.video_name);
+    const cameraLabel = camera ? camera.name : "Camera";
+    const homeZone = camera && camera.home_zone_id
+      ? physicalZones.find((z) => z.id === camera.home_zone_id)
+      : null;
+    const factoryZoneValue = homeZone ? homeZone.name : "—";
+    const severityValue = getPpeSeverity(d.violation_type);
+
     return (
       <div className="grid gap-4">
         <SnapshotImage src={d.snapshot_url} />
@@ -145,8 +196,9 @@ function DetailBody({ category, detail }: { category: IncidentCategory; detail: 
           fields={[
             ["Type", formatSnakeCase(d.violation_type)],
             ["Timestamp", formatTimestamp(d.timestamp)],
-            ["Camera / video", d.video_name ?? "—"],
-            ["Frame", d.frame_index ?? "—"],
+            [cameraLabel, d.video_name ?? "—"],
+            ["Factory zone", factoryZoneValue],
+            ["Severity", severityValue],
             ["Track ID", d.track_id ?? "—"],
           ]}
         />
@@ -174,6 +226,14 @@ function DetailBody({ category, detail }: { category: IncidentCategory; detail: 
 
   if (category === "zone") {
     const d = detail as ZoneViolation;
+    const camera = cameras.find((c) => c.source_key === d.video_name);
+    const cameraLabel = camera ? camera.name : "Camera";
+    const homeZone = camera && camera.home_zone_id
+      ? physicalZones.find((z) => z.id === camera.home_zone_id)
+      : null;
+    const factoryZoneValue = homeZone ? homeZone.name : "—";
+    const severityValue = getZoneSeverity(d.severity);
+
     return (
       <div className="grid gap-4">
         <SnapshotImage src={d.snapshot_path} />
@@ -182,11 +242,11 @@ function DetailBody({ category, detail }: { category: IncidentCategory; detail: 
             ["Zone", d.zone_name ?? "—"],
             ["Zone type", d.zone_type ?? "—"],
             ["Timestamp", formatTimestamp(d.timestamp)],
-            ["Camera / video", d.video_name],
-            ["Frame", d.frame_index],
+            [cameraLabel, d.video_name ?? "—"],
+            ["Factory zone", factoryZoneValue],
             ["Track ID", d.track_id ?? "—"],
             ["Status", d.status],
-            ["Severity", d.severity ?? "—"],
+            ["Severity", severityValue],
           ]}
         />
       </div>
@@ -194,7 +254,15 @@ function DetailBody({ category, detail }: { category: IncidentCategory; detail: 
   }
 
   const d = detail as BehaviorIncident;
+  const camera = cameras.find((c) => c.source_key === d.video_name);
+  const cameraLabel = camera ? camera.name : "Camera";
+  const homeZone = camera && camera.home_zone_id
+    ? physicalZones.find((z) => z.id === camera.home_zone_id)
+    : null;
+  const factoryZoneValue = homeZone ? homeZone.name : "—";
+  const severityValue = getBehaviorSeverity(d.severity);
   const snapshot = d.snapshot_url ?? d.evidence[0]?.file_url ?? undefined;
+
   return (
     <div className="grid gap-4">
       <SnapshotImage src={snapshot} />
@@ -202,9 +270,10 @@ function DetailBody({ category, detail }: { category: IncidentCategory; detail: 
         fields={[
           ["Type", formatSnakeCase(d.behavior_type)],
           ["Timestamp", formatTimestamp(d.timestamp)],
-          ["Camera / video", d.video_name ?? "—"],
+          [cameraLabel, d.video_name ?? "—"],
+          ["Factory zone", factoryZoneValue],
           ["Status", d.status],
-          ["Severity", d.severity ?? "—"],
+          ["Severity", severityValue],
           ["Confidence", d.confidence != null ? `${Math.round(d.confidence * 100)}%` : "—"],
         ]}
       />

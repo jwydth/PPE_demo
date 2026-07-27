@@ -295,6 +295,7 @@ function CameraPanel({
         return match ? { ...cam, homeZoneId: match.home_zone_id } : cam;
       });
       onCamerasUpdate(reconciled);
+      window.alert("Camera configuration saved successfully.");
     } catch (err) {
       setError(
         err instanceof Error
@@ -546,17 +547,17 @@ function CameraPanel({
           {liveStream.isLive && (
             <button
               type="button"
+              disabled={isConfiguringCameras}
               onClick={() => {
                 setTempCameras(cameras);
-                setIsConfiguringCameras(!isConfiguringCameras);
+                setIsConfiguringCameras(true);
               }}
-              className="flex items-center gap-1 rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 transition cursor-pointer"
+              className="flex items-center gap-1 rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition cursor-pointer"
             >
               <Settings className="size-3.5" />
-              Configure URLs
+              Configure cameras
             </button>
           )}
-          <IconButton label="Fullscreen camera feed" icon={Maximize2} />
         </div>
       </div>
 
@@ -565,7 +566,7 @@ function CameraPanel({
           <div className="rounded-md border border-slate-800 bg-slate-900/60 p-4">
             <div className="flex items-center justify-between mb-3 border-b border-slate-800 pb-2">
               <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                Configure Camera Stream URLs
+                Configure cameras
               </h3>
               <button
                 type="button"
@@ -583,30 +584,33 @@ function CameraPanel({
                 }}
                 className="flex items-center gap-1 rounded bg-lime-600 hover:bg-lime-500 px-2.5 py-1 text-xs font-semibold text-white transition cursor-pointer"
               >
-                + Add Stream
+                + Add camera
               </button>
             </div>
             {tempCameras.length === 0 ? (
               <div className="text-center py-6 text-xs text-slate-500">
-                No camera streams configured. Click "+ Add Stream" to add one.
+                No camera streams configured. Click "+ Add camera" to add one.
               </div>
             ) : (
               <div className="grid gap-4 md:grid-cols-3">
                 {tempCameras.map((cam, idx) => (
                   <div key={cam.id} className="grid gap-2 rounded border border-slate-800 bg-slate-900 p-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <input
-                        type="text"
-                        value={cam.name}
-                        placeholder="Camera Name"
-                        onChange={(e) => {
-                          const updated = [...tempCameras];
-                          updated[idx] = { ...updated[idx], name: e.target.value };
-                          setTempCameras(updated);
-                        }}
-                        className="rounded border border-slate-700 bg-slate-950 px-2 py-0.5 text-xs text-white font-semibold outline-none focus:border-slate-500 flex-1 min-w-0"
-                      />
-                      <div className="flex items-center gap-1.5 shrink-0">
+                    <div className="flex items-start justify-between gap-2">
+                      <label className="grid gap-0.5 text-[10px] text-slate-400 flex-1 min-w-0">
+                        Camera name
+                        <input
+                          type="text"
+                          value={cam.name}
+                          placeholder="Camera Name"
+                          onChange={(e) => {
+                            const updated = [...tempCameras];
+                            updated[idx] = { ...updated[idx], name: e.target.value };
+                            setTempCameras(updated);
+                          }}
+                          className="rounded border border-slate-700 bg-slate-950 px-2 py-0.5 text-xs text-white font-semibold outline-none focus:border-slate-500 w-full"
+                        />
+                      </label>
+                      <div className="flex items-center gap-1.5 shrink-0 pt-3.5">
                         <label className="flex items-center gap-1 cursor-pointer text-[10px] text-slate-300">
                           <input
                             type="checkbox"
@@ -633,17 +637,20 @@ function CameraPanel({
                         </button>
                       </div>
                     </div>
-                    <input
-                      type="text"
-                      value={cam.rtspUrl}
-                      placeholder="rtsp://address/stream"
-                      onChange={(e) => {
-                        const updated = [...tempCameras];
-                        updated[idx] = { ...updated[idx], rtspUrl: e.target.value };
-                        setTempCameras(updated);
-                      }}
-                      className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white outline-none focus:border-slate-500"
-                    />
+                    <label className="grid gap-0.5 text-[10px] text-slate-400">
+                      Camera URL
+                      <input
+                        type="text"
+                        value={cam.rtspUrl}
+                        placeholder="rtsp://address/stream"
+                        onChange={(e) => {
+                          const updated = [...tempCameras];
+                          updated[idx] = { ...updated[idx], rtspUrl: e.target.value };
+                          setTempCameras(updated);
+                        }}
+                        className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white outline-none focus:border-slate-500"
+                      />
+                    </label>
                     <div className="grid grid-cols-2 gap-2">
                       <label className="grid gap-0.5 text-[10px] text-slate-400">
                         3D Blueprint Zone
@@ -732,7 +739,11 @@ function CameraPanel({
             <div className="flex justify-end gap-2 mt-4">
               <button
                 type="button"
-                onClick={() => setIsConfiguringCameras(false)}
+                onClick={() => {
+                  if (window.confirm("All changes have not been saved yet. Are you sure you want to discard them?")) {
+                    setIsConfiguringCameras(false);
+                  }
+                }}
                 className="rounded px-3 py-1.5 text-xs font-semibold text-slate-400 hover:text-white transition cursor-pointer"
               >
                 Cancel

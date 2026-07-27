@@ -44,7 +44,7 @@ export function ZoneSidebar({
         <div className="grid gap-2">
           {physicalZones.length === 0 ? (
             <p className="px-1 text-xs text-slate-400">
-              No zones yet — create one from Camera Feeds → Configure URLs.
+              No zones yet — create one from Camera Feeds → Configure cameras.
             </p>
           ) : (
             physicalZones.map((zone) => (
