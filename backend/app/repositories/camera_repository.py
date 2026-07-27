@@ -69,6 +69,18 @@ class CameraRepository:
         camera.home_zone_id = zone_id
         return self._commit_and_refresh(camera, "set camera home zone")
 
+    def delete(self, camera_id: int) -> bool:
+        camera = self.get_by_id(camera_id)
+        if camera is None:
+            return False
+        try:
+            self.session.delete(camera)
+            self.session.commit()
+            return True
+        except SQLAlchemyError as exc:
+            self.session.rollback()
+            raise RepositoryError("Could not delete camera.") from exc
+
     def _commit_and_refresh(self, camera: Camera, operation: str) -> Camera:
         try:
             self.session.commit()

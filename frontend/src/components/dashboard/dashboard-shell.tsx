@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   createPhysicalZone,
   deleteAllIncidents,
+  deleteCamera,
   deleteIncident,
   ensureCamera,
   getCameras,
@@ -238,7 +239,10 @@ function CameraPanel({
     }
   };
 
-  const handleSaveCameraConfig = (updatedCameras: CameraConfig[]) => {
+  const handleSaveCameraConfig = async (updatedCameras: CameraConfig[]) => {
+    // Identify cameras that were deleted
+    const deletedCameras = cameras.filter((c) => !updatedCameras.some((uc) => uc.id === c.id));
+
     onCamerasUpdate(updatedCameras);
     localStorage.setItem("ppe_demo_cameras", JSON.stringify(updatedCameras));
     setIsConfiguringCameras(false);
@@ -250,28 +254,53 @@ function CameraPanel({
     if (currentCam) {
       if (!currentCam.active) {
         const firstActive = updatedCameras.find((c) => c.active) || updatedCameras[0];
-        void handleCameraChange(firstActive.id);
+        if (firstActive) {
+          void handleCameraChange(firstActive.id);
+        }
       } else {
         void handleCameraChange(activeCameraId);
       }
+    } else if (updatedCameras.length > 0) {
+      const firstActive = updatedCameras.find((c) => c.active) || updatedCameras[0];
+      if (firstActive) {
+        void handleCameraChange(firstActive.id);
+      }
     }
 
-    // Persist each camera's home-zone assignment server-side (source of truth
-    // for zone-bucketed analytics), keyed by source_key = rtspUrl. Cameras are
-    // also lazily created when their first incident lands, but we ensure one
-    // exists here so the zone assignment can be made before that happens.
-    void Promise.all(
-      updatedCameras.map(async (cam) => {
-        const backendCamera = await ensureCamera(cam.name, cam.rtspUrl);
-        await setCameraHomeZone(backendCamera.id, cam.homeZoneId);
-      }),
-    ).catch((err) => {
+    try {
+      // First, handle deletions on the backend
+      if (deletedCameras.length > 0) {
+        const backendCameras = await getCameras();
+        for (const cam of deletedCameras) {
+          const match = backendCameras.find((bc) => bc.source_key === cam.rtspUrl);
+          if (match && match.id) {
+            await deleteCamera(match.id);
+          }
+        }
+      }
+
+      // Then save/ensure updated cameras
+      await Promise.all(
+        updatedCameras.map(async (cam) => {
+          const backendCamera = await ensureCamera(cam.name, cam.rtspUrl);
+          await setCameraHomeZone(backendCamera.id, cam.homeZoneId);
+        }),
+      );
+
+      // Re-fetch backend cameras to sync any homeZoneId changes
+      const latestBackendCameras = await getCameras();
+      const reconciled = updatedCameras.map((cam) => {
+        const match = latestBackendCameras.find((bc) => bc.source_key === cam.rtspUrl);
+        return match ? { ...cam, homeZoneId: match.home_zone_id } : cam;
+      });
+      onCamerasUpdate(reconciled);
+    } catch (err) {
       setError(
         err instanceof Error
-          ? `Could not save camera zone assignment: ${err.message}`
-          : "Could not save camera zone assignment",
+          ? `Could not sync camera configuration: ${err.message}`
+          : "Could not sync camera configuration",
       );
-    });
+    }
   };
 
   const initializedRef = useRef(false);
@@ -533,106 +562,172 @@ function CameraPanel({
       <div className="grid gap-4 p-4">
         {isConfiguringCameras && (
           <div className="rounded-md border border-slate-800 bg-slate-900/60 p-4">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">
-              Configure Camera Stream URLs
-            </h3>
-            <div className="grid gap-4 md:grid-cols-3">
-              {tempCameras.map((cam, idx) => (
-                <div key={cam.id} className="grid gap-2 rounded border border-slate-800 bg-slate-900 p-3">
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs font-semibold text-white font-medium">
-                      {cam.name} ({cam.zoneId})
-                    </label>
-                    <label className="flex items-center gap-1.5 cursor-pointer text-[10px] text-slate-300">
-                      <input
-                        type="checkbox"
-                        checked={cam.active}
-                        onChange={(e) => {
-                          const updated = [...tempCameras];
-                          updated[idx] = { ...updated[idx], active: e.target.checked };
-                          setTempCameras(updated);
-                        }}
-                        className="rounded border-slate-700 bg-slate-950 text-lime-500 focus:ring-0"
-                      />
-                      Active
-                    </label>
-                  </div>
-                  <input
-                    type="text"
-                    value={cam.rtspUrl}
-                    placeholder="rtsp://address/stream"
-                    onChange={(e) => {
-                      const updated = [...tempCameras];
-                      updated[idx] = { ...updated[idx], rtspUrl: e.target.value };
-                      setTempCameras(updated);
-                    }}
-                    className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white outline-none focus:border-slate-500"
-                  />
-                  <label className="grid gap-1 text-[10px] text-slate-400">
-                    Home zone
-                    <select
-                      value={cam.homeZoneId ?? ""}
-                      onChange={(e) => {
-                        if (e.target.value === "__new__") {
-                          setCreatingZoneForIdx(idx);
-                          setNewZoneName("");
-                          setNewZoneError("");
-                          return;
-                        }
-                        const updated = [...tempCameras];
-                        updated[idx] = {
-                          ...updated[idx],
-                          homeZoneId: e.target.value === "" ? null : Number(e.target.value),
-                        };
-                        setTempCameras(updated);
-                      }}
-                      className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white outline-none focus:border-slate-500 cursor-pointer"
-                    >
-                      <option value="">Unassigned</option>
-                      {physicalZones.map((zone) => (
-                        <option key={zone.id} value={zone.id}>
-                          {zone.name}
-                        </option>
-                      ))}
-                      <option value="__new__">+ Create new zone…</option>
-                    </select>
-                  </label>
-                  {creatingZoneForIdx === idx && (
-                    <div className="grid gap-1.5 rounded border border-lime-700/50 bg-slate-950 p-2">
+            <div className="flex items-center justify-between mb-3 border-b border-slate-800 pb-2">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                Configure Camera Stream URLs
+              </h3>
+              <button
+                type="button"
+                onClick={() => {
+                  const nextId = tempCameras.length > 0 ? Math.max(...tempCameras.map((c) => c.id)) + 1 : 1;
+                  const newCam: CameraConfig = {
+                    id: nextId,
+                    name: `Camera ${nextId}`,
+                    rtspUrl: `rtsp://127.0.0.1:8554/stream${nextId}`,
+                    zoneId: "",
+                    homeZoneId: null,
+                    active: true,
+                  };
+                  setTempCameras([...tempCameras, newCam]);
+                }}
+                className="flex items-center gap-1 rounded bg-lime-600 hover:bg-lime-500 px-2.5 py-1 text-xs font-semibold text-white transition cursor-pointer"
+              >
+                + Add Stream
+              </button>
+            </div>
+            {tempCameras.length === 0 ? (
+              <div className="text-center py-6 text-xs text-slate-500">
+                No camera streams configured. Click "+ Add Stream" to add one.
+              </div>
+            ) : (
+              <div className="grid gap-4 md:grid-cols-3">
+                {tempCameras.map((cam, idx) => (
+                  <div key={cam.id} className="grid gap-2 rounded border border-slate-800 bg-slate-900 p-3">
+                    <div className="flex items-center justify-between gap-2">
                       <input
                         type="text"
-                        autoFocus
-                        value={newZoneName}
-                        placeholder="New zone name"
-                        onChange={(e) => setNewZoneName(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") void handleCreateZone(idx);
-                          if (e.key === "Escape") setCreatingZoneForIdx(null);
+                        value={cam.name}
+                        placeholder="Camera Name"
+                        onChange={(e) => {
+                          const updated = [...tempCameras];
+                          updated[idx] = { ...updated[idx], name: e.target.value };
+                          setTempCameras(updated);
                         }}
-                        className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-white outline-none focus:border-lime-500"
+                        className="rounded border border-slate-700 bg-slate-950 px-2 py-0.5 text-xs text-white font-semibold outline-none focus:border-slate-500 flex-1 min-w-0"
                       />
-                      {newZoneError && <p className="text-[10px] text-red-400">{newZoneError}</p>}
-                      <div className="flex justify-end gap-2">
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <label className="flex items-center gap-1 cursor-pointer text-[10px] text-slate-300">
+                          <input
+                            type="checkbox"
+                            checked={cam.active}
+                            onChange={(e) => {
+                              const updated = [...tempCameras];
+                              updated[idx] = { ...updated[idx], active: e.target.checked };
+                              setTempCameras(updated);
+                            }}
+                            className="rounded border-slate-700 bg-slate-950 text-lime-500 focus:ring-0 cursor-pointer size-3"
+                          />
+                          Active
+                        </label>
                         <button
                           type="button"
-                          onClick={() => setCreatingZoneForIdx(null)}
-                          className="rounded px-2 py-1 text-[10px] font-semibold text-slate-400 hover:text-white transition cursor-pointer"
+                          onClick={() => {
+                            const updated = tempCameras.filter((c) => c.id !== cam.id);
+                            setTempCameras(updated);
+                          }}
+                          className="text-red-400 hover:text-red-300 hover:bg-red-500/10 p-1 rounded transition cursor-pointer"
+                          title="Delete stream totally"
                         >
-                          Cancel
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void handleCreateZone(idx)}
-                          className="rounded bg-lime-600 hover:bg-lime-500 px-2 py-1 text-[10px] font-semibold text-white transition cursor-pointer"
-                        >
-                          Create &amp; assign
+                          <Trash2 className="size-3.5" />
                         </button>
                       </div>
                     </div>
-                  )}
-                </div>
-              ))}
-            </div>
+                    <input
+                      type="text"
+                      value={cam.rtspUrl}
+                      placeholder="rtsp://address/stream"
+                      onChange={(e) => {
+                        const updated = [...tempCameras];
+                        updated[idx] = { ...updated[idx], rtspUrl: e.target.value };
+                        setTempCameras(updated);
+                      }}
+                      className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white outline-none focus:border-slate-500"
+                    />
+                    <div className="grid grid-cols-2 gap-2">
+                      <label className="grid gap-0.5 text-[10px] text-slate-400">
+                        3D Blueprint Zone
+                        <select
+                          value={cam.zoneId ?? ""}
+                          onChange={(e) => {
+                            const updated = [...tempCameras];
+                            updated[idx] = { ...updated[idx], zoneId: e.target.value };
+                            setTempCameras(updated);
+                          }}
+                          className="rounded border border-slate-700 bg-slate-950 px-1 py-1 text-xs text-white outline-none focus:border-slate-500 cursor-pointer"
+                        >
+                          <option value="">None</option>
+                          <option value="Z01">Production (Z01)</option>
+                          <option value="Z02">Warehouse (Z02)</option>
+                          <option value="Z03">Packing (Z03)</option>
+                        </select>
+                      </label>
+                      <label className="grid gap-0.5 text-[10px] text-slate-400">
+                        Home zone (Analytics)
+                        <select
+                          value={cam.homeZoneId ?? ""}
+                          onChange={(e) => {
+                            if (e.target.value === "__new__") {
+                              setCreatingZoneForIdx(idx);
+                              setNewZoneName("");
+                              setNewZoneError("");
+                              return;
+                            }
+                            const updated = [...tempCameras];
+                            updated[idx] = {
+                              ...updated[idx],
+                              homeZoneId: e.target.value === "" ? null : Number(e.target.value),
+                            };
+                            setTempCameras(updated);
+                          }}
+                          className="rounded border border-slate-700 bg-slate-950 px-1 py-1 text-xs text-white outline-none focus:border-slate-500 cursor-pointer"
+                        >
+                          <option value="">Unassigned</option>
+                          {physicalZones.map((zone) => (
+                            <option key={zone.id} value={zone.id}>
+                              {zone.name}
+                            </option>
+                          ))}
+                          <option value="__new__">+ Create new zone…</option>
+                        </select>
+                      </label>
+                    </div>
+                    {creatingZoneForIdx === idx && (
+                      <div className="grid gap-1.5 rounded border border-lime-700/50 bg-slate-950 p-2">
+                        <input
+                          type="text"
+                          autoFocus
+                          value={newZoneName}
+                          placeholder="New zone name"
+                          onChange={(e) => setNewZoneName(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") void handleCreateZone(idx);
+                            if (e.key === "Escape") setCreatingZoneForIdx(null);
+                          }}
+                          className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-white outline-none focus:border-lime-500"
+                        />
+                        {newZoneError && <p className="text-[10px] text-red-400">{newZoneError}</p>}
+                        <div className="flex justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setCreatingZoneForIdx(null)}
+                            className="rounded px-2 py-1 text-[10px] font-semibold text-slate-400 hover:text-white transition cursor-pointer"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleCreateZone(idx)}
+                            className="rounded bg-lime-600 hover:bg-lime-500 px-2 py-1 text-[10px] font-semibold text-white transition cursor-pointer"
+                          >
+                            Create &amp; assign
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
             <div className="flex justify-end gap-2 mt-4">
               <button
                 type="button"

@@ -55,3 +55,15 @@ async def set_camera_home_zone(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ServiceValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.delete("/cameras/{camera_id}", response_model=dict[str, bool])
+async def delete_camera(
+    camera_id: int,
+    service: Annotated[CameraService, Depends(get_camera_service)],
+) -> dict[str, bool]:
+    try:
+        service.delete_camera(camera_id)
+        return {"success": True}
+    except ServiceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc

@@ -83,11 +83,14 @@ class CameraService:
 
     def get_or_create_camera(self, *, name: str, source_key: str) -> CameraDTO:
         normalized_source_key = _require_text(source_key, "source_key")
+        normalized_name = _require_text(name, "name")
         camera = self.repository.get_by_source_key(normalized_source_key)
         if camera is not None:
+            if camera.name != normalized_name:
+                camera.name = normalized_name
+                self.repository.update(camera)
             return _to_dto(camera)
 
-        normalized_name = _require_text(name, "name")
         factory_id = self._get_default_factory_id()
         camera = self.repository.create(
             Camera(
@@ -127,6 +130,12 @@ class CameraService:
         if camera is None:
             raise ServiceNotFoundError(f"Camera {camera_id} was not found.")
         return _to_dto(camera)
+
+    def delete_camera(self, camera_id: int) -> None:
+        normalized_id = _require_positive_id(camera_id, "camera_id")
+        deleted = self.repository.delete(normalized_id)
+        if not deleted:
+            raise ServiceNotFoundError(f"Camera {camera_id} was not found.")
 
     def _get_default_factory_id(self) -> int:
         factory = self.factory_repository.get_or_create_default_factory()
