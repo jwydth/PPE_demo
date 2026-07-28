@@ -590,7 +590,7 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
                 <button
                   type="button"
                   onClick={() => setSelectedZone(null)}
-                  className="flex items-center gap-1.5 px-1.5 py-0.5 rounded border border-slate-700 bg-slate-900/40 text-xs text-slate-400 hover:text-white transition cursor-pointer"
+                  className="flex items-center gap-1.5 px-2 py-1 rounded text-xs font-semibold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
                   style={{ opacity: selectedZone === null ? 1 : 0.35 }}
                 >
                   <span className="size-2 rounded-full bg-slate-400" />
@@ -601,7 +601,7 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
                     key={zoneKey(z.id)}
                     type="button"
                     onClick={() => setSelectedZone(selectedZone === z.id ? null : z.id)}
-                    className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-white transition cursor-pointer"
+                    className="flex items-center gap-1.5 px-2 py-1 rounded text-xs font-semibold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
                     style={{ opacity: selectedZone != null && selectedZone !== z.id ? 0.35 : 1 }}
                   >
                     <span className="size-2 rounded-full" style={{ background: z.color }} />
