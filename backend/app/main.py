@@ -15,6 +15,7 @@ from app.routers import (
     cameras,
     detection,
     fall_detection,
+    features,
     streaming,
     testing,
     zones,
@@ -41,6 +42,7 @@ app.include_router(analytics.router)
 app.include_router(cameras.router)
 app.include_router(detection.router)
 app.include_router(fall_detection.router)
+app.include_router(features.router)
 app.include_router(streaming.router)
 app.include_router(zones.router)
 app.include_router(testing.router)

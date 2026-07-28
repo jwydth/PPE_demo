@@ -53,7 +53,7 @@ def _client(session) -> TestClient:
 def _seed(session) -> tuple[int, int]:
     factory = FactoryRepository(session).get_or_create_default_factory()
     zone = PhysicalZoneRepository(session).create(
-        PhysicalZone(factory_id=factory.id, name="Zone A", zone_type="WALKWAY")
+        PhysicalZone(factory_id=factory.id, name="Zone A", zone_type="AREA")
     )
     camera = CameraRepository(session).create(
         Camera(

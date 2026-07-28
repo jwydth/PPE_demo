@@ -13,7 +13,7 @@ import {
   UnifiedIncident,
 } from "@/types/analytics";
 import { BehaviorIncident } from "@/types/behavior";
-import { Camera } from "@/types/camera";
+import { Camera, Feature, CameraFeatureConfig } from "@/types/camera";
 import { PhysicalZone, ZoneConfiguration, ZoneViolation } from "@/types/zone";
 
 export const API_URL =
@@ -352,5 +352,30 @@ export async function deleteCamera(cameraId: number): Promise<{ success: boolean
     method: "DELETE",
   });
   if (!res.ok) throw await readError(res, "Could not delete camera");
+  return res.json();
+}
+
+export async function getFeatures(): Promise<Feature[]> {
+  const res = await fetch(`${API_URL}/features`);
+  if (!res.ok) throw await readError(res, "Could not load features");
+  return res.json();
+}
+
+export async function getCameraFeatures(cameraId: number): Promise<CameraFeatureConfig[]> {
+  const res = await fetch(`${API_URL}/cameras/${cameraId}/features`);
+  if (!res.ok) throw await readError(res, "Could not load camera features");
+  return res.json();
+}
+
+export async function updateCameraFeatures(
+  cameraId: number,
+  updates: { feature_key: string; is_enabled: boolean; config_params?: any }[]
+): Promise<CameraFeatureConfig[]> {
+  const res = await fetch(`${API_URL}/cameras/${cameraId}/features`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+  if (!res.ok) throw await readError(res, "Could not update camera features");
   return res.json();
 }

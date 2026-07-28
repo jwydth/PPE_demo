@@ -64,10 +64,10 @@ def test_zone_crud_uses_postgresql_models_and_preserves_api_shape(session):
     assert physical_zone is not None
     assert physical_zone.name == "Restricted Area"
 
-    listed = client.get("/zones/factory.mp4")
+    listed = client.get("/zones", params={"video_name": "factory.mp4"})
     assert listed.status_code == 200
     assert listed.json() == [zone]
-    assert client.get("/zones/missing.mp4").json() == []
+    assert client.get("/zones", params={"video_name": "missing.mp4"}).json() == []
 
     payload = _zone_payload("Updated Area")
     payload["id"] = 999
@@ -79,10 +79,10 @@ def test_zone_crud_uses_postgresql_models_and_preserves_api_shape(session):
     assert updated.json()["dwell_threshold_seconds"] == 5
 
     client.post("/zones", json=_zone_payload("Second Area"))
-    deleted = client.delete("/zones/video/factory.mp4")
+    deleted = client.delete("/zones/video", params={"video_name": "factory.mp4"})
     assert deleted.status_code == 200
     assert deleted.json() == {"status": "success", "deleted": 2}
-    assert client.get("/zones/factory.mp4").json() == []
+    assert client.get("/zones", params={"video_name": "factory.mp4"}).json() == []
 
 
 def test_delete_single_zone_preserves_response_and_404(session):

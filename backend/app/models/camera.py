@@ -7,6 +7,7 @@ from sqlmodel import Field, Relationship, SQLModel
 
 if TYPE_CHECKING:
     from app.models.camera_zone_view import CameraZoneView
+    from app.models.camera_feature_config import CameraFeatureConfig
     from app.models.factory import Factory
     from app.models.physical_zone import PhysicalZone
     from app.models.ppe_violation import PPEViolation
@@ -66,6 +67,11 @@ class Camera(SQLModel, table=True):
     factory: "Factory" = Relationship(back_populates="cameras")
     home_zone: Optional["PhysicalZone"] = Relationship(back_populates="cameras")
     camera_zone_views: list["CameraZoneView"] = Relationship(
+        back_populates="camera",
+        cascade_delete=True,
+        passive_deletes=True,
+    )
+    camera_feature_configs: list["CameraFeatureConfig"] = Relationship(
         back_populates="camera",
         cascade_delete=True,
         passive_deletes=True,

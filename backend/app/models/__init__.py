@@ -9,6 +9,8 @@ from app.models.behavior_incident import (
 )
 from app.models.camera import Camera
 from app.models.camera_zone_view import CameraZoneView
+from app.models.camera_feature_config import CameraFeatureConfig
+from app.models.feature import Feature
 from app.models.factory import Factory
 from app.models.physical_zone import PhysicalZone
 from app.models.ppe_violation import PPEViolation, PPEViolationSubject
@@ -24,6 +26,8 @@ __all__ = [
     "BehaviorType",
     "Camera",
     "CameraZoneView",
+    "CameraFeatureConfig",
+    "Feature",
     "Factory",
     "PPEViolation",
     "PPEViolationSubject",

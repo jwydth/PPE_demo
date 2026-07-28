@@ -196,6 +196,7 @@ class AnalyticsService:
                 severity_counts=_count_severities(by_zone.get(zone.id, [])),
             )
             for zone in catalog
+            if zone.zone_type == "AREA"
         ]
         unassigned_total = counts.get(None, 0)
         if unassigned_total > 0:

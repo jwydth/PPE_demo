@@ -76,6 +76,21 @@ The application detects PPE compliance (helmets and vests) and monitors configur
 - **New `SLIPPERY` zone type:** A slippery sign (W011, class 3) now creates a `SLIPPERY` zone instead of `RESTRICTED` (`SIGN_CLASS_ZONE_MAP = {2: "RESTRICTED", 3: "SLIPPERY"}`). Added `"SLIPPERY"` to the `zone_type` literals (`schemas/zone.py`, `schemas/detection.py`) and the frontend `ZoneType` union; amber color (`#f59e0b`) and "Slippery"/"Slippery Area" labels across the overlay, incident log, and zone-type dropdown. Behaviorally it's monitored like a RESTRICTED zone (dwell → violation); no DB migration needed (`physical_zones.zone_type` is a plain `String(32)`).
 - **Stationary-dwell gate for zone signs:** A zone sign must now hold still for `AUTO_ZONE_STATIONARY_SECONDS` (default 3.0) within `AUTO_ZONE_MOVE_TOLERANCE` (default 0.03 of frame) before a zone is suggested — so a sign being *carried* across the floor never triggers one; only a sign that's been put down does. `SignZoneRegistry` was rewritten from hit-counting to per-sign stationarity tracking (anchor + still-streak that restarts on drift); `update()` now takes `fps` to convert seconds to frames. Wall-mounted PPE signs (`SignPPERegistry`) stay instant.
 
+## Session Updates (July 2026 — Camera-Specific Features & Factory/Monitoring Zone Isolation)
+
+- **Camera-Specific Feature Configurations:**
+    - **Extensible Database Schema:** Introduced `features` (system-wide capability registry seeded with `ppe_detection`, `zone_monitoring`, and `fall_detection`) and `camera_feature_configs` mapping tables to configure safety features per camera.
+    - **Features REST API:** Added the `/cameras/{camera_id}/features` endpoints to allow fetching, updating, and saving model switches dynamically on a per-camera level.
+    - **Matrix View Badges:** Replaced global toggle configurations in Matrix View mode with interactive per-cell HUD icon badges (Helmet, Shield/Eye, activity indicator) showing active status and letting users toggle features for that specific stream. Hidden global switches in Matrix View to avoid redundancy.
+- **Factory Zones vs. Monitoring Zones Separation:**
+    - **Filtering:** Isolated physical zones of type `"AREA"` (home/factory zone representing camera locations) from virtual drawn monitoring zones (walkways, restricted, slippery). Only `"AREA"` zones are rendered in the "Factory Zones" list and home zone drop-downs.
+    - **Analytics Isolation:** The analytics charts (Pulse, Trend) and stats in the "ANALYTICS" view now exclusively list `"AREA"` type zones.
+    - **Incident Grouping:** Every PPE/Zone/Behavior incident is associated with the camera's location area zone (`home_zone_id`) in `UnifiedIncidentService` for correct location-based safety KPI aggregation.
+- **Interactive "ALL ZONES" Reset:**
+    - Added an interactive click trigger to the central circle of the pulse chart to toggle/reset active zone filtering, alongside a new "All Zones" legend chip above the area chart.
+- **Resilient Camera ID Synchronization:**
+    - Programmed on-mount and save-configuration handlers to map local-storage camera lists with the backend database, preventing stale IDs from causing 404s after database resets.
+
 ## Folder Structure
 
 ### Backend (`/backend`)

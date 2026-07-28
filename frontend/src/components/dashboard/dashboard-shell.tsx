@@ -6,6 +6,9 @@ import {
   RefreshCw,
   Settings,
   Trash2,
+  Shield,
+  Eye,
+  Activity,
 } from "lucide-react";
 import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -22,6 +25,8 @@ import {
   getSafetyEvents,
   getZones,
   setCameraHomeZone,
+  getCameraFeatures,
+  updateCameraFeatures,
 } from "@/lib/ppe-api";
 import { BoundingBoxView } from "@/components/ppe/bounding-box-view";
 import { FileUpload } from "@/components/ppe/file-upload";
@@ -166,6 +171,73 @@ function CameraPanel({
   const [ppeEnabled, setPpeEnabled] = useState(true);
   const [zoneEnabled, setZoneEnabled] = useState(false);
   const [fallEnabled, setFallEnabled] = useState(false);
+  const [cameraFeatureMap, setCameraFeatureMap] = useState<Record<number, Record<string, boolean>>>({});
+
+  const currentPpeEnabled = viewMode === "single"
+    ? (cameraFeatureMap[activeCameraId]?.["ppe_detection"] ?? ppeEnabled)
+    : ppeEnabled;
+
+  const currentZoneEnabled = viewMode === "single"
+    ? (cameraFeatureMap[activeCameraId]?.["zone_monitoring"] ?? zoneEnabled)
+    : zoneEnabled;
+
+  const currentFallEnabled = viewMode === "single"
+    ? (cameraFeatureMap[activeCameraId]?.["fall_detection"] ?? fallEnabled)
+    : fallEnabled;
+
+  useEffect(() => {
+    cameras.forEach(async (cam) => {
+      if (cam.active && cameraFeatureMap[cam.id] === undefined) {
+        // Set an empty dict first to prevent double fetches while fetching
+        setCameraFeatureMap((prev) => ({ ...prev, [cam.id]: {} }));
+        try {
+          const configs = await getCameraFeatures(cam.id);
+          const featureDict = configs.reduce((acc, c) => {
+            acc[c.feature_key] = c.is_enabled;
+            return acc;
+          }, {} as Record<string, boolean>);
+          setCameraFeatureMap((prev) => ({ ...prev, [cam.id]: featureDict }));
+        } catch (err) {
+          // Rollback empty dict so it can retry if needed
+          setCameraFeatureMap((prev) => {
+            const next = { ...prev };
+            delete next[cam.id];
+            return next;
+          });
+        }
+      }
+    });
+  }, [cameras, cameraFeatureMap]);
+
+  const handleToggleCameraFeature = async (cameraId: number, featureKey: string) => {
+    const currentEnabled = cameraFeatureMap[cameraId]?.[featureKey] ?? (featureKey === "ppe_detection");
+    const nextEnabled = !currentEnabled;
+
+    // Optimistic UI update
+    setCameraFeatureMap((prev) => {
+      const current = prev[cameraId] || {};
+      return {
+        ...prev,
+        [cameraId]: { ...current, [featureKey]: nextEnabled },
+      };
+    });
+
+    try {
+      await updateCameraFeatures(cameraId, [
+        { feature_key: featureKey, is_enabled: nextEnabled },
+      ]);
+    } catch (err) {
+      // Rollback optimistic update
+      setCameraFeatureMap((prev) => {
+        const current = prev[cameraId] || {};
+        return {
+          ...prev,
+          [cameraId]: { ...current, [featureKey]: currentEnabled },
+        };
+      });
+      alert(err instanceof Error ? err.message : "Failed to toggle feature");
+    }
+  };
 
   const upload = useDetectionUpload();
 
@@ -179,6 +251,7 @@ function CameraPanel({
     viewMode,
     selectedCameraIds,
     cameras,
+    cameraFeatureMap,
   });
 
   const [isConfiguringCameras, setIsConfiguringCameras] = useState(false);
@@ -251,8 +324,38 @@ function CameraPanel({
     zonesForVideo: zoneDrawing.zonesForVideo,
     setZonesForVideo: zoneDrawing.setZonesForVideo,
     persistZones: zoneDrawing.persistZones,
-    setZoneEnabled,
-    setPpeEnabled,
+    setZoneEnabled: (enabled) => {
+      if (viewMode === "single" && activeCameraId) {
+        void updateCameraFeatures(activeCameraId, [
+          { feature_key: "zone_monitoring", is_enabled: enabled },
+        ]);
+        setCameraFeatureMap((prev) => {
+          const current = prev[activeCameraId] || {};
+          return {
+            ...prev,
+            [activeCameraId]: { ...current, zone_monitoring: enabled },
+          };
+        });
+      } else {
+        setZoneEnabled(enabled);
+      }
+    },
+    setPpeEnabled: (enabled) => {
+      if (viewMode === "single" && activeCameraId) {
+        void updateCameraFeatures(activeCameraId, [
+          { feature_key: "ppe_detection", is_enabled: enabled },
+        ]);
+        setCameraFeatureMap((prev) => {
+          const current = prev[activeCameraId] || {};
+          return {
+            ...prev,
+            [activeCameraId]: { ...current, ppe_detection: enabled },
+          };
+        });
+      } else {
+        setPpeEnabled(enabled);
+      }
+    },
     openModifyModeFor: (draft) => {
       zoneDrawing.setIsDrawing(true);
       zoneDrawing.setConfigMode("modify");
@@ -331,9 +434,10 @@ function CameraPanel({
       const latestBackendCameras = await getCameras();
       const reconciled = updatedCameras.map((cam) => {
         const match = latestBackendCameras.find((bc) => bc.source_key === cam.rtspUrl);
-        return match ? { ...cam, homeZoneId: match.home_zone_id } : cam;
+        return match ? { ...cam, id: match.id, homeZoneId: match.home_zone_id } : cam;
       });
       onCamerasUpdate(reconciled);
+      localStorage.setItem("ppe_demo_cameras", JSON.stringify(reconciled));
       window.alert("Camera configuration saved successfully.");
     } catch (err) {
       setError(
@@ -383,22 +487,22 @@ function CameraPanel({
         : (upload.videoResult?.zone_violations ?? []);
 
       return [
-        ...(ppeEnabled ? reports : []),
-        ...(zoneEnabled ? zoneViolations : []),
-        ...(fallEnabled ? liveStream.streamData.behavior_incidents : []),
+        ...(currentPpeEnabled ? reports : []),
+        ...(currentZoneEnabled ? zoneViolations : []),
+        ...(currentFallEnabled ? liveStream.streamData.behavior_incidents : []),
       ];
     },
     [
       liveStream.isStreaming,
-      ppeEnabled,
+      currentPpeEnabled,
       liveStream.streamData.reports,
       liveStream.streamData.summary,
       liveStream.streamData.zone_violations,
       liveStream.streamData.behavior_incidents,
       upload.videoResult?.reports,
       upload.videoResult?.zone_violations,
-      fallEnabled,
-      zoneEnabled,
+      currentFallEnabled,
+      currentZoneEnabled,
     ],
   );
   const visibleTrackingOverlay = useMemo(
@@ -408,17 +512,17 @@ function CameraPanel({
           ? liveStream.streamData.tracking_overlay
           : upload.videoResult?.tracking_overlay,
         {
-          showPpe: ppeEnabled,
-          showZone: zoneEnabled,
+          showPpe: currentPpeEnabled,
+          showZone: currentZoneEnabled,
         },
       ),
     [
       liveStream.isStreaming,
-      ppeEnabled,
+      currentPpeEnabled,
       liveStream.streamData.summary,
       liveStream.streamData.tracking_overlay,
       upload.videoResult?.tracking_overlay,
-      zoneEnabled,
+      currentZoneEnabled,
     ],
   );
   // Unified identifier for the current camera source: the RTSP URL for a live
@@ -473,26 +577,26 @@ function CameraPanel({
 
   const runSelectedModels = async () => {
     if (!liveStream.isLive && !upload.file) return;
-    if (!ppeEnabled && !zoneEnabled && !fallEnabled) {
+    if (!currentPpeEnabled && !currentZoneEnabled && !currentFallEnabled) {
       setError("Enable at least one detection model before running analysis.");
       setPhase("error");
       return;
     }
-    if (!liveStream.isLive && !isVideo && !ppeEnabled) {
+    if (!liveStream.isLive && !isVideo && !currentPpeEnabled) {
       setError("Image uploads only support PPE detection in this dashboard.");
       setPhase("error");
       return;
     }
 
-    if (zoneEnabled && (liveStream.isLive || isVideo)) {
+    if (currentZoneEnabled && (liveStream.isLive || isVideo)) {
       let hasOverlap = false;
       for (let i = 0; i < zoneDrawing.zonesReadyToSave.length; i++) {
         for (let j = i + 1; j < zoneDrawing.zonesReadyToSave.length; j++) {
           const typeA = zoneDrawing.zonesReadyToSave[i].type;
           const typeB = zoneDrawing.zonesReadyToSave[j].type;
           const isWalkwaySlipperyPair =
-            (typeA === "WALKWAY" && typeB === "SLIPPERY") ||
-            (typeA === "SLIPPERY" && typeB === "WALKWAY");
+             (typeA === "WALKWAY" && typeB === "SLIPPERY") ||
+             (typeA === "SLIPPERY" && typeB === "WALKWAY");
 
           if (
             typeA !== typeB &&
@@ -520,12 +624,12 @@ function CameraPanel({
     zoneDrawing.setIsDrawing(false);
     try {
       if (liveStream.isLive) {
-        if (zoneEnabled && zoneDrawing.zonesReadyToSave.length > 0) {
+        if (currentZoneEnabled && zoneDrawing.zonesReadyToSave.length > 0) {
           await zoneDrawing.persistZones(zoneDrawing.zonesReadyToSave);
         }
         await liveStream.startStreaming(liveStream.liveUrl, true);
       } else if (isVideo) {
-        if (zoneEnabled && zoneDrawing.zonesReadyToSave.length > 0) {
+        if (currentZoneEnabled && zoneDrawing.zonesReadyToSave.length > 0) {
           await zoneDrawing.persistZones(zoneDrawing.zonesReadyToSave);
         }
         await liveStream.startStreaming(upload.file!.name);
@@ -853,28 +957,48 @@ function CameraPanel({
               )}
             </div>
 
-            <div className="grid gap-2 sm:grid-cols-3">
-              <ModelToggle
-                label="PPE Detection"
-                description="Helmet and role-uniform compliance"
-                enabled={ppeEnabled}
-                onToggle={() => setPpeEnabled((current) => !current)}
-              />
-              <ModelToggle
-                label="Zone Monitoring"
-                description="Restricted and walkway zones"
-                enabled={zoneEnabled && (liveStream.isLive || isVideo)}
-                disabled={!liveStream.isLive && !isVideo}
-                onToggle={() => setZoneEnabled((current) => !current)}
-              />
-              <ModelToggle
-                label="Fall Detection"
-                description="Live pose risk and incident capture"
-                enabled={fallEnabled && (liveStream.isLive || isVideo)}
-                disabled={!liveStream.isLive && !isVideo}
-                onToggle={() => setFallEnabled((current) => !current)}
-              />
-            </div>
+            {viewMode === "single" && (
+              <div className="grid gap-2 sm:grid-cols-3">
+                <ModelToggle
+                  label="PPE Detection"
+                  description="Helmet and role-uniform compliance"
+                  enabled={currentPpeEnabled}
+                  onToggle={() => {
+                    if (viewMode === "single" && activeCameraId) {
+                      void handleToggleCameraFeature(activeCameraId, "ppe_detection");
+                    } else {
+                      setPpeEnabled((current) => !current);
+                    }
+                  }}
+                />
+                <ModelToggle
+                  label="Zone Monitoring"
+                  description="Restricted and walkway zones"
+                  enabled={currentZoneEnabled && (liveStream.isLive || isVideo)}
+                  disabled={!liveStream.isLive && !isVideo}
+                  onToggle={() => {
+                    if (viewMode === "single" && activeCameraId) {
+                      void handleToggleCameraFeature(activeCameraId, "zone_monitoring");
+                    } else {
+                      setZoneEnabled((current) => !current);
+                    }
+                  }}
+                />
+                <ModelToggle
+                  label="Fall Detection"
+                  description="Live pose risk and incident capture"
+                  enabled={currentFallEnabled && (liveStream.isLive || isVideo)}
+                  disabled={!liveStream.isLive && !isVideo}
+                  onToggle={() => {
+                    if (viewMode === "single" && activeCameraId) {
+                      void handleToggleCameraFeature(activeCameraId, "fall_detection");
+                    } else {
+                      setFallEnabled((current) => !current);
+                    }
+                  }}
+                />
+              </div>
+            )}
 
             {(liveStream.isLive || (isVideo && upload.videoUrl)) ? (
               viewMode === "matrix" ? (
@@ -936,13 +1060,62 @@ function CameraPanel({
                             >
                               {c.active && frameUrl ? (
                                 <>
+                                  {/* Camera specific inline feature toggles */}
+                                  <div className="absolute top-2 right-2 flex gap-1.5 z-10">
+                                    <button
+                                      type="button"
+                                      title="Toggle PPE Detection"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        void handleToggleCameraFeature(c.id, "ppe_detection");
+                                      }}
+                                      className={`rounded-md p-1.5 shadow-md backdrop-blur transition-all duration-200 border cursor-pointer ${
+                                        (cameraFeatureMap[c.id]?.["ppe_detection"] ?? true)
+                                          ? "bg-lime-500/90 text-slate-950 border-lime-400 hover:bg-lime-500"
+                                          : "bg-slate-900/80 text-slate-400 border-slate-700/50 hover:bg-slate-800"
+                                      }`}
+                                    >
+                                      <Shield className="size-3.5" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      title="Toggle Zone Monitoring"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        void handleToggleCameraFeature(c.id, "zone_monitoring");
+                                      }}
+                                      className={`rounded-md p-1.5 shadow-md backdrop-blur transition-all duration-200 border cursor-pointer ${
+                                        (cameraFeatureMap[c.id]?.["zone_monitoring"] ?? false)
+                                          ? "bg-yellow-500/90 text-slate-950 border-yellow-400 hover:bg-yellow-500"
+                                          : "bg-slate-900/80 text-slate-400 border-slate-700/50 hover:bg-slate-800"
+                                      }`}
+                                    >
+                                      <Eye className="size-3.5" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      title="Toggle Fall Detection"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        void handleToggleCameraFeature(c.id, "fall_detection");
+                                      }}
+                                      className={`rounded-md p-1.5 shadow-md backdrop-blur transition-all duration-200 border cursor-pointer ${
+                                        (cameraFeatureMap[c.id]?.["fall_detection"] ?? false)
+                                          ? "bg-red-500/90 text-slate-950 border-red-400 hover:bg-red-500"
+                                          : "bg-slate-900/80 text-slate-400 border-slate-700/50 hover:bg-slate-800"
+                                      }`}
+                                    >
+                                      <Activity className="size-3.5" />
+                                    </button>
+                                  </div>
+
                                   <img
                                     src={frameUrl}
                                     alt={c.name}
                                     className="absolute inset-0 h-full w-full object-contain animate-fadeIn"
                                   />
                                   {/* Zones Overlay */}
-                                  {zoneEnabled && cameraZones[c.rtspUrl] && (
+                                  {(cameraFeatureMap[c.id]?.["zone_monitoring"] ?? false) && cameraZones[c.rtspUrl] && (
                                     <svg
                                       className="pointer-events-none absolute inset-0 h-full w-full"
                                       viewBox="0 0 1 1"
@@ -978,12 +1151,14 @@ function CameraPanel({
                                   {liveStream.cameraOverlays[c.rtspUrl] && (
                                     (() => {
                                       const overlayData = liveStream.cameraOverlays[c.rtspUrl];
+                                      const isPpeEnabled = cameraFeatureMap[c.id]?.["ppe_detection"] ?? true;
+                                      const isZoneEnabled = cameraFeatureMap[c.id]?.["zone_monitoring"] ?? false;
                                       // Filter frames based on global models enabled
                                       const filteredFrames = overlayData.frames.map((frame) => {
-                                        const missing = ppeEnabled ? frame.missing_equipment : [];
-                                        const incursionType = zoneEnabled ? frame.zone_type : null;
-                                        const incursionName = zoneEnabled ? frame.zone_name : null;
-                                        const compliant = ppeEnabled ? frame.compliant : true;
+                                        const missing = isPpeEnabled ? frame.missing_equipment : [];
+                                        const incursionType = isZoneEnabled ? frame.zone_type : null;
+                                        const incursionName = isZoneEnabled ? frame.zone_name : null;
+                                        const compliant = isPpeEnabled ? frame.compliant : true;
                                         
                                         return {
                                           ...frame,
@@ -993,7 +1168,7 @@ function CameraPanel({
                                           compliant: compliant,
                                         };
                                       }).filter((frame) => {
-                                        return frame.missing_equipment.length > 0 || frame.zone_type !== null || ppeEnabled;
+                                        return frame.missing_equipment.length > 0 || frame.zone_type !== null || isPpeEnabled;
                                       });
 
                                       const syntheticOverlay = {
@@ -1014,7 +1189,7 @@ function CameraPanel({
                                   )}
 
                                   {/* Fall Detection Overlay Layer */}
-                                  {fallEnabled && liveStream.cameraOverlays[c.rtspUrl] && (
+                                  {(cameraFeatureMap[c.id]?.["fall_detection"] ?? false) && liveStream.cameraOverlays[c.rtspUrl] && (
                                     <FallOverlayLayer
                                       detections={liveStream.cameraOverlays[c.rtspUrl].fallDetections}
                                       frameWidth={liveStream.cameraOverlays[c.rtspUrl].frameWidth}
@@ -1088,7 +1263,7 @@ function CameraPanel({
                           <Loader2 className="size-8 animate-spin" />
                         </div>
                       )}
-                      {zoneEnabled || zoneDrawing.isDrawing || zoneDrawing.pendingAutoZoneIds.size > 0 ? (
+                      {currentZoneEnabled || zoneDrawing.isDrawing || zoneDrawing.pendingAutoZoneIds.size > 0 ? (
                         <ZoneOverlaySvg zoneDrawing={zoneDrawing} zoneColors={zoneColors} />
                       ) : null}
                       {!zoneDrawing.isDrawing ? (
@@ -1097,7 +1272,7 @@ function CameraPanel({
                           currentTime={liveStream.currentVideoTime}
                         />
                       ) : null}
-                      {fallEnabled && !zoneDrawing.isDrawing ? (
+                      {currentFallEnabled && !zoneDrawing.isDrawing ? (
                         <FallOverlayLayer
                           detections={liveStream.streamData.fall_detections}
                           frameWidth={streamFrameWidth}
@@ -1111,7 +1286,7 @@ function CameraPanel({
                         onDismiss={autoZone.handleDismissSuggestion}
                       />
                       <PPESuggestionBanner
-                        suggestions={ppeEnabled ? [] : Object.values(autoZone.ppeSuggestions)}
+                        suggestions={currentPpeEnabled ? [] : Object.values(autoZone.ppeSuggestions)}
                         onEnable={autoZone.handleEnablePPESuggestion}
                         onDismiss={autoZone.handleDismissPPESuggestion}
                       />
@@ -1120,7 +1295,7 @@ function CameraPanel({
                       <p className="mt-2 text-xs text-slate-400">
                         Click the video frame to add zone polygon points. Video controls are disabled during drawing.
                       </p>
-                    ) : zoneEnabled ? (
+                    ) : currentZoneEnabled ? (
                       <p className="mt-2 text-xs text-slate-400">
                         Viewing saved zones. Click &quot;Start draw zone&quot; to add new areas.
                       </p>
@@ -1130,7 +1305,7 @@ function CameraPanel({
                   <div className="grid gap-4">
                     <ZoneConfigPanel
                       zoneDrawing={zoneDrawing}
-                      zoneEnabled={zoneEnabled}
+                      zoneEnabled={currentZoneEnabled}
                       phase={phase}
                       isStreaming={liveStream.isStreaming}
                       isVideo={isVideo}
@@ -1139,7 +1314,7 @@ function CameraPanel({
                       togglePlayback={liveStream.togglePlayback}
                     />
                     <FallStatusPanel
-                      enabled={fallEnabled}
+                      enabled={currentFallEnabled}
                       summary={liveStream.streamData.fall_summary}
                       unavailable={liveStream.streamData.fall_unavailable}
                       latestIncident={liveStream.streamData.behavior_incidents.at(-1)}
@@ -1151,7 +1326,7 @@ function CameraPanel({
           </div>
         ) : null}
 
-        {phase === "loading" && (ppeEnabled || zoneEnabled || fallEnabled) ? <LoadingState text="Running inference..." /> : null}
+        {phase === "loading" && (currentPpeEnabled || currentZoneEnabled || currentFallEnabled) ? <LoadingState text="Running inference..." /> : null}
         {phase === "error" ? <ErrorState text={error} /> : null}
         {status ? <EmptyState text={status} /> : null}
 
@@ -1169,8 +1344,8 @@ function CameraPanel({
           <AnalysisResultPanel
             videoName={currentSummary?.video_name}
             incidents={currentIncidents}
-            ppeEnabled={ppeEnabled}
-            zoneEnabled={zoneEnabled}
+            ppeEnabled={currentPpeEnabled}
+            zoneEnabled={currentZoneEnabled}
             onRerun={() => void runSelectedModels()}
           />
         ) : null}
@@ -1493,12 +1668,20 @@ export function DashboardShell() {
     // still cached in localStorage only.
     void getCameras()
       .then((backendCameras) => {
-        setCameras((prev) =>
-          prev.map((cam) => {
+        setCameras((prev) => {
+          const reconciled = prev.map((cam) => {
             const match = backendCameras.find((bc) => bc.source_key === cam.rtspUrl);
-            return match ? { ...cam, homeZoneId: match.home_zone_id } : cam;
-          }),
-        );
+            return match ? { ...cam, id: match.id, homeZoneId: match.home_zone_id } : cam;
+          });
+          localStorage.setItem("ppe_demo_cameras", JSON.stringify(reconciled));
+          
+          // Sync activeCameraId to match the reconciled database camera ID
+          const active = reconciled.find((c) => c.active) || reconciled[0];
+          if (active) {
+            setActiveCameraId(active.id);
+          }
+          return reconciled;
+        });
       })
       .catch(() => {});
   }, []);

@@ -45,6 +45,7 @@ export function useLiveStream({
   viewMode,
   selectedCameraIds,
   cameras,
+  cameraFeatureMap,
 }: {
   ppeEnabled: boolean;
   zoneEnabled: boolean;
@@ -55,6 +56,7 @@ export function useLiveStream({
   viewMode?: "single" | "matrix";
   selectedCameraIds?: number[];
   cameras?: { id: number; rtspUrl: string }[];
+  cameraFeatureMap?: Record<number, Record<string, boolean>>;
 }) {
   const [streamData, setStreamData] = useState<StreamData>(emptyStreamData());
   const [isStreaming, setIsStreaming] = useState(false);
@@ -124,20 +126,30 @@ export function useLiveStream({
         } else {
           isViewing = vidName === viewedVideoNameRef.current;
         }
+
+        const cam = cameras?.find((c) => c.rtspUrl === vidName);
+        const featureDict = cam && cameraFeatureMap ? cameraFeatureMap[cam.id] : null;
+
+        const ppe = featureDict ? featureDict["ppe_detection"] : ppeEnabled;
+        const zone = featureDict ? featureDict["zone_monitoring"] : zoneEnabled;
+        const fall = featureDict ? featureDict["fall_detection"] : fallEnabled;
+
         ws.send(
           JSON.stringify({
             event: "update_settings",
             data: {
-              enable_ppe: ppeEnabled,
-              enable_zone: zoneEnabled,
-              enable_fall: fallEnabled,
+              features: {
+                ppe_detection: ppe !== undefined ? ppe : true,
+                zone_monitoring: zone !== undefined ? zone : false,
+                fall_detection: fall !== undefined ? fall : false,
+              },
               viewing: isViewing,
             },
           }),
         );
       }
     });
-  }, [fallEnabled, ppeEnabled, zoneEnabled, viewedVideoName, viewMode, selectedCameraIds, cameras]);
+  }, [fallEnabled, ppeEnabled, zoneEnabled, viewedVideoName, viewMode, selectedCameraIds, cameras, cameraFeatureMap]);
 
   useEffect(() => {
     if (fallEnabled) return;
@@ -209,13 +221,23 @@ export function useLiveStream({
         } else {
           isViewing = vidName === url;
         }
+
+        const cam = cameras?.find((c) => c.rtspUrl === vidName);
+        const featureDict = cam && cameraFeatureMap ? cameraFeatureMap[cam.id] : null;
+
+        const ppe = featureDict ? featureDict["ppe_detection"] : ppeEnabled;
+        const zone = featureDict ? featureDict["zone_monitoring"] : zoneEnabled;
+        const fall = featureDict ? featureDict["fall_detection"] : fallEnabled;
+
         ws.send(
           JSON.stringify({
             event: "update_settings",
             data: {
-              enable_ppe: ppeEnabled,
-              enable_zone: zoneEnabled,
-              enable_fall: fallEnabled,
+              features: {
+                ppe_detection: ppe !== undefined ? ppe : true,
+                zone_monitoring: zone !== undefined ? zone : false,
+                fall_detection: fall !== undefined ? fall : false,
+              },
               viewing: isViewing,
             },
           }),
@@ -238,10 +260,17 @@ export function useLiveStream({
         setStatus(isAutoLive ? "Connecting to live stream..." : "Initializing real-time stream...");
       }
 
+      const cam = cameras?.find((c) => c.rtspUrl === videoName);
+      const featureDict = cam && cameraFeatureMap ? cameraFeatureMap[cam.id] : null;
+
+      const ppe = featureDict ? featureDict["ppe_detection"] : ppeEnabled;
+      const zone = featureDict ? featureDict["zone_monitoring"] : zoneEnabled;
+      const fall = featureDict ? featureDict["fall_detection"] : fallEnabled;
+
       const wsUrlBase = API_URL.replace(/^http/, "ws");
       const wsUrl = `${wsUrlBase}/ws/stream?video_name=${encodeURIComponent(
         videoName,
-      )}&enable_ppe=${ppeEnabled}&enable_zone=${zoneEnabled}&enable_fall=${fallEnabled}`;
+      )}&enable_ppe=${ppe !== undefined ? ppe : true}&enable_zone=${zone !== undefined ? zone : false}&enable_fall=${fall !== undefined ? fall : false}`;
 
       const ws = new WebSocket(wsUrl);
       ws.binaryType = "blob";

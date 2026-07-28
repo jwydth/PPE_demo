@@ -44,8 +44,8 @@ def _incident(
 
 def _zone_catalog() -> list[PhysicalZone]:
     return [
-        PhysicalZone(id=1, factory_id=1, name="Zone A", zone_type="WALKWAY"),
-        PhysicalZone(id=2, factory_id=1, name="Zone B", zone_type="RESTRICTED"),
+        PhysicalZone(id=1, factory_id=1, name="Zone A", zone_type="AREA"),
+        PhysicalZone(id=2, factory_id=1, name="Zone B", zone_type="AREA"),
     ]
 
 

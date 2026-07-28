@@ -121,12 +121,21 @@ async def stream_video_ws(
 
             if data.get("event") == "update_settings":
                 new_settings = data.get("data", {})
-                if "enable_ppe" in new_settings:
-                    settings_state["enable_ppe"] = bool(new_settings["enable_ppe"])
-                if "enable_zone" in new_settings:
-                    settings_state["enable_zone"] = bool(new_settings["enable_zone"])
-                if "enable_fall" in new_settings:
-                    settings_state["enable_fall"] = bool(new_settings["enable_fall"])
+                if "features" in new_settings:
+                    feats = new_settings["features"]
+                    if "ppe_detection" in feats:
+                        settings_state["enable_ppe"] = bool(feats["ppe_detection"])
+                    if "zone_monitoring" in feats:
+                        settings_state["enable_zone"] = bool(feats["zone_monitoring"])
+                    if "fall_detection" in feats:
+                        settings_state["enable_fall"] = bool(feats["fall_detection"])
+                else:
+                    if "enable_ppe" in new_settings:
+                        settings_state["enable_ppe"] = bool(new_settings["enable_ppe"])
+                    if "enable_zone" in new_settings:
+                        settings_state["enable_zone"] = bool(new_settings["enable_zone"])
+                    if "enable_fall" in new_settings:
+                        settings_state["enable_fall"] = bool(new_settings["enable_fall"])
                 if "viewing" in new_settings:
                     settings_state["viewing"] = bool(new_settings["viewing"])
                 logger.info(f"[conn {conn_id}] [SIGNAL] Received dynamic settings update: {settings_state}")

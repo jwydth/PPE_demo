@@ -432,27 +432,39 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
                       opacity={selectedZone != null && selectedZone !== z.id ? 0.3 : 0.8}
                     />
                   ))}
-                  <circle cx={centerX} cy={centerY} r={50} fill="#f8fafc" stroke="#e2e8f0" />
-                  <text
-                    x={centerX}
-                    y={centerY - 4}
-                    textAnchor="middle"
-                    fill="#0f172a"
-                    className="font-mono"
-                    style={{ fontSize: 22, fontWeight: 700 }}
+                  <g
+                    className="cursor-pointer transition hover:opacity-80"
+                    onClick={() => setSelectedZone(null)}
                   >
-                    {pulseGrandTotal}
-                  </text>
-                  <text
-                    x={centerX}
-                    y={centerY + 15}
-                    textAnchor="middle"
-                    fill="#94a3b8"
-                    className="font-mono"
-                    style={{ fontSize: 9, letterSpacing: "0.06em" }}
-                  >
-                    ALL ZONES
-                  </text>
+                    <circle
+                      cx={centerX}
+                      cy={centerY}
+                      r={50}
+                      fill="#f8fafc"
+                      stroke={selectedZone === null ? "#0f172a" : "#e2e8f0"}
+                      strokeWidth={selectedZone === null ? 2.5 : 1.5}
+                    />
+                    <text
+                      x={centerX}
+                      y={centerY - 4}
+                      textAnchor="middle"
+                      fill="#0f172a"
+                      className="font-mono"
+                      style={{ fontSize: 22, fontWeight: 700 }}
+                    >
+                      {pulseGrandTotal}
+                    </text>
+                    <text
+                      x={centerX}
+                      y={centerY + 15}
+                      textAnchor="middle"
+                      fill={selectedZone === null ? "#0f172a" : "#94a3b8"}
+                      className="font-mono"
+                      style={{ fontSize: 9, letterSpacing: "0.06em", fontWeight: selectedZone === null ? 700 : 400 }}
+                    >
+                      ALL ZONES
+                    </text>
+                  </g>
 
                   {nodePositions.map((z) => {
                     const r = nodeRadius(z.total);
@@ -575,16 +587,25 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
                 <p className="text-xs text-slate-500">Stacked by zone · click a legend chip to filter</p>
               </div>
               <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setSelectedZone(null)}
+                  className="flex items-center gap-1.5 px-1.5 py-0.5 rounded border border-slate-700 bg-slate-900/40 text-xs text-slate-400 hover:text-white transition cursor-pointer"
+                  style={{ opacity: selectedZone === null ? 1 : 0.35 }}
+                >
+                  <span className="size-2 rounded-full bg-slate-400" />
+                  <span>All Zones</span>
+                </button>
                 {zoneMeta.map((z) => (
                   <button
                     key={zoneKey(z.id)}
                     type="button"
                     onClick={() => setSelectedZone(selectedZone === z.id ? null : z.id)}
-                    className="flex items-center gap-1.5"
+                    className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-white transition cursor-pointer"
                     style={{ opacity: selectedZone != null && selectedZone !== z.id ? 0.35 : 1 }}
                   >
                     <span className="size-2 rounded-full" style={{ background: z.color }} />
-                    <span className="text-xs text-slate-500">{z.name}</span>
+                    <span>{z.name}</span>
                   </button>
                 ))}
               </div>

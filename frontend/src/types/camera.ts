@@ -8,3 +8,20 @@ export interface Camera {
   created_at: string;
   updated_at: string;
 }
+
+export interface Feature {
+  id: number;
+  key: string;
+  name: string;
+  description: string | null;
+  is_active: boolean;
+}
+
+export interface CameraFeatureConfig {
+  id: number;
+  camera_id: number;
+  feature_key: string;
+  feature_name: string;
+  is_enabled: boolean;
+  config_params: Record<string, any> | null;
+}
