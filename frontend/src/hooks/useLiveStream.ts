@@ -42,6 +42,9 @@ export function useLiveStream({
   setPhase,
   setError,
   setStatus,
+  viewMode,
+  selectedCameraIds,
+  cameras,
 }: {
   ppeEnabled: boolean;
   zoneEnabled: boolean;
@@ -49,6 +52,9 @@ export function useLiveStream({
   setPhase: (phase: AnalysisPhase) => void;
   setError: (message: string) => void;
   setStatus: (status: string) => void;
+  viewMode?: "single" | "matrix";
+  selectedCameraIds?: number[];
+  cameras?: { id: number; rtspUrl: string }[];
 }) {
   const [streamData, setStreamData] = useState<StreamData>(emptyStreamData());
   const [isStreaming, setIsStreaming] = useState(false);
@@ -56,6 +62,13 @@ export function useLiveStream({
   const [liveUrl, setLiveUrl] = useState("rtsp://127.0.0.1:8554/mystream");
   const [zoneSuggestions, setZoneSuggestions] = useState<Record<string, ZoneSuggestion>>({});
   const [ppeSuggestions, setPpeSuggestions] = useState<Record<string, PPESuggestion>>({});
+  const [liveFrames, setLiveFrames] = useState<Record<string, string>>({});
+  const [cameraOverlays, setCameraOverlays] = useState<Record<string, {
+    frames: any[];
+    frameWidth: number;
+    frameHeight: number;
+    fallDetections: any[];
+  }>>({});
   
   // Manage concurrent connections keyed by RTSP URL
   const wsRefs = useRef<Record<string, WebSocket>>({});
@@ -104,7 +117,13 @@ export function useLiveStream({
   useEffect(() => {
     Object.entries(wsRefs.current).forEach(([vidName, ws]) => {
       if (ws.readyState === WebSocket.OPEN) {
-        const isCurrentlyViewed = vidName === viewedVideoNameRef.current;
+        let isViewing = false;
+        if (viewMode === "matrix" && selectedCameraIds && cameras) {
+          const cam = cameras.find((c) => c.rtspUrl === vidName);
+          isViewing = cam ? selectedCameraIds.includes(cam.id) : false;
+        } else {
+          isViewing = vidName === viewedVideoNameRef.current;
+        }
         ws.send(
           JSON.stringify({
             event: "update_settings",
@@ -112,13 +131,13 @@ export function useLiveStream({
               enable_ppe: ppeEnabled,
               enable_zone: zoneEnabled,
               enable_fall: fallEnabled,
-              viewing: isCurrentlyViewed,
+              viewing: isViewing,
             },
           }),
         );
       }
     });
-  }, [fallEnabled, ppeEnabled, zoneEnabled, viewedVideoName]);
+  }, [fallEnabled, ppeEnabled, zoneEnabled, viewedVideoName, viewMode, selectedCameraIds, cameras]);
 
   useEffect(() => {
     if (fallEnabled) return;
@@ -136,6 +155,11 @@ export function useLiveStream({
     // that specific close to be treated as unexpected so onclose reconnects it.
     return () => {
       Object.values(wsRefs.current).forEach((ws) => ws.close());
+      Object.values(pendingImageUrlRef.current).forEach((url) => URL.revokeObjectURL(url));
+      setLiveFrames((prev) => {
+        Object.values(prev).forEach((url) => URL.revokeObjectURL(url));
+        return {};
+      });
     };
   }, []);
 
@@ -152,6 +176,11 @@ export function useLiveStream({
       return emptyStreamData();
     });
     Object.keys(pendingImageUrlRef.current).forEach(revokePendingImage);
+    setLiveFrames((prev) => {
+      Object.values(prev).forEach((url) => URL.revokeObjectURL(url));
+      return {};
+    });
+    setCameraOverlays({});
     setCurrentVideoTime(0);
     Object.keys(wsRefs.current).forEach(closeSocket);
     wsRefs.current = {};
@@ -173,6 +202,13 @@ export function useLiveStream({
     // Instantly toggle viewed stream frames on the backend WebSockets
     Object.entries(wsRefs.current).forEach(([vidName, ws]) => {
       if (ws.readyState === WebSocket.OPEN) {
+        let isViewing = false;
+        if (viewMode === "matrix" && selectedCameraIds && cameras) {
+          const cam = cameras.find((c) => c.rtspUrl === vidName);
+          isViewing = cam ? selectedCameraIds.includes(cam.id) : false;
+        } else {
+          isViewing = vidName === url;
+        }
         ws.send(
           JSON.stringify({
             event: "update_settings",
@@ -180,7 +216,7 @@ export function useLiveStream({
               enable_ppe: ppeEnabled,
               enable_zone: zoneEnabled,
               enable_fall: fallEnabled,
-              viewing: vidName === url,
+              viewing: isViewing,
             },
           }),
         );
@@ -223,7 +259,13 @@ export function useLiveStream({
           // rendered as live_frame, and revoking it while the <img> element is
           // showing it can blank the frame in some browsers. The frame handler
           // below revokes it once it's confirmed superseded in state.
-          pendingImageUrlRef.current[videoName] = URL.createObjectURL(event.data);
+          const url = URL.createObjectURL(event.data);
+          pendingImageUrlRef.current[videoName] = url;
+          setLiveFrames((prev) => {
+            const oldUrl = prev[videoName];
+            if (oldUrl) URL.revokeObjectURL(oldUrl);
+            return { ...prev, [videoName]: url };
+          });
           return;
         }
 
@@ -253,6 +295,17 @@ export function useLiveStream({
           // connection is healthy — clear any reconnect-attempt count so a
           // later drop gets the full retry budget again.
           delete reconnectAttemptsRef.current[videoName];
+
+          setCameraOverlays((prev) => ({
+            ...prev,
+            [videoName]: {
+              frames: data.frames || [],
+              frameWidth: data.frame_width || 1000,
+              frameHeight: data.frame_height || 1000,
+              fallDetections: data.fall_detections || [],
+            },
+          }));
+
           if (isCurrent) {
             setStreamData((prev) => {
               const nextOverlay = {
@@ -415,6 +468,14 @@ export function useLiveStream({
       if (!activeUrls.has(url)) {
         closeSocket(url);
         delete wsRefs.current[url];
+        setLiveFrames((prev) => {
+          const next = { ...prev };
+          if (next[url]) {
+            URL.revokeObjectURL(next[url]);
+            delete next[url];
+          }
+          return next;
+        });
       }
     });
 
@@ -501,6 +562,8 @@ export function useLiveStream({
     setZoneSuggestions,
     ppeSuggestions,
     setPpeSuggestions,
+    liveFrames,
+    cameraOverlays,
     startStreaming,
     sendMessage,
     resetStream,

@@ -159,7 +159,8 @@ class ZoneService:
 
     def list_physical_zones(self) -> list[PhysicalZone]:
         factory_id = self._get_default_factory_id()
-        return self.physical_zone_repository.get_by_factory(factory_id)
+        zones = self.physical_zone_repository.get_by_factory(factory_id)
+        return [z for z in zones if z.zone_type == "AREA"]
 
     def delete_physical_zone(self, zone_id: int) -> None:
         """Delete a named zone. Cameras pointing at it fall back to

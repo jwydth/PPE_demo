@@ -20,6 +20,7 @@ import {
   getCameras,
   getPhysicalZones,
   getSafetyEvents,
+  getZones,
   setCameraHomeZone,
 } from "@/lib/ppe-api";
 import { BoundingBoxView } from "@/components/ppe/bounding-box-view";
@@ -46,7 +47,7 @@ import { useDetectionUpload } from "@/hooks/useDetectionUpload";
 import { useZoneDrawing } from "@/hooks/useZoneDrawing";
 import { useLiveStream } from "@/hooks/useLiveStream";
 import { useAutoZoneSuggestions } from "@/hooks/useAutoZoneSuggestions";
-import { AnalysisPhase } from "@/hooks/camera-panel-types";
+import { AnalysisPhase, DraftZone } from "@/hooks/camera-panel-types";
 import { BehaviorIncident, FallLiveSummary } from "@/types/behavior";
 import { useSafetyKpis } from "@/hooks/useSafetyKpis";
 import { TopBar, type DashboardView } from "./top-bar";
@@ -149,6 +150,18 @@ function CameraPanel({
 }: CameraPanelProps) {
   const [phase, setPhase] = useState<AnalysisPhase>("idle");
   const [error, setError] = useState("");
+  const [viewMode, setViewMode] = useState<"single" | "matrix">("single");
+  const [selectedCameraIds, setSelectedCameraIds] = useState<number[]>([]);
+  const [cameraZones, setCameraZones] = useState<Record<string, DraftZone[]>>({});
+
+  useEffect(() => {
+    const activeIds = cameras.filter((c) => c.active).map((c) => c.id);
+    setSelectedCameraIds((prev) => {
+      const filteredPrev = prev.filter((id) => activeIds.includes(id));
+      const newActiveIds = activeIds.filter((id) => !prev.includes(id));
+      return [...filteredPrev, ...newActiveIds];
+    });
+  }, [cameras]);
   const [status, setStatus] = useState("");
   const [ppeEnabled, setPpeEnabled] = useState(true);
   const [zoneEnabled, setZoneEnabled] = useState(false);
@@ -163,6 +176,9 @@ function CameraPanel({
     setPhase,
     setError,
     setStatus,
+    viewMode,
+    selectedCameraIds,
+    cameras,
   });
 
   const [isConfiguringCameras, setIsConfiguringCameras] = useState(false);
@@ -200,6 +216,29 @@ function CameraPanel({
     setPhase,
     setError,
   });
+
+  useEffect(() => {
+    cameras.forEach(async (cam) => {
+      if (cam.active && cam.rtspUrl && !cameraZones[cam.rtspUrl]) {
+        try {
+          const saved = await getZones(cam.rtspUrl);
+          const parsed = saved.map(zoneFromBackend);
+          setCameraZones((prev) => ({ ...prev, [cam.rtspUrl]: parsed }));
+        } catch (err) {
+          // ignore
+        }
+      }
+    });
+  }, [cameras, cameraZones]);
+
+  useEffect(() => {
+    if (liveStream.liveUrl) {
+      setCameraZones((prev) => ({
+        ...prev,
+        [liveStream.liveUrl]: zoneDrawing.zonesForVideo,
+      }));
+    }
+  }, [zoneDrawing.zonesForVideo, liveStream.liveUrl]);
 
   const autoZone = useAutoZoneSuggestions({
     sourceKey,
@@ -531,7 +570,33 @@ function CameraPanel({
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          {liveStream.isLive && cameras.length > 0 && (
+          {liveStream.isLive && (
+            <div className="flex rounded-md border border-slate-700 bg-slate-900 p-0.5">
+              <button
+                type="button"
+                onClick={() => setViewMode("single")}
+                className={`rounded px-2.5 py-1 text-xs font-semibold transition cursor-pointer ${
+                  viewMode === "single"
+                    ? "bg-slate-800 text-white shadow-sm"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                Single Feed
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode("matrix")}
+                className={`rounded px-2.5 py-1 text-xs font-semibold transition cursor-pointer ${
+                  viewMode === "matrix"
+                    ? "bg-slate-800 text-white shadow-sm"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                Matrix View
+              </button>
+            </div>
+          )}
+          {viewMode === "single" && liveStream.isLive && cameras.length > 0 && (
             <select
               value={activeCameraId}
               onChange={(e) => handleCameraChange(Number(e.target.value))}
@@ -812,100 +877,276 @@ function CameraPanel({
             </div>
 
             {(liveStream.isLive || (isVideo && upload.videoUrl)) ? (
-              <div className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_340px]">
-                <div>
-                  <div
-                    ref={(el) => zoneDrawing.setSurfaceElement(el)}
-                    onMouseMove={zoneDrawing.handleMouseMove}
-                    onMouseUp={zoneDrawing.handleMouseUp}
-                    onMouseLeave={zoneDrawing.handleMouseUp}
-                    className="relative aspect-video overflow-hidden rounded-md border border-slate-800 bg-black"
-                    style={{ aspectRatio: feedAspectRatio }}
-                  >
-                    {liveStream.isLive && liveStream.streamData.live_frame ? (
-                      <img
-                        src={liveStream.streamData.live_frame}
-                        alt="Live stream"
-                        className="absolute inset-0 h-full w-full object-contain"
+              viewMode === "matrix" ? (
+                <div className="grid gap-4">
+                  {/* Visible Cameras Selector */}
+                  <div className="flex flex-wrap items-center gap-4 rounded-md border border-slate-800 bg-slate-950/40 p-3">
+                    <span className="text-xs font-semibold text-slate-300">Visible Cameras:</span>
+                    <div className="flex flex-wrap items-center gap-3.5">
+                      {cameras.map((c) => (
+                        <label key={c.id} className="flex items-center gap-1.5 text-xs text-white cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={selectedCameraIds.includes(c.id)}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSelectedCameraIds([...selectedCameraIds, c.id]);
+                              } else {
+                                setSelectedCameraIds(selectedCameraIds.filter((id) => id !== c.id));
+                              }
+                            }}
+                            className="rounded border-slate-700 bg-slate-950 text-lime-500 focus:ring-0 cursor-pointer size-3.5"
+                          />
+                          {c.name}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Grid of streams */}
+                  {selectedCameraIds.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center rounded-md border border-dashed border-slate-800 py-16 text-center text-slate-400">
+                      <p className="text-sm font-medium">No cameras selected</p>
+                      <p className="text-xs text-slate-500 mt-1">Check at least one camera above to view its stream feed.</p>
+                    </div>
+                  ) : (
+                    <div
+                      className={`grid gap-4 ${
+                        selectedCameraIds.length === 1
+                          ? "grid-cols-1"
+                          : selectedCameraIds.length === 2
+                            ? "grid-cols-2"
+                            : selectedCameraIds.length <= 4
+                              ? "grid-cols-2"
+                              : "grid-cols-3"
+                      }`}
+                    >
+                      {cameras
+                        .filter((c) => selectedCameraIds.includes(c.id))
+                        .map((c) => {
+                          const frameUrl = liveStream.liveFrames[c.rtspUrl];
+                          return (
+                            <div
+                              key={c.id}
+                              onClick={() => {
+                                void handleCameraChange(c.id);
+                                setViewMode("single");
+                              }}
+                              className="group relative aspect-video overflow-hidden rounded-md border border-slate-800 bg-black cursor-pointer hover:border-slate-500 transition-all shadow-md"
+                            >
+                              {c.active && frameUrl ? (
+                                <>
+                                  <img
+                                    src={frameUrl}
+                                    alt={c.name}
+                                    className="absolute inset-0 h-full w-full object-contain animate-fadeIn"
+                                  />
+                                  {/* Zones Overlay */}
+                                  {zoneEnabled && cameraZones[c.rtspUrl] && (
+                                    <svg
+                                      className="pointer-events-none absolute inset-0 h-full w-full"
+                                      viewBox="0 0 1 1"
+                                      preserveAspectRatio="none"
+                                    >
+                                      {cameraZones[c.rtspUrl].map((zone) => {
+                                        const pathData = zone.points.length > 0
+                                          ? `M ${zone.points[0].x} ${zone.points[0].y} ` +
+                                            zone.points.map((p, i) => {
+                                              const nextP = zone.points[(i + 1) % zone.points.length];
+                                              if (p.curveControl) {
+                                                return `Q ${p.curveControl.x} ${p.curveControl.y}, ${nextP.x} ${nextP.y}`;
+                                              }
+                                              return `L ${nextP.x} ${nextP.y}`;
+                                            }).join(" ") + " Z"
+                                          : "";
+
+                                        return (
+                                          <path
+                                            key={zone.id}
+                                            d={pathData}
+                                            fill={`${zoneColors[zone.type]}33`}
+                                            stroke={zoneColors[zone.type]}
+                                            strokeWidth={0.004}
+                                            className="pointer-events-none"
+                                          />
+                                        );
+                                      })}
+                                    </svg>
+                                  )}
+
+                                  {/* Tracking Overlay Layer (PPE / Zone Violations) */}
+                                  {liveStream.cameraOverlays[c.rtspUrl] && (
+                                    (() => {
+                                      const overlayData = liveStream.cameraOverlays[c.rtspUrl];
+                                      // Filter frames based on global models enabled
+                                      const filteredFrames = overlayData.frames.map((frame) => {
+                                        const missing = ppeEnabled ? frame.missing_equipment : [];
+                                        const incursionType = zoneEnabled ? frame.zone_type : null;
+                                        const incursionName = zoneEnabled ? frame.zone_name : null;
+                                        const compliant = ppeEnabled ? frame.compliant : true;
+                                        
+                                        return {
+                                          ...frame,
+                                          missing_equipment: missing,
+                                          zone_type: incursionType,
+                                          zone_name: incursionName,
+                                          compliant: compliant,
+                                        };
+                                      }).filter((frame) => {
+                                        return frame.missing_equipment.length > 0 || frame.zone_type !== null || ppeEnabled;
+                                      });
+
+                                      const syntheticOverlay = {
+                                        fps: 30,
+                                        stride: 1,
+                                        frame_width: overlayData.frameWidth,
+                                        frame_height: overlayData.frameHeight,
+                                        frames: filteredFrames.map((f) => ({ ...f, frame_index: 0 })),
+                                      };
+
+                                      return (
+                                        <TrackingOverlayLayer
+                                          overlay={syntheticOverlay}
+                                          currentTime={0}
+                                        />
+                                      );
+                                    })()
+                                  )}
+
+                                  {/* Fall Detection Overlay Layer */}
+                                  {fallEnabled && liveStream.cameraOverlays[c.rtspUrl] && (
+                                    <FallOverlayLayer
+                                      detections={liveStream.cameraOverlays[c.rtspUrl].fallDetections}
+                                      frameWidth={liveStream.cameraOverlays[c.rtspUrl].frameWidth}
+                                      frameHeight={liveStream.cameraOverlays[c.rtspUrl].frameHeight}
+                                    />
+                                  )}
+                                </>
+                              ) : (
+                                <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-slate-500 bg-slate-950/80">
+                                  {c.active ? (
+                                    <>
+                                      <Loader2 className="size-6 animate-spin text-slate-400" />
+                                      <span className="text-[10px] uppercase font-semibold tracking-wider text-slate-400">Connecting stream...</span>
+                                    </>
+                                  ) : (
+                                    <span className="text-[10px] uppercase font-semibold tracking-wider text-slate-500">Camera Offline</span>
+                                  )}
+                                </div>
+                              )}
+                              {/* Overlay Badge */}
+                              <div className="absolute top-2 left-2 flex items-center gap-1.5 rounded bg-slate-950/70 px-2 py-0.5 text-[10px] font-medium text-white backdrop-blur-sm">
+                                <span className={`size-1.5 rounded-full ${c.active ? "bg-emerald-500" : "bg-slate-400"}`} />
+                                {c.name}
+                              </div>
+                              {/* Tooltip on hover */}
+                              <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <span className="rounded bg-slate-900/90 border border-slate-700 px-2.5 py-1 text-xs font-semibold text-white shadow-lg">
+                                  Switch to single view
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_340px]">
+                  <div>
+                    <div
+                      ref={(el) => zoneDrawing.setSurfaceElement(el)}
+                      onMouseMove={zoneDrawing.handleMouseMove}
+                      onMouseUp={zoneDrawing.handleMouseUp}
+                      onMouseLeave={zoneDrawing.handleMouseUp}
+                      className="relative aspect-video overflow-hidden rounded-md border border-slate-800 bg-black"
+                      style={{ aspectRatio: feedAspectRatio }}
+                    >
+                      {liveStream.isLive && liveStream.streamData.live_frame ? (
+                        <img
+                          src={liveStream.streamData.live_frame}
+                          alt="Live stream"
+                          className="absolute inset-0 h-full w-full object-contain"
+                        />
+                      ) : upload.videoUrl ? (
+                        <video
+                          ref={(el) => liveStream.setVideoElement(el)}
+                          src={upload.videoUrl}
+                          controls={!zoneDrawing.isDrawing}
+                          muted
+                          playsInline
+                          onPlay={liveStream.handleVideoPlay}
+                          onPause={liveStream.handleVideoPause}
+                          onSeeked={liveStream.handleVideoTimeSync}
+                          onTimeUpdate={liveStream.handleVideoTimeSync}
+                          className={`absolute inset-0 h-full w-full object-contain ${
+                            zoneDrawing.isDrawing ? "pointer-events-none" : ""
+                          }`}
+                        />
+                      ) : (
+                        <div className="flex h-full w-full items-center justify-center text-slate-500">
+                          <Loader2 className="size-8 animate-spin" />
+                        </div>
+                      )}
+                      {zoneEnabled || zoneDrawing.isDrawing || zoneDrawing.pendingAutoZoneIds.size > 0 ? (
+                        <ZoneOverlaySvg zoneDrawing={zoneDrawing} zoneColors={zoneColors} />
+                      ) : null}
+                      {!zoneDrawing.isDrawing ? (
+                        <TrackingOverlayLayer
+                          overlay={visibleTrackingOverlay}
+                          currentTime={liveStream.currentVideoTime}
+                        />
+                      ) : null}
+                      {fallEnabled && !zoneDrawing.isDrawing ? (
+                        <FallOverlayLayer
+                          detections={liveStream.streamData.fall_detections}
+                          frameWidth={streamFrameWidth}
+                          frameHeight={streamFrameHeight}
+                          currentFrameIndex={currentFrameIndex}
+                        />
+                      ) : null}
+                      <SuggestionOverlayLayer
+                        suggestions={Object.values(autoZone.zoneSuggestions)}
+                        onAccept={(s, name) => void autoZone.handleAcceptSuggestion(s, name)}
+                        onDismiss={autoZone.handleDismissSuggestion}
                       />
-                    ) : upload.videoUrl ? (
-                      <video
-                        ref={(el) => liveStream.setVideoElement(el)}
-                        src={upload.videoUrl}
-                        controls={!zoneDrawing.isDrawing}
-                        muted
-                        playsInline
-                        onPlay={liveStream.handleVideoPlay}
-                        onPause={liveStream.handleVideoPause}
-                        onSeeked={liveStream.handleVideoTimeSync}
-                        onTimeUpdate={liveStream.handleVideoTimeSync}
-                        className={`absolute inset-0 h-full w-full object-contain ${
-                          zoneDrawing.isDrawing ? "pointer-events-none" : ""
-                        }`}
+                      <PPESuggestionBanner
+                        suggestions={ppeEnabled ? [] : Object.values(autoZone.ppeSuggestions)}
+                        onEnable={autoZone.handleEnablePPESuggestion}
+                        onDismiss={autoZone.handleDismissPPESuggestion}
                       />
-                    ) : (
-                      <div className="flex h-full w-full items-center justify-center text-slate-500">
-                        <Loader2 className="size-8 animate-spin" />
-                      </div>
-                    )}
-                    {zoneEnabled || zoneDrawing.isDrawing || zoneDrawing.pendingAutoZoneIds.size > 0 ? (
-                      <ZoneOverlaySvg zoneDrawing={zoneDrawing} zoneColors={zoneColors} />
+                    </div>
+                    {zoneDrawing.isDrawing ? (
+                      <p className="mt-2 text-xs text-slate-400">
+                        Click the video frame to add zone polygon points. Video controls are disabled during drawing.
+                      </p>
+                    ) : zoneEnabled ? (
+                      <p className="mt-2 text-xs text-slate-400">
+                        Viewing saved zones. Click &quot;Start draw zone&quot; to add new areas.
+                      </p>
                     ) : null}
-                    {!zoneDrawing.isDrawing ? (
-                      <TrackingOverlayLayer
-                        overlay={visibleTrackingOverlay}
-                        currentTime={liveStream.currentVideoTime}
-                      />
-                    ) : null}
-                    {fallEnabled && !zoneDrawing.isDrawing ? (
-                      <FallOverlayLayer
-                        detections={liveStream.streamData.fall_detections}
-                        frameWidth={streamFrameWidth}
-                        frameHeight={streamFrameHeight}
-                        currentFrameIndex={currentFrameIndex}
-                      />
-                    ) : null}
-                    <SuggestionOverlayLayer
-                      suggestions={Object.values(autoZone.zoneSuggestions)}
-                      onAccept={(s, name) => void autoZone.handleAcceptSuggestion(s, name)}
-                      onDismiss={autoZone.handleDismissSuggestion}
+                  </div>
+
+                  <div className="grid gap-4">
+                    <ZoneConfigPanel
+                      zoneDrawing={zoneDrawing}
+                      zoneEnabled={zoneEnabled}
+                      phase={phase}
+                      isStreaming={liveStream.isStreaming}
+                      isVideo={isVideo}
+                      isLive={liveStream.isLive}
+                      isPlaying={liveStream.isPlaying}
+                      togglePlayback={liveStream.togglePlayback}
                     />
-                    <PPESuggestionBanner
-                      suggestions={ppeEnabled ? [] : Object.values(autoZone.ppeSuggestions)}
-                      onEnable={autoZone.handleEnablePPESuggestion}
-                      onDismiss={autoZone.handleDismissPPESuggestion}
+                    <FallStatusPanel
+                      enabled={fallEnabled}
+                      summary={liveStream.streamData.fall_summary}
+                      unavailable={liveStream.streamData.fall_unavailable}
+                      latestIncident={liveStream.streamData.behavior_incidents.at(-1)}
                     />
                   </div>
-                  {zoneDrawing.isDrawing ? (
-                    <p className="mt-2 text-xs text-slate-400">
-                      Click the video frame to add zone polygon points. Video controls are disabled during drawing.
-                    </p>
-                  ) : zoneEnabled ? (
-                    <p className="mt-2 text-xs text-slate-400">
-                      Viewing saved zones. Click &quot;Start draw zone&quot; to add new areas.
-                    </p>
-                  ) : null}
                 </div>
-
-                <div className="grid gap-4">
-                  <ZoneConfigPanel
-                    zoneDrawing={zoneDrawing}
-                    zoneEnabled={zoneEnabled}
-                    phase={phase}
-                    isStreaming={liveStream.isStreaming}
-                    isVideo={isVideo}
-                    isLive={liveStream.isLive}
-                    isPlaying={liveStream.isPlaying}
-                    togglePlayback={liveStream.togglePlayback}
-                  />
-                  <FallStatusPanel
-                    enabled={fallEnabled}
-                    summary={liveStream.streamData.fall_summary}
-                    unavailable={liveStream.streamData.fall_unavailable}
-                    latestIncident={liveStream.streamData.behavior_incidents.at(-1)}
-                  />
-                </div>
-              </div>
+              )
             ) : null}
           </div>
         ) : null}
@@ -1364,6 +1605,37 @@ export function DashboardShell() {
       </div>
     </div>
   );
+}
+
+function zoneFromBackend(zone: any): DraftZone {
+  try {
+    const uiData = JSON.parse(zone.ui_shape_data);
+    if (uiData && Array.isArray(uiData.points)) {
+      return {
+        id: String(zone.id ?? crypto.randomUUID()),
+        name: zone.zone_name,
+        type: zone.zone_type,
+        dwellThresholdSeconds: zone.dwell_threshold_seconds,
+        points: uiData.points,
+      };
+    }
+  } catch {}
+  return {
+    id: String(zone.id ?? crypto.randomUUID()),
+    name: zone.zone_name,
+    type: zone.zone_type,
+    dwellThresholdSeconds: zone.dwell_threshold_seconds,
+    points: safeParsePoints(zone.flattened_coordinates),
+  };
+}
+
+function safeParsePoints(value: string) {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 function StatusPill({ label, value }: { label: string; value: string }) {

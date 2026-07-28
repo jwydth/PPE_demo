@@ -189,6 +189,7 @@ def test_zone_service_lists_physical_zones_for_default_factory():
         name="Default Factory",
     )
     zone = _physical_zone_model()
+    zone.zone_type = "AREA"
     physical_zone_repository.get_by_factory.return_value = [zone]
     service = ZoneService(
         physical_zone_repository,
