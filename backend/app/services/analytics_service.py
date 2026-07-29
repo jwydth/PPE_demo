@@ -68,9 +68,16 @@ class AnalyticsService:
         self.physical_zone_repository = physical_zone_repository
         self.camera_repository = camera_repository
         self.factory_repository = factory_repository
+        # Per-instance only — a fresh AnalyticsService is built per request
+        # (see get_analytics_service), so this never serves stale data across
+        # requests. get_summary/get_trend/get_compare/get_incidents can all
+        # be called with overlapping (date_from, date_to) pairs for the same
+        # report; without this cache each one re-runs the same 3-table
+        # incident query.
+        self._range_cache: dict[tuple[datetime, datetime], list[UnifiedIncident]] = {}
 
     def get_summary(self, *, range_: str, zone_id: int | None) -> AnalyticsSummary:
-        date_from, date_to = _range_to_dates(range_)
+        date_from, date_to = range_to_dates(range_)
         all_incidents = self._fetch(date_from, date_to)
         filtered = _filter_by_zone(all_incidents, zone_id)
 
@@ -101,7 +108,7 @@ class AnalyticsService:
         )
 
     def get_trend(self, *, range_: str, zone_id: int | None) -> AnalyticsTrend:
-        date_from, date_to = _range_to_dates(range_)
+        date_from, date_to = range_to_dates(range_)
         bucket_width, bucket, num_buckets = _bucket_config(range_)
         incidents = _filter_by_zone(self._fetch(date_from, date_to), zone_id)
 
@@ -171,9 +178,21 @@ class AnalyticsService:
         )
 
     def _fetch(self, date_from: datetime, date_to: datetime) -> list[UnifiedIncident]:
-        return self.incident_service.list_incidents(
-            date_from=date_from, date_to=date_to, limit=_ANALYTICS_LIMIT
-        )
+        key = (date_from, date_to)
+        cached = self._range_cache.get(key)
+        if cached is None:
+            cached = self.incident_service.list_incidents(
+                date_from=date_from, date_to=date_to, limit=_ANALYTICS_LIMIT
+            )
+            self._range_cache[key] = cached
+        return cached
+
+    def get_incidents(
+        self, *, date_from: datetime, date_to: datetime, zone_id: int | None = None
+    ) -> list[UnifiedIncident]:
+        """Same underlying fetch as get_summary/get_trend for this range —
+        callers must not mutate the returned list (it's shared/cached)."""
+        return _filter_by_zone(self._fetch(date_from, date_to), zone_id)
 
     def _zone_totals(self, incidents: list[UnifiedIncident]) -> list[ZoneTotal]:
         factory = self.factory_repository.get_or_create_default_factory()
@@ -253,7 +272,7 @@ def _zone_key(zone_id: int | None) -> str:
     return "unassigned" if zone_id is None else str(zone_id)
 
 
-def _range_to_dates(range_: str) -> tuple[datetime, datetime]:
+def range_to_dates(range_: str) -> tuple[datetime, datetime]:
     now = datetime.now(timezone.utc)
     delta, _bucket, _n = _bucket_config(range_)
     return now - delta * _n, now

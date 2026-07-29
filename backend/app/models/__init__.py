@@ -14,6 +14,8 @@ from app.models.feature import Feature
 from app.models.factory import Factory
 from app.models.physical_zone import PhysicalZone
 from app.models.ppe_violation import PPEViolation, PPEViolationSubject
+from app.models.report_delivery import ReportDelivery
+from app.models.report_schedule import ReportSchedule
 from app.models.zone_violation import ZoneViolation
 
 __all__ = [
@@ -32,5 +34,7 @@ __all__ = [
     "PPEViolation",
     "PPEViolationSubject",
     "PhysicalZone",
+    "ReportDelivery",
+    "ReportSchedule",
     "ZoneViolation",
 ]

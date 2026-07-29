@@ -14,6 +14,13 @@ import {
 } from "@/types/analytics";
 import { BehaviorIncident } from "@/types/behavior";
 import { Camera, Feature, CameraFeatureConfig } from "@/types/camera";
+import {
+  ReportEmailRequest,
+  ReportEmailResponse,
+  ReportPreview,
+  ReportScheduleRequest,
+  ReportScheduleResponse,
+} from "@/types/report";
 import { PhysicalZone, ZoneConfiguration, ZoneViolation } from "@/types/zone";
 
 export const API_URL =
@@ -377,5 +384,66 @@ export async function updateCameraFeatures(
     body: JSON.stringify(updates),
   });
   if (!res.ok) throw await readError(res, "Could not update camera features");
+  return res.json();
+}
+
+export async function getReportPreview(
+  range: AnalyticsRangeParam,
+  zoneId: number | null,
+): Promise<ReportPreview> {
+  const params = new URLSearchParams({ range });
+  if (zoneId != null) params.set("zone_id", String(zoneId));
+  const res = await fetch(`${API_URL}/reports/incidents/preview?${params}`);
+  if (!res.ok) throw await readError(res, "Could not load the report preview");
+  return res.json();
+}
+
+export async function downloadIncidentReportPdf(
+  range: AnalyticsRangeParam,
+  zoneId: number | null,
+  includeSnapshots = true,
+): Promise<void> {
+  const params = new URLSearchParams({ range, include_snapshots: String(includeSnapshots) });
+  if (zoneId != null) params.set("zone_id", String(zoneId));
+  const res = await fetch(`${API_URL}/reports/incidents.pdf?${params}`);
+  if (!res.ok) throw await readError(res, "Could not generate the PDF report");
+  const blob = await res.blob();
+  const cd = res.headers.get("content-disposition") ?? "";
+  const filename = /filename="([^"]+)"/.exec(cd)?.[1] ?? "safety-report.pdf";
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+export async function emailIncidentReport(payload: ReportEmailRequest): Promise<ReportEmailResponse> {
+  const res = await fetch(`${API_URL}/reports/incidents/email`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw await readError(res, "Could not send the report email");
+  return res.json();
+}
+
+export async function getReportSchedule(): Promise<ReportScheduleResponse> {
+  const res = await fetch(`${API_URL}/reports/schedule`);
+  if (!res.ok) throw await readError(res, "Could not load the report schedule");
+  return res.json();
+}
+
+export async function updateReportSchedule(
+  payload: ReportScheduleRequest,
+): Promise<ReportScheduleResponse> {
+  const res = await fetch(`${API_URL}/reports/schedule`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw await readError(res, "Could not save the report schedule");
   return res.json();
 }

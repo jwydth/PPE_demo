@@ -193,6 +193,41 @@ under `backend/weights`.
 If model weights are missing or unavailable, the detector can run in mock mode
 for development.
 
+### Email Reports
+
+The Incident Analytics dashboard can export a PDF report and email it via
+SMTP (`backend/app/services/reporting/`). Email delivery is **disabled by
+default** — `GET /reports/incidents.pdf` and `GET /reports/incidents/preview`
+work with no configuration, but `POST /reports/incidents/email` returns `503`
+until SMTP is set up.
+
+To enable it, add to `backend/.env`:
+
+```dotenv
+REPORT_EMAIL_ENABLED=true
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USERNAME=your-account@gmail.com
+SMTP_PASSWORD=your-16-char-app-password
+SMTP_USE_STARTTLS=true
+SMTP_FROM_EMAIL=safety-reports@yourcompany.com
+REPORT_RECIPIENT_ALLOWLIST=["@yourcompany.com"]
+```
+
+**Gmail app-password caveat:** Gmail rejects your normal account password over
+SMTP. `SMTP_PASSWORD` must be a 16-character
+[App Password](https://myaccount.google.com/apppasswords), which requires
+2-Step Verification to be enabled on the account first.
+
+`REPORT_RECIPIENT_ALLOWLIST` is empty (allow any recipient) by default — set
+it before enabling email delivery, since an unauthenticated endpoint with an
+open recipient field is a spam-relay risk. See
+`backend/docs/internal_deployment.md`. Verify the setup with:
+
+```text
+GET /health/smtp
+```
+
 ## GPU Runtime Check
 
 If you are using GPU inference, verify the backend runtime before starting the
@@ -242,6 +277,10 @@ python -m app.db.init_db
 - `DELETE /zones/video?video_name=...`
 - `GET /violations`
 - `GET /zone-violations`
+- `GET /reports/incidents/preview`
+- `GET /reports/incidents.pdf`
+- `POST /reports/incidents/email`
+- `GET /health/smtp`
 
 ## Documentation
 

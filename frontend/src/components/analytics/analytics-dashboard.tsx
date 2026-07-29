@@ -2,11 +2,12 @@
 
 import {
   Bell,
-  Boxes,
+  Calendar,
   Camera as CameraIcon,
   ChevronDown,
   ClipboardCheck,
   Factory,
+  FileDown,
   Minus,
   Siren,
   Trash2,
@@ -30,6 +31,8 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { ReportExportDialog } from "@/components/analytics/report-export-dialog";
+import { ScheduleReportDialog } from "@/components/analytics/schedule-report-dialog";
 import { IncidentDetailModal, type IncidentCategory } from "@/components/dashboard/incident-detail-modal";
 import { useSafetyKpis } from "@/hooks/useSafetyKpis";
 import { CONFIRM_DELETE_INCIDENT } from "@/lib/messages";
@@ -167,6 +170,8 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
   const [selectedIncident, setSelectedIncident] = useState<{ category: IncidentCategory; id: number } | null>(
     null,
   );
+  const [exportOpen, setExportOpen] = useState(false);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
 
   const queryClient = useQueryClient();
 
@@ -347,13 +352,6 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
               <ClipboardCheck className="size-4" aria-hidden="true" />
               Incident Log
             </Link>
-            <Link
-              href="/"
-              className="flex h-full items-center gap-2 border-b-2 border-transparent px-4 text-xs font-semibold uppercase tracking-wide text-slate-400 transition hover:text-slate-100"
-            >
-              <Boxes className="size-4" aria-hidden="true" />
-              3D Map
-            </Link>
             <span className="flex h-full items-center gap-2 border-b-2 border-lime-200 px-4 text-xs font-semibold uppercase tracking-wide text-lime-200">
               <Bell className="size-4" aria-hidden="true" />
               Incident Analytics
@@ -398,19 +396,37 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
                 {now.toLocaleTimeString("en-US", { hour12: false })}
               </p>
             </div>
-            <div className="inline-flex rounded-md border border-slate-200 bg-white p-1 shadow-sm">
-              {(["24H", "7D", "30D"] as const).map((t) => (
-                <button
-                  key={t}
-                  type="button"
-                  onClick={() => setTimeRange(t)}
-                  className={`rounded px-3 py-1.5 font-mono text-xs font-semibold transition ${
-                    timeRange === t ? "bg-slate-950 text-lime-200" : "text-slate-500 hover:bg-slate-100"
-                  }`}
-                >
-                  {t}
-                </button>
-              ))}
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setExportOpen(true)}
+                className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
+              >
+                <FileDown className="size-4" aria-hidden="true" />
+                Export report
+              </button>
+              <button
+                type="button"
+                onClick={() => setScheduleOpen(true)}
+                className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
+              >
+                <Calendar className="size-4" aria-hidden="true" />
+                Schedule
+              </button>
+              <div className="inline-flex rounded-md border border-slate-200 bg-white p-1 shadow-sm">
+                {(["24H", "7D", "30D"] as const).map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => setTimeRange(t)}
+                    className={`rounded px-3 py-1.5 font-mono text-xs font-semibold transition ${
+                      timeRange === t ? "bg-slate-950 text-lime-200" : "text-slate-500 hover:bg-slate-100"
+                    }`}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
@@ -884,6 +900,14 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
           onDeleted={() => removeFromFeedCache(selectedIncident.category, selectedIncident.id)}
         />
       ) : null}
+
+      <ReportExportDialog
+        open={exportOpen}
+        onClose={() => setExportOpen(false)}
+        range={timeRange}
+        zoneId={selectedZone}
+      />
+      <ScheduleReportDialog open={scheduleOpen} onClose={() => setScheduleOpen(false)} />
     </div>
   );
 }

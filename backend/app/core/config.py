@@ -97,11 +97,48 @@ class Settings(BaseSettings):
     # approaches it; a truncation warning is logged when it's hit either way.
     ANALYTICS_LIMIT: int = 20000
 
+    # ---- Reporting / PDF export ----
+    # Display timezone for rendered report timestamps. All storage is UTC
+    # (see UnifiedIncidentService._ensure_tz); this only affects presentation.
+    REPORT_TIMEZONE: str = "Asia/Ho_Chi_Minh"
+    REPORT_COMPANY_NAME: str = "De Heus LLC"
+    REPORT_LOGO_PATH: str | None = None          # optional PNG/JPG, absolute or backend-relative
+    REPORT_MAX_INCIDENT_ROWS: int = 25           # rows in the detail table
+    REPORT_MAX_SNAPSHOTS: int = 6                # evidence thumbnails in the appendix
+    REPORT_SNAPSHOT_TIMEOUT_SECONDS: float = 5.0 # per-image fetch budget
+    REPORT_ARCHIVE_TO_MINIO: bool = True
+
+    # ---- SMTP ----
+    REPORT_EMAIL_ENABLED: bool = False           # master switch; see security note in the plan
+    SMTP_HOST: str | None = None
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str | None = None
+    SMTP_PASSWORD: str | None = None
+    SMTP_USE_STARTTLS: bool = True               # port 587
+    SMTP_USE_SSL: bool = False                   # port 465; mutually exclusive with STARTTLS
+    SMTP_TIMEOUT_SECONDS: float = 20.0
+    SMTP_FROM_EMAIL: str | None = None
+    SMTP_FROM_NAME: str = "Smart Factory Safety Monitoring"
+    # Empty list = allow any recipient. NON-EMPTY IS STRONGLY RECOMMENDED: without
+    # auth on this API, an open recipient field makes /reports/incidents/email a
+    # spam relay. Exact-match emails and/or "@domain.com" suffixes are accepted.
+    REPORT_RECIPIENT_ALLOWLIST: list[str] = []
+    REPORT_MAX_RECIPIENTS: int = 10
+    # In-process rate limit for POST /reports/incidents/email. Does not survive
+    # multi-worker uvicorn (each worker keeps its own counter).
+    REPORT_EMAIL_RATE_LIMIT_PER_HOUR: int = 20
+
     @model_validator(mode="after")
     def _coerce_sign_dict_keys(self) -> "Settings":
         self.SIGN_CLASS_ZONE_MAP = {int(k): v for k, v in self.SIGN_CLASS_ZONE_MAP.items()}
         self.SIGN_CLASS_NAMES = {int(k): v for k, v in self.SIGN_CLASS_NAMES.items()}
         self.SIGN_CLASS_PPE_TRIGGER = {int(k) for k in self.SIGN_CLASS_PPE_TRIGGER}
+        return self
+
+    @model_validator(mode="after")
+    def _validate_smtp(self) -> "Settings":
+        if self.SMTP_USE_SSL and self.SMTP_USE_STARTTLS:
+            raise ValueError("SMTP_USE_SSL and SMTP_USE_STARTTLS are mutually exclusive.")
         return self
 
     class Config:

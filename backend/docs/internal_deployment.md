@@ -79,6 +79,24 @@ Invoke-RestMethod http://localhost:8000/health/db
 Invoke-RestMethod http://localhost:8000/health/storage
 ```
 
+## Incident Report Email Endpoint
+
+`POST /reports/incidents/email` (see `docs/api_routes.md`) has **no
+authentication**, inheriting the app-wide gap noted above. Combined with an
+unrestricted recipient field, an unauthenticated caller could otherwise turn
+this backend into an open spam relay.
+
+**This endpoint must not be exposed to the public internet until
+authentication exists.** Until then:
+
+- Keep `REPORT_EMAIL_ENABLED=false` (the default) on any deployment reachable
+  outside the trusted internal network.
+- If enabling it, set a non-empty `REPORT_RECIPIENT_ALLOWLIST` — an empty
+  allowlist accepts any recipient address.
+- `REPORT_EMAIL_RATE_LIMIT_PER_HOUR` is enforced in-process only and does not
+  survive multi-worker uvicorn; it caps abuse from a single worker, not the
+  deployment as a whole.
+
 ## Operational Notes
 
 - `docker compose down` preserves named-volume data.

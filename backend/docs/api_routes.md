@@ -64,6 +64,28 @@ Response:
 
 Returns HTTP `503` if MinIO is not configured or cannot be reached.
 
+### SMTP health
+
+- Method: `GET`
+- Path: `/health/smtp`
+- Purpose: Connects to the configured SMTP server (STARTTLS/SSL + login as
+  configured), issues a `NOOP`, then disconnects.
+- Request body: None
+- Storage used: None
+
+Response:
+
+```json
+{
+  "smtp": "connected",
+  "host": "smtp.gmail.com",
+  "port": "587"
+}
+```
+
+Returns HTTP `503` if `REPORT_EMAIL_ENABLED` is `false`, SMTP is not
+configured, or the SMTP server cannot be reached.
+
 ## Prediction
 
 ### Predict PPE from an image
@@ -441,6 +463,98 @@ Response:
 
 Returns HTTP `404` when the record does not exist. The MinIO object is not
 currently deleted.
+
+## Incident Reports
+
+PDF export + SMTP email delivery for the Incident Analytics dashboard. See
+`docs/features/PDF_REPORT_EMAIL.md` for the locked decisions and known
+limitations behind this feature.
+
+### Preview a report
+
+- Method: `GET`
+- Path: `/reports/incidents/preview`
+- Purpose: Returns the headline numbers and key insights for a report without
+  generating the PDF — lets the frontend show a preview before download/send.
+- Query parameters: `range` (`24H` \| `7D` \| `30D`, default `7D`), `zone_id`
+  (optional)
+- Storage used: PostgreSQL (read-only, via `AnalyticsService` /
+  `UnifiedIncidentService`)
+
+Example response:
+
+```json
+{
+  "range": "7D",
+  "zone_scope_label": "All zones",
+  "generated_at_local": "29 Jul 2026, 14:32",
+  "grand_total": 128,
+  "severity_counts": {"Critical": 7, "High": 19, "Medium": 40, "Low": 62},
+  "insights": ["**Incidents are up 34.2%** vs the previous 7 days (128 vs 95)."],
+  "data_caveats": []
+}
+```
+
+### Download a report PDF
+
+- Method: `GET`
+- Path: `/reports/incidents.pdf`
+- Purpose: Renders and returns the Incident Analytics PDF report inline.
+- Query parameters: `range` (default `7D`), `zone_id` (optional),
+  `include_snapshots` (default `true`)
+- Storage used: PostgreSQL (read-only); MinIO if evidence snapshots are
+  fetched for the appendix
+- Response: `application/pdf` body with `Content-Disposition: attachment`
+
+Returns HTTP `422` for an invalid `range`.
+
+### Email a report
+
+- Method: `POST`
+- Path: `/reports/incidents/email`
+- Purpose: Generates the PDF and emails it via SMTP. Synchronous — the
+  response reflects the actual send result, not a fire-and-forget queue.
+- Storage used: PostgreSQL; MinIO if `REPORT_ARCHIVE_TO_MINIO` is enabled
+  (archive failure does not block delivery); a `report_deliveries` audit row
+  is written for every attempt.
+
+Request:
+
+```json
+{
+  "recipients": ["safety@deheus.com"],
+  "range": "7D",
+  "zone_id": null,
+  "subject": null,
+  "message": "FYI — see the Critical items on page 2.",
+  "include_snapshots": true
+}
+```
+
+Response:
+
+```json
+{
+  "status": "sent",
+  "recipients": ["safety@deheus.com"],
+  "filename": "safety-report_default-factory_7D_20260729-1432.pdf",
+  "size_bytes": 48430,
+  "object_key": "reports/2026/07/9f2c1e0b6b1a4d0c9a2e6f3b1c7d8e90.pdf",
+  "sent_at": "2026-07-29T14:32:10.512000+00:00"
+}
+```
+
+| Condition | Status |
+|---|---|
+| `REPORT_EMAIL_ENABLED=false` | `503` |
+| Recipient rejected by policy (cap, allowlist, malformed, header injection) | `422` |
+| Rate limit exceeded (`REPORT_EMAIL_RATE_LIMIT_PER_HOUR`) | `429` |
+| SMTP server timed out | `504` |
+| SMTP transport/config failure | `502` |
+| MinIO archive failure | Does not fail the request — `object_key` is `null` |
+
+This endpoint has no authentication. It must not be exposed to the public
+internet — see `docs/internal_deployment.md`.
 
 ## Compatibility Static Route
 

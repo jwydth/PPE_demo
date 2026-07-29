@@ -12,6 +12,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session
 
 from app.db.session import get_session
+from app.services.reporting import ReportEmailError
+from app.services.reporting.email_sender import SmtpEmailSender
 from app.storage import StorageError
 from app.storage.evidence_storage import EvidenceStorage, get_evidence_storage
 
@@ -63,3 +65,18 @@ def storage_health(
         "storage": "connected",
         "bucket": bucket_name,
     }
+
+
+@router.get("/health/smtp")
+def smtp_health() -> dict[str, str]:
+    sender = SmtpEmailSender()
+    try:
+        info = sender.verify_connection()
+    except ReportEmailError as exc:
+        logger.warning("SMTP health check failed.")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+    return {"smtp": "connected", **info}
