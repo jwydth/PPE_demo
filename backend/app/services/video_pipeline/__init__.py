@@ -35,6 +35,7 @@ from app.schemas.detection import (
 from app.schemas.streaming import StreamEvent
 from app.schemas.violation import ViolationReport
 from app.services.auto_zone import SignPPERegistry, SignZoneRegistry, extract_signs
+from app.services.behavior_stream import BehaviorStreamWorker
 from app.services.fall_detector import FallDetector, FallModelUnavailable
 from app.services.ppe_violation_service import open_ppe_violation_service
 from app.services.zone_service import (
@@ -439,30 +440,58 @@ async def real_video_pipeline(
     # a fresh copy of the weights from disk on every connection (see PERF_PLAN.md
     # Tier 1.1). The pool caps VRAM at a known ceiling and keeps track(persist=True)
     # state isolated per concurrent stream.
+    initial_ppe, initial_zone, initial_fall = get_flags()
+    behavior_primary = initial_fall and not initial_ppe and not initial_zone
+    # When PPE or Zone is enabled, Behavioral gets its own direct pose stream.
+    # It never consumes frames or tracker IDs from the PPE detector.
+    behavior_separate = initial_fall and not behavior_primary
+    pooled_model = not behavior_primary
     acquire_start = time.perf_counter()
-    model_instance = await detector.acquire_model_instance()
+    model_instance = None if behavior_primary else await detector.acquire_model_instance()
     acquire_ms = (time.perf_counter() - acquire_start) * 1000
-    if acquire_ms > 50:
+    if model_instance is not None and acquire_ms > 50:
         # A warm pool should return near-instantly; a large wait here means every
         # pooled instance was already checked out (too many concurrent streams).
         logger.info(f"[PIPELINE] '{video_name}' waited {acquire_ms:.0f}ms for a free pooled model instance")
     try:
-        _prepare_pooled_model_instance(model_instance)
-        tracker_path = _resolve_video_tracker(settings.VIDEO_TRACKER)
-        # half precision is CUDA-only; silently ignored (and a no-op) on CPU.
-        half = bool(settings.INFERENCE_HALF) and str(detector.device).startswith("cuda")
+        behavior_worker: BehaviorStreamWorker | None = None
+        if behavior_separate:
+            behavior_worker = BehaviorStreamWorker(
+                source=source_str, source_name=video_name, fps=fps,
+                detector=_fall_detector,
+            )
+            behavior_worker.start()
+            logger.info("[BEHAVIOR] '%s' started a separate direct pose/ReID branch", video_name)
+        if model_instance is not None:
+            _prepare_pooled_model_instance(model_instance)
+        if behavior_primary:
+            # One ordered pose/ReID tracker, matching the labeling pipeline.
+            # This avoids running the PPE model and then pose a second time.
+            model_instance = await asyncio.to_thread(_fall_detector._ensure_model)
+            tracker_path = str(_fall_detector.tracker_path)
+            confidence, classes, model_stride = settings.FALL_PERSON_CONFIDENCE, None, 1
+            inference_device = _fall_detector.device
+            half = str(_fall_detector.device).startswith("cuda")
+            image_size, stream_buffer = 640, True
+            logger.info("[BEHAVIOR] '%s' using pose/ReID as its primary stream model", video_name)
+        else:
+            tracker_path = _resolve_video_tracker(settings.VIDEO_TRACKER)
+            confidence, classes, model_stride = settings.CONFIDENCE_THRESHOLD, [0, 1, 2, 3], stride
+            inference_device = detector.device
+            half = bool(settings.INFERENCE_HALF) and str(detector.device).startswith("cuda")
+            image_size, stream_buffer = settings.INFERENCE_IMGSZ, False
         track_start = time.perf_counter()
         results = model_instance.track(
             source=source_str,
             stream=True,
             persist=True,
-            conf=settings.CONFIDENCE_THRESHOLD,
+            conf=confidence,
             tracker=tracker_path,
-            classes=[0, 1, 2, 3],
-            vid_stride=stride,
-            device=detector.device,
+            classes=classes,
+            vid_stride=model_stride,
+            device=inference_device,
             half=half,
-            imgsz=settings.INFERENCE_IMGSZ,
+            imgsz=image_size,
             verbose=False,
             # stream_buffer=False: Ultralytics' LoadStreams still reads via a
             # threaded background reader either way (that part isn't what this
@@ -477,7 +506,7 @@ async def real_video_pipeline(
             # continuous PPE/zone violations persist across many frames, so
             # occasionally skipping one during a slowdown isn't a detection
             # risk, and it keeps the feed from drifting behind real time.
-            stream_buffer=False,
+            stream_buffer=stream_buffer,
         )
 
         results_iter = iter(results)
@@ -497,8 +526,30 @@ async def real_video_pipeline(
                     f"{(time.perf_counter() - track_start) * 1000:.0f}ms "
                     "(source connect + first inference)"
                 )
-            frame_index = (processed_frames - 1) * stride
+            frame_index = (processed_frames - 1) * (1 if behavior_primary else stride)
             curr_ppe, curr_zone, curr_fall = get_flags()
+            if behavior_primary:
+                # This stream was opened in Behavioral-only mode. Reconnect to
+                # activate PPE/zone, which require the PPE primary model.
+                curr_ppe, curr_zone = False, False
+            elif curr_fall and behavior_worker is None:
+                # Feature toggles arrive after the WebSocket is already open.
+                # Start the independent pose worker at that moment instead of
+                # requiring a reconnect before Behavioral can produce events.
+                behavior_worker = BehaviorStreamWorker(
+                    source=source_str, source_name=video_name, fps=fps,
+                    detector=_fall_detector,
+                )
+                behavior_worker.start()
+                behavior_separate = True
+                logger.info("[BEHAVIOR] '%s' enabled: started direct pose/ReID worker", video_name)
+            elif not curr_fall and behavior_worker is not None:
+                await behavior_worker.stop()
+                behavior_worker = None
+                behavior_separate = False
+                last_fall_payload = None
+                fall_unavailable_message = None
+                logger.info("[BEHAVIOR] '%s' disabled: stopped direct pose/ReID worker", video_name)
 
             # Detect zone being toggled ON mid-stream and retroactively check foot history
             zone_just_enabled = curr_zone and not prev_zone_enabled
@@ -549,20 +600,41 @@ async def real_video_pipeline(
             response = _build_response(persons, helmets, vests, cleaning_coveralls, 0.0)
             frame = result.orig_img.copy()
             frame_height, frame_width = frame.shape[:2]
-            if curr_fall:
+            if curr_fall and behavior_separate:
+                last_fall_payload, fall_unavailable_message, pending_incidents = behavior_worker.snapshot() if behavior_worker else (None, None, [])
+                for incident in pending_incidents:
+                    yield StreamEvent(event="behavior_incident", frame_index=frame_index, data=incident)
+            elif curr_fall:
                 fall_ttl_frames = max(1, settings.FALL_LIVE_FRAME_STRIDE * 2)
                 if fall_unavailable_message is None and fall_live_session is None:
                     fall_live_session = _fall_detector.create_live_session(
                         fps=fps,
                         frame_stride=settings.FALL_LIVE_FRAME_STRIDE,
                     )
-                if fall_unavailable_message is None and frame_index % max(1, settings.FALL_LIVE_FRAME_STRIDE) == 0:
+                if (
+                    fall_unavailable_message is None
+                    and fall_live_session is not None
+                    # This is the source-media timestamp.  Do not use
+                    # time.monotonic() here: model latency would appear as
+                    # dropped camera frames and keep every window incomplete.
+                    and fall_live_session.accept_source_frame(frame_index / max(fps, 1.0))
+                ):
                     try:
-                        last_fall_payload = fall_live_session.process_frame(
-                            frame,
-                            frame_index=frame_index,
-                            source_name=video_name,
-                        )
+                        if behavior_primary:
+                            last_fall_payload = fall_live_session.process_pose_result(
+                                result,
+                                frame=frame,
+                                frame_index=frame_index,
+                                source_name=video_name,
+                                timestamp_seconds=frame_index / max(fps, 1.0),
+                            )
+                        else:
+                            last_fall_payload = fall_live_session.process_frame(
+                                frame,
+                                frame_index=frame_index,
+                                source_name=video_name,
+                                timestamp_seconds=frame_index / max(fps, 1.0),
+                            )
                         for incident in last_fall_payload.get("incidents", []):
                             yield StreamEvent(event="behavior_incident", frame_index=frame_index, data=incident)
                     except FallModelUnavailable as exc:
@@ -570,9 +642,9 @@ async def real_video_pipeline(
                         last_fall_payload = {
                             "summary": {
                                 "status": "unavailable",
-                                "fall_count": 0,
-                                "fall_risk_count": 0,
-                                "normal_count": 0,
+                                "others_count": 0,
+                                "running_count": 0,
+                                "falling_count": 0,
                                 "person_count": 0,
                                 "top_label": "unavailable",
                                 "top_confidence": 0.0,
@@ -587,9 +659,9 @@ async def real_video_pipeline(
                         last_fall_payload = {
                             "summary": {
                                 "status": "unavailable",
-                                "fall_count": 0,
-                                "fall_risk_count": 0,
-                                "normal_count": 0,
+                                "others_count": 0,
+                                "running_count": 0,
+                                "falling_count": 0,
                                 "person_count": 0,
                                 "top_label": "unavailable",
                                 "top_confidence": 0.0,
@@ -788,8 +860,11 @@ async def real_video_pipeline(
         yield StreamEvent(event="end", data={})
 
     finally:
-        _release_pooled_model_instance(model_instance)
-        detector.release_model_instance(model_instance)
+        if "behavior_worker" in locals() and behavior_worker is not None:
+            await behavior_worker.stop()
+        if pooled_model and model_instance is not None:
+            _release_pooled_model_instance(model_instance)
+            detector.release_model_instance(model_instance)
 
 
 def mock_process_video(

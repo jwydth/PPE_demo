@@ -130,6 +130,8 @@ export function FallOverlayLayer({
   const height = frameHeight || 9;
   const visibleDetections = detections.filter((detection) => {
     if (!detection.bbox) return false;
+    const { x1, y1, x2, y2 } = detection.bbox;
+    if (![x1, y1, x2, y2].every(Number.isFinite)) return false;
     if (detection.is_stale) return false;
     if (detection.age_frames !== undefined && detection.age_frames > ttlFrames) return false;
     if (detection.frame_index === undefined || currentFrameIndex === undefined) return true;
@@ -308,19 +310,13 @@ function FallSkeleton({
 }
 
 function fallColor(status: FallLiveDetection["status"]): string {
-  if (status === "fall") return "#ef4444";
-  if (status === "fall_risk") return "#f59e0b";
+  if (status === "falling") return "#ef4444";
+  if (status === "running") return "#3b82f6";
   return "#22c55e";
 }
 
 function fallLabel(detection: FallLiveDetection): string {
-  const label =
-    detection.status === "fall"
-      ? "detected"
-      : detection.status === "fall_risk"
-      ? "risk"
-      : "normal";
-  return `Fall: ${label} ${detection.score.toFixed(2)}`;
+  return `Behavior: ${detection.status} ${detection.score.toFixed(2)}`;
 }
 
 const FALL_SKELETON: Array<[number, number]> = [

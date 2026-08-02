@@ -1,0 +1,13 @@
+# BoT-SORT/ReID profile used by the behavior model's training pipeline.
+tracker_type: botsort
+track_high_thresh: 0.20
+track_low_thresh: 0.05
+new_track_thresh: 0.20
+track_buffer: 72
+match_thresh: 0.90
+fuse_score: true
+gmc_method: sparseOptFlow
+proximity_thresh: 0.15
+appearance_thresh: 0.65
+with_reid: true
+model: weights/reid.pt

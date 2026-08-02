@@ -132,7 +132,7 @@ export function useLiveStream({
 
         const ppe = featureDict ? featureDict["ppe_detection"] : ppeEnabled;
         const zone = featureDict ? featureDict["zone_monitoring"] : zoneEnabled;
-        const fall = featureDict ? featureDict["fall_detection"] : fallEnabled;
+        const fall = featureDict ? (featureDict["behavior_detection"] ?? featureDict["fall_detection"]) : fallEnabled;
 
         ws.send(
           JSON.stringify({
@@ -141,7 +141,7 @@ export function useLiveStream({
               features: {
                 ppe_detection: ppe !== undefined ? ppe : true,
                 zone_monitoring: zone !== undefined ? zone : false,
-                fall_detection: fall !== undefined ? fall : false,
+                behavior_detection: fall !== undefined ? fall : false,
               },
               viewing: isViewing,
             },
@@ -227,7 +227,7 @@ export function useLiveStream({
 
         const ppe = featureDict ? featureDict["ppe_detection"] : ppeEnabled;
         const zone = featureDict ? featureDict["zone_monitoring"] : zoneEnabled;
-        const fall = featureDict ? featureDict["fall_detection"] : fallEnabled;
+        const fall = featureDict ? (featureDict["behavior_detection"] ?? featureDict["fall_detection"]) : fallEnabled;
 
         ws.send(
           JSON.stringify({
@@ -236,7 +236,7 @@ export function useLiveStream({
               features: {
                 ppe_detection: ppe !== undefined ? ppe : true,
                 zone_monitoring: zone !== undefined ? zone : false,
-                fall_detection: fall !== undefined ? fall : false,
+                behavior_detection: fall !== undefined ? fall : false,
               },
               viewing: isViewing,
             },
@@ -265,7 +265,7 @@ export function useLiveStream({
 
       const ppe = featureDict ? featureDict["ppe_detection"] : ppeEnabled;
       const zone = featureDict ? featureDict["zone_monitoring"] : zoneEnabled;
-      const fall = featureDict ? featureDict["fall_detection"] : fallEnabled;
+      const fall = featureDict ? (featureDict["behavior_detection"] ?? featureDict["fall_detection"]) : fallEnabled;
 
       const wsUrlBase = API_URL.replace(/^http/, "ws");
       const wsUrl = `${wsUrlBase}/ws/stream?video_name=${encodeURIComponent(
@@ -473,11 +473,10 @@ export function useLiveStream({
         }
       };
       ws.onerror = (event) => {
-        console.error(`WebSocket error for ${videoName}:`, event);
-        if (videoName === viewedVideoNameRef.current) {
-          setError("WebSocket connection failed. Check browser console for security/CORS errors.");
-          setPhase("error");
-        }
+        // Browser error events intentionally expose no useful cause. The
+        // following onclose event contains the close code/reason and is the
+        // single source of truth for UI error state and reconnect behavior.
+        console.error(`WebSocket transport error for ${videoName} (state=${ws.readyState}):`, event);
       };
     } catch (err) {
       if (videoName === viewedVideoNameRef.current) {

@@ -52,7 +52,7 @@ class BehaviorIncidentRead(BaseModel):
 
 class FallPoseDetection(BaseModel):
     track_id: int
-    status: Literal["normal", "fall_risk", "fall"]
+    status: Literal["others", "running", "falling"]
     score: float
     person_confidence: float
     bbox: BoundingBox
@@ -62,10 +62,10 @@ class FallPoseDetection(BaseModel):
 
 
 class FallDetectionSummary(BaseModel):
-    status: Literal["normal", "fall_risk", "fall", "no_detection"]
-    fall_count: int
-    fall_risk_count: int
-    normal_count: int
+    status: Literal["others", "running", "falling", "no_detection"]
+    others_count: int
+    running_count: int
+    falling_count: int
     person_count: int
     top_label: str
     top_confidence: float
@@ -84,7 +84,7 @@ class FallVideoMetadata(BaseModel):
 class FallTimelineItem(BaseModel):
     frame_index: int
     time_sec: float
-    status: Literal["normal", "fall_risk", "fall", "no_detection"]
+    status: Literal["others", "running", "falling", "no_detection"]
     top_label: str
     top_confidence: float
     detections: list[FallPoseDetection]

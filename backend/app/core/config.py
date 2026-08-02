@@ -21,8 +21,11 @@ class Settings(BaseSettings):
     # caps VRAM/connect-latency instead of loading a fresh copy of the weights
     # per websocket connection. Connections beyond this count queue for a free
     # instance (see PPEDetector.acquire_model_instance).
-    MAX_CONCURRENT_STREAMS: int = 4
-    INFERENCE_HALF: bool = False   # set True only on a CUDA GPU
+    # A 12 GB GPU cannot safely hold the former four-instance PPE pool plus
+    # an independent Pose/ReID behavior worker. Extra streams queue instead
+    # of exhausting VRAM and crashing all active streams.
+    MAX_CONCURRENT_STREAMS: int = 1
+    INFERENCE_HALF: bool = True    # applied only on CUDA by the pipeline
     INFERENCE_IMGSZ: int = 640     # pin inference resolution for predictable latency
     CONFIDENCE_THRESHOLD: float = 0.3
     # Minimum fraction of an equipment box that must overlap its person box
@@ -78,18 +81,26 @@ class Settings(BaseSettings):
     # detected walker is treated as being outside a walkway.  A violation is
     # raised once the worker has been visible for this many consecutive seconds.
     NO_WALKWAY_DWELL_SECONDS: float = 1.5
-    # Fall-detection / behavior incident settings.
-    FALL_MODEL_PATH: str = "weights/yolo26m-pose.pt"
-    FALL_PERSON_CONFIDENCE: float = 0.10
-    FALL_RISK_THRESHOLD: float = 0.52
-    FALL_THRESHOLD: float = 0.68
-    FALL_PERSISTENCE_SECONDS: float = 1.0
+    # Behavioral-detection / behavior-incident settings.
+    # Pose + behavior-classifier pipeline.  The classifier was trained on
+    # 60-frame COCO-pose windows and predicts others/running/falling.
+    FALL_MODEL_PATH: str = "weights/pose.pt"
+    FALL_BEHAVIOR_MODEL_PATH: str = "weights/behavior.joblib"
+    FALL_REID_MODEL_PATH: str = "weights/reid.pt"
+    FALL_PERSON_CONFIDENCE: float = 0.20
+    FALL_BEHAVIOR_WINDOW_FRAMES: int = 60
+    FALL_BEHAVIOR_WINDOW_STRIDE: int = 12
+    FALL_BEHAVIOR_CANONICAL_FPS: int = 24
+    FALL_BEHAVIOR_MIN_CONFIDENCE: float = 0.50
+    FALL_TRACK_MAX_MISSING_SAMPLES: int = 12
     FALL_MAX_FRAMES: int = 1200
     FALL_FRAME_STRIDE: int = 1
-    FALL_LIVE_FRAME_STRIDE: int = 5
+    # Do not subsample pose frames: behavior.joblib was trained on 60 frames
+    # at 24 FPS, so its temporal features require every source frame.
+    FALL_LIVE_FRAME_STRIDE: int = 1
     FALL_INCIDENT_COOLDOWN_SECONDS: float = 10.0
-    FALL_MODEL_NAME: str = "yolo26m-pose"
-    FALL_MODEL_VERSION: str = "v8.4.0"
+    FALL_MODEL_NAME: str = "pose-behavior-xgboost"
+    FALL_MODEL_VERSION: str = "behavior-v1"
     # Upper bound on rows UnifiedIncidentService will read per category per call.
     # Analytics aggregates in Python (see analytics_service.py's module docstring
     # for why), so a date range with more incidents than this gets its oldest

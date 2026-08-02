@@ -127,8 +127,8 @@ async def stream_video_ws(
                         settings_state["enable_ppe"] = bool(feats["ppe_detection"])
                     if "zone_monitoring" in feats:
                         settings_state["enable_zone"] = bool(feats["zone_monitoring"])
-                    if "fall_detection" in feats:
-                        settings_state["enable_fall"] = bool(feats["fall_detection"])
+                    if "behavior_detection" in feats or "fall_detection" in feats:
+                        settings_state["enable_fall"] = bool(feats.get("behavior_detection", feats.get("fall_detection")))
                 else:
                     if "enable_ppe" in new_settings:
                         settings_state["enable_ppe"] = bool(new_settings["enable_ppe"])

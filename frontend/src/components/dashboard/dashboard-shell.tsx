@@ -182,7 +182,7 @@ function CameraPanel({
     : zoneEnabled;
 
   const currentFallEnabled = viewMode === "single"
-    ? (cameraFeatureMap[activeCameraId]?.["fall_detection"] ?? fallEnabled)
+    ? (cameraFeatureMap[activeCameraId]?.["behavior_detection"] ?? cameraFeatureMap[activeCameraId]?.["fall_detection"] ?? fallEnabled)
     : fallEnabled;
 
   useEffect(() => {
@@ -985,13 +985,13 @@ function CameraPanel({
                   }}
                 />
                 <ModelToggle
-                  label="Fall Detection"
+                  label="Behavior Detection"
                   description="Live pose risk and incident capture"
                   enabled={currentFallEnabled && (liveStream.isLive || isVideo)}
                   disabled={!liveStream.isLive && !isVideo}
                   onToggle={() => {
                     if (viewMode === "single" && activeCameraId) {
-                      void handleToggleCameraFeature(activeCameraId, "fall_detection");
+                      void handleToggleCameraFeature(activeCameraId, "behavior_detection");
                     } else {
                       setFallEnabled((current) => !current);
                     }
@@ -1094,13 +1094,13 @@ function CameraPanel({
                                     </button>
                                     <button
                                       type="button"
-                                      title="Toggle Fall Detection"
+                                      title="Toggle Behavior Detection"
                                       onClick={(e) => {
                                         e.stopPropagation();
-                                        void handleToggleCameraFeature(c.id, "fall_detection");
+                                        void handleToggleCameraFeature(c.id, "behavior_detection");
                                       }}
                                       className={`rounded-md p-1.5 shadow-md backdrop-blur transition-all duration-200 border cursor-pointer ${
-                                        (cameraFeatureMap[c.id]?.["fall_detection"] ?? false)
+                                        (cameraFeatureMap[c.id]?.["behavior_detection"] ?? cameraFeatureMap[c.id]?.["fall_detection"] ?? false)
                                           ? "bg-red-500/90 text-slate-950 border-red-400 hover:bg-red-500"
                                           : "bg-slate-900/80 text-slate-400 border-slate-700/50 hover:bg-slate-800"
                                       }`}
@@ -1188,8 +1188,8 @@ function CameraPanel({
                                     })()
                                   )}
 
-                                  {/* Fall Detection Overlay Layer */}
-                                  {(cameraFeatureMap[c.id]?.["fall_detection"] ?? false) && liveStream.cameraOverlays[c.rtspUrl] && (
+                                  {/* Behavior Detection Overlay Layer */}
+                                  {(cameraFeatureMap[c.id]?.["behavior_detection"] ?? cameraFeatureMap[c.id]?.["fall_detection"] ?? false) && liveStream.cameraOverlays[c.rtspUrl] && (
                                     <FallOverlayLayer
                                       detections={liveStream.cameraOverlays[c.rtspUrl].fallDetections}
                                       frameWidth={liveStream.cameraOverlays[c.rtspUrl].frameWidth}
@@ -1412,7 +1412,7 @@ function FallStatusPanel({
     return (
       <section className="rounded-md border border-slate-800 bg-slate-950 p-3">
         <div className="flex items-center justify-between gap-3">
-          <h3 className="text-sm font-semibold text-white">Fall Detection</h3>
+          <h3 className="text-sm font-semibold text-white">Behavior Detection</h3>
           <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs font-semibold text-slate-300">
             Disabled
           </span>
@@ -1423,32 +1423,32 @@ function FallStatusPanel({
 
   const status = unavailable ? "unavailable" : summary?.status ?? (enabled ? "no_detection" : "off");
   const statusClass =
-    status === "fall"
+    status === "falling"
       ? "border-red-400 bg-red-500/10 text-red-100"
-      : status === "fall_risk"
-      ? "border-amber-300 bg-amber-400/10 text-amber-100"
+      : status === "running"
+      ? "border-blue-300 bg-blue-400/10 text-blue-100"
       : status === "unavailable"
       ? "border-slate-600 bg-slate-800 text-slate-200"
       : status === "no_detection"
       ? "border-slate-600 bg-slate-800 text-slate-200"
       : "border-emerald-300 bg-emerald-400/10 text-emerald-100";
   const label =
-    status === "fall"
-      ? "Fall detected"
-      : status === "fall_risk"
-      ? "Fall risk"
+    status === "falling"
+      ? "Falling"
+      : status === "running"
+      ? "Running"
       : status === "unavailable"
       ? "Unavailable"
       : status === "no_detection"
       ? "No detection"
-      : "Normal";
+      : "Others";
 
   return (
     <section className="rounded-md border border-slate-800 bg-slate-950 p-3">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold text-white">Fall Detection</h3>
-          <p className="mt-1 text-xs text-slate-400">Live pose status from the backend stream.</p>
+          <h3 className="text-sm font-semibold text-white">Behavior Detection</h3>
+          <p className="mt-1 text-xs text-slate-400">Live behavior classification from the pose model.</p>
         </div>
         <span className={`rounded border px-2 py-1 text-xs font-semibold ${statusClass}`}>
           {label}
@@ -1461,8 +1461,8 @@ function FallStatusPanel({
         <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
           <MetricMini label="Confidence" value={`${Math.round((summary?.top_confidence ?? 0) * 100)}%`} />
           <MetricMini label="People" value={`${summary?.person_count ?? 0}`} />
-          <MetricMini label="Risk" value={`${summary?.fall_risk_count ?? 0}`} />
-          <MetricMini label="Falls" value={`${summary?.fall_count ?? 0}`} />
+          <MetricMini label="Running" value={`${summary?.running_count ?? 0}`} />
+          <MetricMini label="Falling" value={`${summary?.falling_count ?? 0}`} />
         </div>
       )}
 
@@ -1475,7 +1475,7 @@ function FallStatusPanel({
           {latestIncident.snapshot_url ? (
             <img
               src={latestIncident.snapshot_url}
-              alt={`Fall incident ${latestIncident.id}`}
+              alt={`Behavior incident ${latestIncident.id}`}
               className="mt-2 max-h-32 w-full rounded object-cover"
             />
           ) : null}
@@ -1655,8 +1655,20 @@ export function DashboardShell() {
     } else {
       localStorage.setItem("ppe_demo_cameras", JSON.stringify(DEFAULT_CAMERAS));
     }
-    // Backfill homeZoneId for configs saved before this field existed.
-    loaded = loaded.map((c) => ({ ...c, homeZoneId: c.homeZoneId ?? null }));
+    // Backfill old configs and discard duplicate camera records left by older
+    // localStorage versions. Duplicate sources reconcile to the same database
+    // ID and otherwise cause React's duplicate-key warning.
+    const sourceKeys = new Set<string>();
+    const cameraIds = new Set<number>();
+    loaded = loaded
+      .map((c) => ({ ...c, homeZoneId: c.homeZoneId ?? null }))
+      .filter((camera) => {
+        if (sourceKeys.has(camera.rtspUrl) || cameraIds.has(camera.id)) return false;
+        sourceKeys.add(camera.rtspUrl);
+        cameraIds.add(camera.id);
+        return true;
+      });
+    localStorage.setItem("ppe_demo_cameras", JSON.stringify(loaded));
     setCameras(loaded);
     const active = loaded.find((c) => c.active) || loaded[0];
     setActiveCameraId(active.id);

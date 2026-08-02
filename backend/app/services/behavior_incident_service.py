@@ -55,9 +55,11 @@ class BehaviorIncidentService:
         self.camera_repository = camera_repository
         self.factory_repository = factory_repository
 
-    def persist_fall_incident(
+    def persist_behavior_incident(
         self,
         *,
+        behavior_type: BehaviorType,
+        severity: BehaviorIncidentSeverity,
         timestamp: str | datetime,
         details: str,
         local_snapshot_path: str | Path,
@@ -83,9 +85,9 @@ class BehaviorIncidentService:
             BehaviorIncident(
                 camera_id=_optional_positive_id(resolved_camera_id, "camera_id"),
                 source_key=_optional_text(video_name),
-                behavior_type=BehaviorType.FALL_DETECTED.value,
+                behavior_type=behavior_type.value,
                 status=BehaviorIncidentStatus.NEW.value,
-                severity=BehaviorIncidentSeverity.HIGH.value,
+                severity=severity.value,
                 confidence=_validate_confidence(confidence),
                 track_id=track_id,
                 frame_start=_optional_nonnegative(frame_start, "frame_start"),
@@ -123,6 +125,15 @@ class BehaviorIncidentService:
         return BehaviorIncidentBundle(
             incident=self._to_read(incident),
             object_key=stored_object.object_key,
+        )
+
+    # Compatibility entrypoint for existing integrations. New behavioral
+    # inference must call persist_behavior_incident with its actual label.
+    def persist_fall_incident(self, **kwargs: Any) -> BehaviorIncidentBundle:
+        return self.persist_behavior_incident(
+            behavior_type=BehaviorType.FALL_DETECTED,
+            severity=BehaviorIncidentSeverity.HIGH,
+            **kwargs,
         )
 
     def get_incident(self, incident_id: int) -> BehaviorIncidentRead:
