@@ -68,10 +68,11 @@ ffmpeg -version
 Open a terminal in the folder that contains your video file, configure and run the FFmpeg command below.
 Make sure to configure the command with the attributes below before running:
 + Replace `mp_.mp4` with the actual video filename.
-+ The `-r 15` flag sets the output frame rate to 15 FPS. Adjust this value if needed.
++ Keep `-r 24` when behavior detection is enabled. The behavior classifier was
+  trained on 60 consecutive samples at 24 FPS.
 
 ```powershell\
-ffmpeg -re -stream_loop -1 -i mp_.mp4 -r 15 -c:v libx264 -preset ultrafast -tune zerolatency -profile:v baseline -level 3.0 -g 15 -bf 0 -flags +global_header -f rtsp -rtsp_transport tcp rtsp://localhost:8554/mystream
+ffmpeg -re -stream_loop -1 -i mp_.mp4 -r 24 -c:v libx264 -preset ultrafast -tune zerolatency -profile:v baseline -level 3.0 -g 24 -bf 0 -flags +global_header -f rtsp -rtsp_transport tcp rtsp://localhost:8554/mystream
 ```
 
 This command keeps running and loops the video into MediaMTX. Leave this
@@ -136,6 +137,7 @@ Backend URLs:
 - Health: `http://localhost:8000/health`
 - PostgreSQL health: `http://localhost:8000/health/db`
 - MinIO health: `http://localhost:8000/health/storage`
+- Per-stream inference health: `http://localhost:8000/health/streams`
 
 ## Frontend Setup
 
@@ -192,6 +194,30 @@ under `backend/weights`.
 
 If model weights are missing or unavailable, the detector can run in mock mode
 for development.
+
+### Multi-stream behavior detection
+
+Live network sources use one decoded capture per camera. PPE/zone preview uses
+`VIDEO_FRAME_STRIDE` and latest-only delivery, while behavior always consumes
+ordered source frames at `FALL_LIVE_FRAME_STRIDE=1`. Never set the behavior
+stride to 2: a 60-sample window would change from 2.5 seconds to 5 seconds and
+would no longer match the trained classifier.
+
+The default two-stream profile uses YOLO26s-pose at 448 pixels, finite CUDA
+micro-batches, per-camera BoT-SORT state, batched CUDA ReID refreshed every two
+frames, fixed-camera GMC disabled, and CPU XGBoost with one thread. The ordered
+queue is bounded at 180 frames; overflow is reported as a discontinuity and
+invalidates the current 60-frame window instead of silently classifying a
+non-consecutive sequence. At 1280x720, a completely full queue can retain
+roughly 475 MiB of raw BGR frames per camera, so lower the queue only if memory
+pressure is more important than absorbing short inference bursts.
+
+Useful `.env` controls are documented in `backend/.env.example`, including
+`BEHAVIOR_POSE_IMGSZ`, `BEHAVIOR_BATCH_MAX_SIZE`,
+`BEHAVIOR_CAMERA_BURST_SIZE`, `BEHAVIOR_REID_INTERVAL_FRAMES`, and the CPU
+thread budgets. Restart the FastAPI process after changing them. Use
+`GET /health/streams` to compare queue depth and pose/ReID/XGBoost/JPEG/WebSocket
+timings without exposing RTSP credentials.
 
 ### Email Reports
 

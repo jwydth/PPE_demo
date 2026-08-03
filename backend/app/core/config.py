@@ -98,6 +98,26 @@ class Settings(BaseSettings):
     # Do not subsample pose frames: behavior.joblib was trained on 60 frames
     # at 24 FPS, so its temporal features require every source frame.
     FALL_LIVE_FRAME_STRIDE: int = 1
+    # Multi-camera behavior runtime. Behavior frames remain ordered and are
+    # never subsampled; batching only combines one ready frame per camera into
+    # a single finite CUDA forward pass.
+    BEHAVIOR_ORDERED_QUEUE_SIZE: int = 180
+    BEHAVIOR_BATCH_MAX_SIZE: int = 8
+    BEHAVIOR_CAMERA_BURST_SIZE: int = 4
+    BEHAVIOR_BATCH_WAIT_MS: float = 4.0
+    BEHAVIOR_POSE_IMGSZ: int = 448
+    BEHAVIOR_FIXED_CAMERA: bool = True
+    BEHAVIOR_GMC_METHOD: str = "none"
+    BEHAVIOR_REID_HALF: bool = True
+    BEHAVIOR_REID_INTERVAL_FRAMES: int = 2
+    BEHAVIOR_LIVE_WARMUP_FRAMES: int = 3
+    BEHAVIOR_START_COHORT_WAIT_MS: float = 1200.0
+    BEHAVIOR_TORCH_THREADS: int = 4
+    BEHAVIOR_TORCH_INTEROP_THREADS: int = 1
+    BEHAVIOR_OPENCV_THREADS: int = 4
+    BEHAVIOR_XGBOOST_THREADS: int = 1
+    BEHAVIOR_HEALTH_LOG_INTERVAL_SECONDS: float = 10.0
+    FALL_BEHAVIOR_PORTABLE_MODEL_PATH: str = "weights/behavior.ubj"
     FALL_INCIDENT_COOLDOWN_SECONDS: float = 10.0
     FALL_MODEL_NAME: str = "pose-behavior-xgboost"
     FALL_MODEL_VERSION: str = "behavior-v1"
@@ -150,6 +170,51 @@ class Settings(BaseSettings):
     def _validate_smtp(self) -> "Settings":
         if self.SMTP_USE_SSL and self.SMTP_USE_STARTTLS:
             raise ValueError("SMTP_USE_SSL and SMTP_USE_STARTTLS are mutually exclusive.")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_behavior_runtime(self) -> "Settings":
+        positive_ints = {
+            "FALL_BEHAVIOR_WINDOW_FRAMES": self.FALL_BEHAVIOR_WINDOW_FRAMES,
+            "FALL_BEHAVIOR_WINDOW_STRIDE": self.FALL_BEHAVIOR_WINDOW_STRIDE,
+            "FALL_BEHAVIOR_CANONICAL_FPS": self.FALL_BEHAVIOR_CANONICAL_FPS,
+            "FALL_LIVE_FRAME_STRIDE": self.FALL_LIVE_FRAME_STRIDE,
+            "BEHAVIOR_ORDERED_QUEUE_SIZE": self.BEHAVIOR_ORDERED_QUEUE_SIZE,
+            "BEHAVIOR_BATCH_MAX_SIZE": self.BEHAVIOR_BATCH_MAX_SIZE,
+            "BEHAVIOR_CAMERA_BURST_SIZE": self.BEHAVIOR_CAMERA_BURST_SIZE,
+            "BEHAVIOR_POSE_IMGSZ": self.BEHAVIOR_POSE_IMGSZ,
+            "BEHAVIOR_TORCH_THREADS": self.BEHAVIOR_TORCH_THREADS,
+            "BEHAVIOR_TORCH_INTEROP_THREADS": self.BEHAVIOR_TORCH_INTEROP_THREADS,
+            "BEHAVIOR_OPENCV_THREADS": self.BEHAVIOR_OPENCV_THREADS,
+            "BEHAVIOR_XGBOOST_THREADS": self.BEHAVIOR_XGBOOST_THREADS,
+            "BEHAVIOR_REID_INTERVAL_FRAMES": self.BEHAVIOR_REID_INTERVAL_FRAMES,
+            "BEHAVIOR_LIVE_WARMUP_FRAMES": self.BEHAVIOR_LIVE_WARMUP_FRAMES,
+        }
+        invalid = [name for name, value in positive_ints.items() if value < 1]
+        if invalid:
+            raise ValueError(f"Behavior runtime values must be positive: {', '.join(invalid)}")
+        if self.BEHAVIOR_CAMERA_BURST_SIZE > self.BEHAVIOR_BATCH_MAX_SIZE:
+            raise ValueError(
+                "BEHAVIOR_CAMERA_BURST_SIZE cannot exceed BEHAVIOR_BATCH_MAX_SIZE."
+            )
+        if self.FALL_LIVE_FRAME_STRIDE != 1:
+            raise ValueError(
+                "FALL_LIVE_FRAME_STRIDE must remain 1; behavior.joblib requires "
+                "ordered 24-FPS temporal samples."
+            )
+        if self.BEHAVIOR_BATCH_WAIT_MS < 0:
+            raise ValueError("BEHAVIOR_BATCH_WAIT_MS cannot be negative.")
+        if self.BEHAVIOR_START_COHORT_WAIT_MS < 0:
+            raise ValueError("BEHAVIOR_START_COHORT_WAIT_MS cannot be negative.")
+        if self.BEHAVIOR_HEALTH_LOG_INTERVAL_SECONDS <= 0:
+            raise ValueError("BEHAVIOR_HEALTH_LOG_INTERVAL_SECONDS must be positive.")
+        allowed_gmc = {"none", "orb", "sift", "ecc", "sparseOptFlow"}
+        if self.BEHAVIOR_GMC_METHOD not in allowed_gmc:
+            raise ValueError(
+                f"BEHAVIOR_GMC_METHOD must be one of {sorted(allowed_gmc)}."
+            )
+        if self.BEHAVIOR_FIXED_CAMERA:
+            self.BEHAVIOR_GMC_METHOD = "none"
         return self
 
     class Config:

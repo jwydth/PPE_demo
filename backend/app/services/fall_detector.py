@@ -7,7 +7,9 @@ feature contract and ``behavior.joblib`` model as the PPE labeling project.
 from __future__ import annotations
 
 import base64
+import logging
 import tempfile
+import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +29,8 @@ from app.models.behavior_incident import BehaviorIncidentSeverity, BehaviorType
 from app.services.behavior_incident_service import BehaviorIncidentService, open_behavior_incident_service
 from app.services.ppe.device import _select_inference_device
 
+logger = logging.getLogger(__name__)
+
 
 COLORS = {"others": (70, 122, 20), "running": (255, 165, 0), "falling": (24, 35, 180)}
 SKELETON = ((5, 6), (5, 11), (6, 12), (11, 12), (5, 7), (7, 9), (6, 8), (8, 10), (11, 13), (13, 15), (12, 14), (14, 16))
@@ -36,6 +40,25 @@ class FallModelUnavailable(RuntimeError):
     """Raised when a required pose, ReID, or behavior-model asset is missing."""
 
 
+class PortableBehaviorClassifier:
+    """Small compatibility adapter around XGBoost's stable Booster format."""
+
+    def __init__(self, model_path: Path, *, threads: int) -> None:
+        import xgboost as xgb
+
+        self._xgb = xgb
+        self.booster = xgb.Booster()
+        self.booster.load_model(model_path)
+        self.booster.set_param({"device": "cpu", "nthread": threads})
+
+    def predict_proba(self, values: np.ndarray) -> np.ndarray:
+        matrix = self._xgb.DMatrix(np.asarray(values, dtype=np.float32))
+        probabilities = np.asarray(self.booster.predict(matrix), dtype=np.float32)
+        if probabilities.ndim == 1:
+            probabilities = probabilities.reshape(len(values), -1)
+        return probabilities
+
+
 class FallDetector:
     def __init__(self) -> None:
         self.model: Any | None = None
@@ -43,6 +66,9 @@ class FallDetector:
         self.device = _select_inference_device(settings.INFERENCE_DEVICE)
         self.model_path = _resolve_backend_path(settings.FALL_MODEL_PATH)
         self.behavior_model_path = _resolve_backend_path(settings.FALL_BEHAVIOR_MODEL_PATH)
+        self.portable_behavior_model_path = _resolve_backend_path(
+            settings.FALL_BEHAVIOR_PORTABLE_MODEL_PATH
+        )
         self.reid_model_path = _resolve_backend_path(settings.FALL_REID_MODEL_PATH)
         self.tracker_path = BACKEND_DIR / "app" / "inference" / "botsort_dedicated_reid.yaml"
         self.window_size = settings.FALL_BEHAVIOR_WINDOW_FRAMES
@@ -58,7 +84,7 @@ class FallDetector:
         if image is None:
             raise ValueError(f"Could not decode image: {input_path}")
         model = self._ensure_model()
-        result = model.predict(source=image, conf=settings.FALL_PERSON_CONFIDENCE, imgsz=640, device=self.device, verbose=False)[0]
+        result = model.predict(source=image, conf=settings.FALL_PERSON_CONFIDENCE, imgsz=settings.BEHAVIOR_POSE_IMGSZ, device=self.device, verbose=False)[0]
         detections = _pose_detections(result, fallback_track_ids=True)
         # A single image is intentionally not classified: behavior.joblib needs
         # a full 60-frame motion window.  Do not invent a temporary class.
@@ -119,22 +145,58 @@ class FallDetector:
     def _ensure_behavior_model(self) -> Any:
         if self.behavior_model is not None:
             return self.behavior_model
+        if self.portable_behavior_model_path.is_file():
+            try:
+                self.behavior_model = PortableBehaviorClassifier(
+                    self.portable_behavior_model_path,
+                    threads=settings.BEHAVIOR_XGBOOST_THREADS,
+                )
+                logger.info(
+                    "Behavior classifier loaded from portable model %s on CPU with %s thread(s)",
+                    self.portable_behavior_model_path,
+                    settings.BEHAVIOR_XGBOOST_THREADS,
+                )
+                return self.behavior_model
+            except Exception as exc:
+                raise FallModelUnavailable(
+                    "Fall detection model is unavailable: portable behavior "
+                    f"weights could not be loaded from {self.portable_behavior_model_path}."
+                ) from exc
         if not self.behavior_model_path.is_file():
-            raise FallModelUnavailable(f"Fall detection model is unavailable: behavior weights not found at {self.behavior_model_path}")
+            raise FallModelUnavailable(
+                "Fall detection model is unavailable: behavior weights not found at "
+                f"{self.behavior_model_path} or {self.portable_behavior_model_path}"
+            )
         try:
             import joblib
             model = joblib.load(self.behavior_model_path)
+            # Legacy sklearn-wrapped XGBoost fallback. Single-row live
+            # inference is faster and more predictable with one CPU thread.
+            if hasattr(model, "n_jobs"):
+                model.n_jobs = settings.BEHAVIOR_XGBOOST_THREADS
+            get_booster = getattr(model, "get_booster", None)
+            if callable(get_booster):
+                get_booster().set_param(
+                    {"device": "cpu", "nthread": settings.BEHAVIOR_XGBOOST_THREADS}
+                )
         except Exception as exc:
             raise FallModelUnavailable("Fall detection model is unavailable: behavior.joblib could not be loaded. Install joblib and xgboost.") from exc
         if not hasattr(model, "predict_proba"):
             raise FallModelUnavailable("Fall detection model is unavailable: behavior.joblib does not expose predict_proba.")
         self.behavior_model = model
+        logger.warning(
+            "Using legacy pickled behavior classifier %s; export %s for version-stable loading.",
+            self.behavior_model_path,
+            self.portable_behavior_model_path,
+        )
         return model
 
     def classify(self, frames: list[dict[str, Any] | None]) -> dict[str, Any] | None:
         if len(frames) < self.window_size:
             return None
+        feature_started = time.perf_counter()
         feature = extract_window_features(frames[-self.window_size:])
+        feature_ms = (time.perf_counter() - feature_started) * 1000.0
         if feature["quality"]["status"] != "good":
             return None
         raw = feature["raw"]
@@ -149,12 +211,30 @@ class FallDetector:
             elif name in double_log:
                 value = float(np.log1p(np.log1p(max(0.0, value))))
             values.append(value)
+        classifier_started = time.perf_counter()
         probabilities = np.asarray(self._ensure_behavior_model().predict_proba(np.asarray([values], dtype=np.float32)), dtype=np.float32)[0]
+        classifier_ms = (time.perf_counter() - classifier_started) * 1000.0
         if len(probabilities) != 3:
             raise FallModelUnavailable("Fall detection model is unavailable: behavior model must return others/running/falling probabilities.")
         others, running, falling = (float(value) for value in probabilities)
         label, confidence = max((("others", others), ("running", running), ("falling", falling)), key=lambda item: item[1])
-        return {"status": label, "score": confidence, "features": {**{key: float(value) for key, value in raw.items()}, "others_probability": others, "running_probability": running, "falling_probability": falling, "behavior_confidence": confidence, "window_ready": 1.0}, "behavior_label": label}
+        return {
+            "status": label,
+            "score": confidence,
+            "features": {
+                **{key: float(value) for key, value in raw.items()},
+                "others_probability": others,
+                "running_probability": running,
+                "falling_probability": falling,
+                "behavior_confidence": confidence,
+                "window_ready": 1.0,
+            },
+            "behavior_label": label,
+            "runtime_timings": {
+                "feature_extraction_ms": feature_ms,
+                "xgboost_ms": classifier_ms,
+            },
+        }
 
     def persist(self, detection: dict[str, Any], frame: np.ndarray, source_name: str | None, frame_index: int) -> BehaviorIncidentRead:
         snapshot = _write_temp_snapshot(frame)
@@ -183,6 +263,36 @@ class FallLiveSession:
         self.last_summary: dict[str, Any] | None = None
         self.last_detections: list[dict[str, Any]] = []
         self.last_frame_index: int | None = None
+        self.last_feature_ms = 0.0
+        self.last_classifier_ms = 0.0
+
+    def mark_discontinuity(
+        self,
+        *,
+        frame_index: int,
+        timestamp_seconds: float,
+        dropped_frames: int,
+    ) -> None:
+        """Invalidate temporal state after a source/queue frame gap.
+
+        A 60-sample classifier window must never bridge an unknown interval.
+        Incident cooldown timestamps are intentionally retained to avoid a
+        reconnect/gap creating duplicate persisted incidents.
+        """
+        self.windows.clear()
+        self.probability_history.clear()
+        self.last_prediction.clear()
+        self.active_behaviors.clear()
+        self.missing_samples_by_track.clear()
+        self.incident_by_track.clear()
+        self.last_summary = None
+        self.last_detections = []
+        self.last_frame_index = None
+        self.last_feature_ms = 0.0
+        self.last_classifier_ms = 0.0
+        self.timestamp_origin = timestamp_seconds
+        self.last_canonical_frame = -1
+        self.sample_index = 0
 
     def accept_source_frame(self, timestamp_seconds: float) -> bool:
         """Select frames by capture time onto the model's fixed 24-FPS timeline.
@@ -228,7 +338,7 @@ class FallLiveSession:
         model = self.detector._ensure_model()
         # Ultralytics maintains the BoT-SORT/ReID state across calls when
         # persist=True, giving a stable window per worker.
-        result = model.track(source=frame, persist=True, tracker=str(self.detector.tracker_path), conf=settings.FALL_PERSON_CONFIDENCE, imgsz=640, device=self.detector.device, half=str(self.detector.device).startswith("cuda"), verbose=False)[0]
+        result = model.track(source=frame, persist=True, tracker=str(self.detector.tracker_path), conf=settings.FALL_PERSON_CONFIDENCE, imgsz=settings.BEHAVIOR_POSE_IMGSZ, device=self.detector.device, half=str(self.detector.device).startswith("cuda"), verbose=False)[0]
         return self.process_pose_result(
             result,
             frame=frame,
@@ -282,6 +392,9 @@ class FallLiveSession:
                 self.last_prediction[track_id] = prediction
             else:
                 prediction = self.last_prediction[track_id]
+            timings = prediction.get("runtime_timings", {})
+            self.last_feature_ms = float(timings.get("feature_extraction_ms", self.last_feature_ms))
+            self.last_classifier_ms = float(timings.get("xgboost_ms", self.last_classifier_ms))
             detection.update(prediction)
             draw_detection(frame, detection)
         current_tracks = {int(item["track_id"]) for item in detections}

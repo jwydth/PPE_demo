@@ -36,7 +36,10 @@ from app.schemas.streaming import StreamEvent
 from app.schemas.violation import ViolationReport
 from app.services.auto_zone import SignPPERegistry, SignZoneRegistry, extract_signs
 from app.services.behavior_stream import BehaviorStreamWorker
+from app.services.inference_coordination import gpu_inference_lock
 from app.services.fall_detector import FallDetector, FallModelUnavailable
+from app.services.frame_hub import FrameSubscription, frame_hubs
+from app.services.stream_health import update_stream_health
 from app.services.ppe_violation_service import open_ppe_violation_service
 from app.services.zone_service import (
     COORD_SCALE,
@@ -337,14 +340,17 @@ async def real_video_pipeline(
     settings_state: dict | None = None,
 ):
     """Unified internal generator for video processing (real model path)."""
-    # _video_metadata() opens its own cv2.VideoCapture to read fps/frame-count
-    # (separate from the one model.track() opens below) and is fully
-    # synchronous — for an RTSP source that connection handshake alone takes
-    # 1-3s, and without offloading it here it blocks the *entire* event loop,
-    # so concurrent streams starting around the same time queue up behind
-    # each other instead of connecting in parallel.
-    fps, total_frames = await asyncio.to_thread(_video_metadata, video_path)
-    is_stream = total_frames <= 0
+    source_str = str(video_path)
+    is_live_source = source_str.startswith(
+        ("rtsp://", "rtmp://", "http://", "https://")
+    )
+    ppe_subscription: FrameSubscription | None = None
+    if is_live_source:
+        ppe_subscription = await frame_hubs.subscribe(source_str, policy="latest")
+        fps, total_frames = ppe_subscription.hub.health.fps, 0
+    else:
+        fps, total_frames = await asyncio.to_thread(_video_metadata, video_path)
+    is_stream = is_live_source or total_frames <= 0
     start_wall_time = time.perf_counter()
     cases: list[ViolationCase] = []
     workers: list[WorkerState] = []
@@ -416,7 +422,12 @@ async def real_video_pipeline(
 
     # load_zones() opens a synchronous DB connection — a slow or unreachable
     # database must not freeze the whole event loop, so run it off-thread.
-    zones = await asyncio.to_thread(load_zones, video_name)
+    try:
+        zones = await asyncio.to_thread(load_zones, video_name)
+    except Exception:
+        if ppe_subscription is not None:
+            await ppe_subscription.close()
+        raise
     logger.info(f"[ZONE] Loaded {len(zones)} zone(s) for '{video_name}': {[(z.zone_name, z.zone_type, z.camera_zone_view_id) for z in zones]}")
     sign_registry = SignZoneRegistry()
     ppe_sign_registry = SignPPERegistry()
@@ -427,27 +438,24 @@ async def real_video_pipeline(
         data={"video_name": video_name, "fps": round(fps, 2), "total_frames": total_frames},
     )
 
-    # Use TCP for RTSP streams to prevent 'Waiting for stream' timeouts.
-    # timeout;3000000 = 3 s read timeout so cv2 doesn't block indefinitely
-    # when the stream stalls — this lets generator cleanup finish quickly
-    # on WebSocket disconnect instead of waiting 10+ s for the OS read to return.
-    source_str = str(video_path)
-    if is_stream and source_str.startswith("rtsp://"):
-        import os
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|timeout;3000000"
-
     # Borrow a pre-warmed model instance from the bounded pool instead of loading
     # a fresh copy of the weights from disk on every connection (see PERF_PLAN.md
     # Tier 1.1). The pool caps VRAM at a known ceiling and keeps track(persist=True)
     # state isolated per concurrent stream.
     initial_ppe, initial_zone, initial_fall = get_flags()
-    behavior_primary = initial_fall and not initial_ppe and not initial_zone
-    # When PPE or Zone is enabled, Behavioral gets its own direct pose stream.
-    # It never consumes frames or tracker IDs from the PPE detector.
-    behavior_separate = initial_fall and not behavior_primary
-    pooled_model = not behavior_primary
+    # Behavior always uses the finite batched scheduler. Keeping the pooled PPE
+    # renderer as the primary path also avoids reintroducing an infinite shared
+    # pose predictor for behavior-only views.
+    behavior_primary = False
+    behavior_separate = initial_fall
+    pooled_model = True
     acquire_start = time.perf_counter()
-    model_instance = None if behavior_primary else await detector.acquire_model_instance()
+    try:
+        model_instance = await detector.acquire_model_instance()
+    except Exception:
+        if ppe_subscription is not None:
+            await ppe_subscription.close()
+        raise
     acquire_ms = (time.perf_counter() - acquire_start) * 1000
     if model_instance is not None and acquire_ms > 50:
         # A warm pool should return near-instantly; a large wait here means every
@@ -456,68 +464,96 @@ async def real_video_pipeline(
     try:
         behavior_worker: BehaviorStreamWorker | None = None
         if behavior_separate:
-            behavior_worker = BehaviorStreamWorker(
-                source=source_str, source_name=video_name, fps=fps,
-                detector=_fall_detector,
+            # Defer behavior startup until the first PPE inference below has
+            # initialized this camera's CUDA tracker. Starting both model
+            # stacks simultaneously creates a large one-time CUDA stall that
+            # can fill the ordered temporal queue before steady state begins.
+            logger.info(
+                "[BEHAVIOR] '%s' will start after PPE tracker initialization",
+                video_name,
             )
-            behavior_worker.start()
-            logger.info("[BEHAVIOR] '%s' started a separate direct pose/ReID branch", video_name)
         if model_instance is not None:
             _prepare_pooled_model_instance(model_instance)
-        if behavior_primary:
-            # One ordered pose/ReID tracker, matching the labeling pipeline.
-            # This avoids running the PPE model and then pose a second time.
-            model_instance = await asyncio.to_thread(_fall_detector._ensure_model)
-            tracker_path = str(_fall_detector.tracker_path)
-            confidence, classes, model_stride = settings.FALL_PERSON_CONFIDENCE, None, 1
-            inference_device = _fall_detector.device
-            half = str(_fall_detector.device).startswith("cuda")
-            image_size, stream_buffer = 640, True
-            logger.info("[BEHAVIOR] '%s' using pose/ReID as its primary stream model", video_name)
-        else:
-            tracker_path = _resolve_video_tracker(settings.VIDEO_TRACKER)
-            confidence, classes, model_stride = settings.CONFIDENCE_THRESHOLD, [0, 1, 2, 3], stride
-            inference_device = detector.device
-            half = bool(settings.INFERENCE_HALF) and str(detector.device).startswith("cuda")
-            image_size, stream_buffer = settings.INFERENCE_IMGSZ, False
-        track_start = time.perf_counter()
-        results = model_instance.track(
-            source=source_str,
-            stream=True,
-            persist=True,
-            conf=confidence,
-            tracker=tracker_path,
-            classes=classes,
-            vid_stride=model_stride,
-            device=inference_device,
-            half=half,
-            imgsz=image_size,
-            verbose=False,
-            # stream_buffer=False: Ultralytics' LoadStreams still reads via a
-            # threaded background reader either way (that part isn't what this
-            # flag controls) — it decides what next() serves when the reader
-            # has outpaced inference. True FIFO-queues up to 30 captured frames
-            # and always serves the *oldest* first, so any inference slowdown
-            # builds a backlog that takes just as long to drain before the
-            # feed is showing "now" again. False serves the *newest* captured
-            # frame and discards the rest — drop-to-latest at the capture
-            # layer, same principle as the WS-send fix in PERF_PLAN.md Tier
-            # 4.2, just one stage earlier. Right choice for a live dashboard:
-            # continuous PPE/zone violations persist across many frames, so
-            # occasionally skipping one during a slowdown isn't a detection
-            # risk, and it keeps the feed from drifting behind real time.
-            stream_buffer=stream_buffer,
+        tracker_path = _resolve_video_tracker(settings.VIDEO_TRACKER)
+        confidence, classes, model_stride = (
+            settings.CONFIDENCE_THRESHOLD,
+            [0, 1, 2, 3],
+            stride,
         )
+        inference_device = detector.device
+        half = bool(settings.INFERENCE_HALF) and str(detector.device).startswith("cuda")
+        image_size, stream_buffer = settings.INFERENCE_IMGSZ, False
+        track_start = time.perf_counter()
+        results_iter = None
+        if ppe_subscription is None:
+            results = model_instance.track(
+                source=source_str,
+                stream=True,
+                persist=True,
+                conf=confidence,
+                tracker=tracker_path,
+                classes=classes,
+                vid_stride=model_stride,
+                device=inference_device,
+                half=half,
+                imgsz=image_size,
+                verbose=False,
+                stream_buffer=stream_buffer,
+            )
+            results_iter = iter(results)
 
-        results_iter = iter(results)
+        def infer_live_frame(image: np.ndarray):
+            with gpu_inference_lock:
+                tracked = model_instance.track(
+                    source=image,
+                    stream=False,
+                    persist=True,
+                    conf=confidence,
+                    tracker=tracker_path,
+                    classes=classes,
+                    device=inference_device,
+                    half=half,
+                    imgsz=image_size,
+                    verbose=False,
+                )
+            return tracked[0] if tracked else None
+
+        def infer_signs(image: np.ndarray):
+            with gpu_inference_lock:
+                return detector.sign_model.predict(
+                    image,
+                    conf=settings.SIGN_CONFIDENCE_THRESHOLD,
+                    classes=sign_classes,
+                    device=detector.device,
+                    verbose=False,
+                )
+
         processed_frames = 0
         while True:
-            # Offload the blocking next() call (which reads frames and runs YOLO inference)
-            # to a background thread to keep the FastAPI main event loop 100% responsive.
-            result = await asyncio.to_thread(next, results_iter, None)
+            source_frame_index: int | None = None
+            if ppe_subscription is not None:
+                packet = await ppe_subscription.get()
+                if packet is None:
+                    break
+                if packet.frame_index % model_stride != 0:
+                    continue
+                source_frame_index = packet.frame_index
+                inference_started = time.perf_counter()
+                result = await asyncio.to_thread(infer_live_frame, packet.image)
+                ppe_inference_ms = (time.perf_counter() - inference_started) * 1000.0
+            else:
+                # Local files keep Ultralytics' streaming loader. Network
+                # sources are decoded once by CameraFrameHub.
+                result = await asyncio.to_thread(next, results_iter, None)
+                ppe_inference_ms = 0.0
             if result is None:
                 break
             processed_frames += 1
+            update_stream_health(
+                source_str,
+                ppe_processed_frames=processed_frames,
+                ppe_inference_ms=ppe_inference_ms,
+            )
             if processed_frames == 1:
                 # Dominated by the source handshake (RTSP connect + wait for a
                 # keyframe), not model load — the pool already removed that cost.
@@ -526,13 +562,13 @@ async def real_video_pipeline(
                     f"{(time.perf_counter() - track_start) * 1000:.0f}ms "
                     "(source connect + first inference)"
                 )
-            frame_index = (processed_frames - 1) * (1 if behavior_primary else stride)
+            frame_index = (
+                source_frame_index
+                if source_frame_index is not None
+                else (processed_frames - 1) * stride
+            )
             curr_ppe, curr_zone, curr_fall = get_flags()
-            if behavior_primary:
-                # This stream was opened in Behavioral-only mode. Reconnect to
-                # activate PPE/zone, which require the PPE primary model.
-                curr_ppe, curr_zone = False, False
-            elif curr_fall and behavior_worker is None:
+            if curr_fall and behavior_worker is None:
                 # Feature toggles arrive after the WebSocket is already open.
                 # Start the independent pose worker at that moment instead of
                 # requiring a reconnect before Behavioral can produce events.
@@ -808,12 +844,8 @@ async def real_video_pipeline(
                         for sig in pending_ppe:
                             ppe_sign_registry.dismiss(sig)
                 sign_results = await asyncio.to_thread(
-                    detector.sign_model.predict,
+                    infer_signs,
                     frame,
-                    conf=settings.SIGN_CONFIDENCE_THRESHOLD,
-                    classes=sign_classes,
-                    device=detector.device,
-                    verbose=False,
                 )
                 if sign_results:
                     signs = extract_signs(sign_results[0])
@@ -829,9 +861,15 @@ async def real_video_pipeline(
             # inference and sign-model calls above (PERF_PLAN.md Tier 7): keeps
             # this stream's encode from adding scheduling jitter to other
             # concurrent streams sharing the loop.
+            jpeg_started = time.perf_counter()
             image_bytes = (
                 await asyncio.to_thread(_encode_frame_to_jpeg, frame) if has_image else None
             )
+            if has_image:
+                update_stream_health(
+                    source_str,
+                    jpeg_ms=(time.perf_counter() - jpeg_started) * 1000.0,
+                )
             yield StreamEvent(
                 event="frame",
                 frame_index=frame_index,
@@ -862,6 +900,8 @@ async def real_video_pipeline(
     finally:
         if "behavior_worker" in locals() and behavior_worker is not None:
             await behavior_worker.stop()
+        if ppe_subscription is not None:
+            await ppe_subscription.close()
         if pooled_model and model_instance is not None:
             _release_pooled_model_instance(model_instance)
             detector.release_model_instance(model_instance)

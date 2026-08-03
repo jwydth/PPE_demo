@@ -1,12 +1,14 @@
 import asyncio
 import itertools
 import logging
+import time
 from collections import deque
 from pathlib import Path
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import HTMLResponse
 from app.schemas.streaming import StreamEvent
 from app.services.ppe_detector import PPEDetector
+from app.services.stream_health import update_stream_health
 from app.storage.local_paths import UPLOAD_DIR, ensure_upload_dir
 
 router = APIRouter(tags=["streaming"])
@@ -215,9 +217,14 @@ async def stream_video_ws(
         # Binary JPEG frame first, then the JSON envelope referencing it via
         # has_image — same connection, so WS delivers them to the client in
         # this order (PERF_PLAN.md Tier 2.2: raw bytes instead of base64-in-JSON).
+        send_started = time.perf_counter()
         if event.image_bytes is not None:
             await websocket.send_bytes(event.image_bytes)
         await websocket.send_text(event.model_dump_json())
+        update_stream_health(
+            video_name,
+            websocket_ms=(time.perf_counter() - send_started) * 1000.0,
+        )
 
     async def produce() -> None:
         nonlocal latest_frame, dropped_frames
