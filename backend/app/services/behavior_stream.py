@@ -151,7 +151,7 @@ class BehaviorStreamWorker:
                         summary = payload.get("summary") or {}
                         status = str(summary.get("status", "no_detection"))
                         if status != self._last_logged_status and status != "no_detection":
-                            logger.info(
+                            logger.debug(
                                 "[BEHAVIOR] source=%s frame=%s prediction=%s confidence=%.3f people=%s",
                                 self.source_name, frame_index, status,
                                 float(summary.get("top_confidence", 0.0)),
@@ -178,7 +178,7 @@ class BehaviorStreamWorker:
                     now = time.monotonic()
                     if now - self._last_health_log >= settings.BEHAVIOR_HEALTH_LOG_INTERVAL_SECONDS:
                         windows = self.session.windows
-                        logger.info(
+                        logger.debug(
                             "[BEHAVIOR_HEALTH] source=%s source_frame=%s processed=%s "
                             "active_tracks=%s ready_windows=%s queue=%s dropped=%s gaps=%s "
                             "total_ms=%.1f",

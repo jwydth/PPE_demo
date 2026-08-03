@@ -52,7 +52,9 @@ class BehaviorIncidentRead(BaseModel):
 
 class FallPoseDetection(BaseModel):
     track_id: int
-    status: Literal["others", "running", "falling"]
+    # ``unknown`` is a live-stream-only placeholder while a track is still
+    # collecting its initial behavior-classifier window.
+    status: Literal["unknown", "others", "running", "falling"]
     score: float
     person_confidence: float
     bbox: BoundingBox

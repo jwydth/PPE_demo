@@ -71,7 +71,7 @@ export interface FallLiveDetection {
   is_stale?: boolean;
   is_interpolated?: boolean;
   track_id: number;
-  status: "others" | "running" | "falling";
+  status: "unknown" | "others" | "running" | "falling";
   score: number;
   person_confidence: number;
   bbox: {

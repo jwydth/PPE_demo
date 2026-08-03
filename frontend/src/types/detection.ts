@@ -100,6 +100,11 @@ export interface TrackingOverlayFrame {
   physical_zone_id?: number;
   zone_name?: string;
   zone_type?: "RESTRICTED" | "WALKWAY" | "SLIPPERY";
+  behavior?: {
+    status: "unknown" | "others" | "running" | "falling";
+    score: number;
+    track_id?: number;
+  };
   status: Category | "unknown";
 }
 

@@ -11,11 +11,26 @@ import { ChipActionButton, DetectionChip } from "@/components/ppe/detection-chip
 export function TrackingOverlayLayer({
   overlay,
   currentTime,
+  behaviorDetections = [],
+  behaviorEnabled = false,
+  currentFrameIndex,
+  behaviorTtlFrames = 10,
 }: {
   overlay?: TrackingOverlay;
   currentTime: number;
+  behaviorDetections?: FallLiveDetection[];
+  behaviorEnabled?: boolean;
+  currentFrameIndex?: number;
+  behaviorTtlFrames?: number;
 }) {
   const currentBoxes = useCurrentBoxes(overlay, currentTime);
+  const mergedBoxes = mergeBehaviorDetections(
+    currentBoxes,
+    behaviorDetections,
+    behaviorEnabled,
+    currentFrameIndex,
+    behaviorTtlFrames,
+  );
   const frameWidth = overlay?.frame_width || 16;
   const frameHeight = overlay?.frame_height || 9;
 
@@ -23,21 +38,21 @@ export function TrackingOverlayLayer({
 
   return (
     <>
-      {currentBoxes.length > 0 ? (
+      {mergedBoxes.length > 0 ? (
         <svg
           className="pointer-events-none absolute inset-0 h-full w-full"
           viewBox={`0 0 ${frameWidth} ${frameHeight}`}
           preserveAspectRatio="none"
         >
           <TrackingBoxes
-            frames={currentBoxes}
+            frames={mergedBoxes}
             frameWidth={frameWidth}
             frameHeight={frameHeight}
           />
         </svg>
       ) : null}
       <div className="pointer-events-none absolute left-3 top-3 rounded bg-black/65 px-2 py-1 text-xs font-semibold text-white ring-1 ring-white/10">
-        Tracking {countLabel(currentBoxes.length, "worker")}
+        Tracking {countLabel(mergedBoxes.length, "worker")}
       </div>
     </>
   );
@@ -113,51 +128,6 @@ export function VideoTrackingOverlay({
   );
 }
 
-export function FallOverlayLayer({
-  detections,
-  frameWidth,
-  frameHeight,
-  currentFrameIndex,
-  ttlFrames = 10,
-}: {
-  detections: FallLiveDetection[];
-  frameWidth?: number | null;
-  frameHeight?: number | null;
-  currentFrameIndex?: number;
-  ttlFrames?: number;
-}) {
-  const width = frameWidth || 16;
-  const height = frameHeight || 9;
-  const visibleDetections = detections.filter((detection) => {
-    if (!detection.bbox) return false;
-    const { x1, y1, x2, y2 } = detection.bbox;
-    if (![x1, y1, x2, y2].every(Number.isFinite)) return false;
-    if (detection.is_stale) return false;
-    if (detection.age_frames !== undefined && detection.age_frames > ttlFrames) return false;
-    if (detection.frame_index === undefined || currentFrameIndex === undefined) return true;
-    return Math.abs(currentFrameIndex - detection.frame_index) <= ttlFrames;
-  });
-
-  if (visibleDetections.length === 0) return null;
-
-  return (
-    <svg
-      className="pointer-events-none absolute inset-0 h-full w-full"
-      viewBox={`0 0 ${width} ${height}`}
-      preserveAspectRatio="none"
-    >
-      {visibleDetections.map((detection, index) => (
-        <FallDetectionShape
-          key={`${detection.track_id}-${detection.status}-${index}`}
-          detection={detection}
-          frameWidth={width}
-          frameHeight={height}
-        />
-      ))}
-    </svg>
-  );
-}
-
 function useCurrentBoxes(overlay: TrackingOverlay | undefined, currentTime: number) {
   const sortedFrameIndexes = useMemo(() => {
     if (!overlay?.frames.length) return [];
@@ -185,154 +155,99 @@ function useCurrentBoxes(overlay: TrackingOverlay | undefined, currentTime: numb
   return currentBoxes;
 }
 
-function FallDetectionShape({
-  detection,
-  frameWidth,
-  frameHeight,
-}: {
-  detection: FallLiveDetection;
-  frameWidth: number;
-  frameHeight: number;
-}) {
-  const color = fallColor(detection.status);
-  const label = fallLabel(detection);
-  const box = detection.bbox;
-  const width = Math.max(0, box.x2 - box.x1);
-  const height = Math.max(0, box.y2 - box.y1);
-  const panelWidth = Math.min(
-    frameWidth - box.x1,
-    Math.max(frameWidth * 0.20, label.length * frameWidth * 0.008),
+function mergeBehaviorDetections(
+  frames: TrackingOverlayFrame[],
+  detections: FallLiveDetection[],
+  behaviorEnabled: boolean,
+  currentFrameIndex: number | undefined,
+  ttlFrames: number,
+): TrackingOverlayFrame[] {
+  const merged = frames.map((frame) => ({ ...frame }));
+  const visible = detections
+    .filter((detection) => isVisibleBehaviorDetection(detection, currentFrameIndex, ttlFrames))
+    .sort(compareBehaviorPriority);
+
+  for (const detection of visible) {
+    const matchedIndex = findBehaviorMatch(merged, detection);
+    const behavior: NonNullable<TrackingOverlayFrame["behavior"]> = {
+      status: detection.status,
+      score: detection.score,
+      track_id: detection.track_id,
+    };
+    if (matchedIndex >= 0) {
+      const matched = merged[matchedIndex];
+      if (!matched.behavior || behaviorPriority(behavior.status) > behaviorPriority(matched.behavior.status)) {
+        merged[matchedIndex] = { ...matched, behavior };
+      }
+      continue;
+    }
+    merged.push({
+      frame_index: detection.frame_index ?? currentFrameIndex ?? 0,
+      time_seconds: 0,
+      track_id: detection.track_id,
+      bbox: detection.bbox,
+      confidence: detection.person_confidence,
+      compliant: true,
+      missing_equipment: [],
+      status: "unknown",
+      behavior,
+    });
+  }
+  return behaviorEnabled
+    ? merged.map((frame) => frame.behavior ? frame : {
+      ...frame,
+      behavior: { status: "unknown", score: 0, track_id: frame.track_id },
+    })
+    : merged;
+}
+
+function isVisibleBehaviorDetection(
+  detection: FallLiveDetection,
+  currentFrameIndex: number | undefined,
+  ttlFrames: number,
+) {
+  const { x1, y1, x2, y2 } = detection.bbox ?? {};
+  if (![x1, y1, x2, y2].every(Number.isFinite) || x2 <= x1 || y2 <= y1) return false;
+  if (detection.is_stale || (detection.age_frames !== undefined && detection.age_frames > ttlFrames)) return false;
+  return detection.frame_index === undefined || currentFrameIndex === undefined
+    ? true
+    : Math.abs(currentFrameIndex - detection.frame_index) <= ttlFrames;
+}
+
+function findBehaviorMatch(frames: TrackingOverlayFrame[], detection: FallLiveDetection): number {
+  const sameTrack = frames.findIndex(
+    (frame) => frame.track_id !== undefined && frame.track_id === detection.track_id,
   );
-  const panelHeight = frameHeight * 0.052;
-  const panelY =
-    box.y1 > panelHeight + frameHeight * 0.012
-      ? box.y1 - panelHeight - frameHeight * 0.008
-      : Math.min(frameHeight - panelHeight, box.y2 + frameHeight * 0.008);
-  const panelX = Math.min(box.x1, frameWidth - panelWidth);
-
-  return (
-    <g>
-      <rect
-        x={box.x1}
-        y={box.y1}
-        width={width}
-        height={height}
-        fill="transparent"
-        stroke={color}
-        strokeWidth={Math.max(frameWidth, frameHeight) * 0.005}
-        opacity={detection.is_interpolated ? 0.68 : 1}
-      />
-      <FallSkeleton
-        keypoints={detection.keypoints ?? []}
-        color={color}
-        frameWidth={frameWidth}
-        opacity={detection.is_interpolated ? 0.62 : 1}
-      />
-      <rect
-        x={panelX}
-        y={panelY}
-        width={panelWidth}
-        height={panelHeight}
-        rx={frameWidth * 0.006}
-        fill="rgba(2, 6, 23, 0.9)"
-        stroke={color}
-        strokeWidth={Math.max(frameWidth, frameHeight) * 0.0015}
-        opacity={detection.is_interpolated ? 0.82 : 1}
-      />
-      <text
-        x={panelX + frameWidth * 0.008}
-        y={panelY + panelHeight * 0.64}
-        fill="#ffffff"
-        fontSize={frameHeight * 0.024}
-        fontWeight={800}
-        opacity={detection.is_interpolated ? 0.86 : 1}
-      >
-        {label}
-      </text>
-    </g>
-  );
+  if (sameTrack >= 0) return sameTrack;
+  let bestIndex = -1;
+  let bestIou = 0.25;
+  for (const [index, frame] of frames.entries()) {
+    const iou = boxIou(frame.bbox, detection.bbox);
+    if (iou > bestIou) {
+      bestIou = iou;
+      bestIndex = index;
+    }
+  }
+  return bestIndex;
 }
 
-function FallSkeleton({
-  keypoints,
-  color,
-  frameWidth,
-  opacity = 1,
-}: {
-  keypoints: number[][];
-  color: string;
-  frameWidth: number;
-  opacity?: number;
-}) {
-  if (keypoints.length === 0) return null;
-  const usablePoint = (index: number) => {
-    const point = keypoints[index];
-    if (!point || point.length < 3 || point[2] < 0.12 || point[0] <= 0 || point[1] <= 0) return null;
-    return { x: point[0], y: point[1] };
-  };
-
-  return (
-    <>
-      {FALL_SKELETON.map(([a, b]) => {
-        const pointA = usablePoint(a);
-        const pointB = usablePoint(b);
-        if (!pointA || !pointB) return null;
-        return (
-          <line
-            key={`${a}-${b}`}
-            x1={pointA.x}
-            y1={pointA.y}
-            x2={pointB.x}
-            y2={pointB.y}
-            stroke={color}
-            strokeWidth={frameWidth * 0.003}
-            strokeLinecap="round"
-            opacity={opacity}
-          />
-        );
-      })}
-      {keypoints.map((_, index) => {
-        const point = usablePoint(index);
-        if (!point) return null;
-        return (
-          <circle
-            key={index}
-            cx={point.x}
-            cy={point.y}
-            r={frameWidth * 0.004}
-            fill={color}
-            opacity={opacity}
-          />
-        );
-      })}
-    </>
-  );
+function boxIou(a: TrackingOverlayFrame["bbox"], b: FallLiveDetection["bbox"]) {
+  const overlapWidth = Math.max(0, Math.min(a.x2, b.x2) - Math.max(a.x1, b.x1));
+  const overlapHeight = Math.max(0, Math.min(a.y2, b.y2) - Math.max(a.y1, b.y1));
+  const overlap = overlapWidth * overlapHeight;
+  const union = (a.x2 - a.x1) * (a.y2 - a.y1) + (b.x2 - b.x1) * (b.y2 - b.y1) - overlap;
+  return union > 0 ? overlap / union : 0;
 }
 
-function fallColor(status: FallLiveDetection["status"]): string {
-  if (status === "falling") return "#ef4444";
-  if (status === "running") return "#3b82f6";
-  return "#22c55e";
+function compareBehaviorPriority(a: FallLiveDetection, b: FallLiveDetection) {
+  return behaviorPriority(b.status)
+    - behaviorPriority(a.status)
+    || b.score - a.score;
 }
 
-function fallLabel(detection: FallLiveDetection): string {
-  return `Behavior: ${detection.status} ${detection.score.toFixed(2)}`;
+function behaviorPriority(status: NonNullable<TrackingOverlayFrame["behavior"]>["status"]) {
+  return status === "falling" ? 3 : status === "running" ? 2 : status === "others" ? 1 : 0;
 }
-
-const FALL_SKELETON: Array<[number, number]> = [
-  [5, 6],
-  [5, 11],
-  [6, 12],
-  [11, 12],
-  [5, 7],
-  [7, 9],
-  [6, 8],
-  [8, 10],
-  [11, 13],
-  [13, 15],
-  [12, 14],
-  [14, 16],
-];
 
 function TrackingBoxes({
   frames,
@@ -425,6 +340,11 @@ function trackingLabels(frame: TrackingOverlayFrame): string[] {
         : "Walkway violation";
     labels.push(`Zone: ${frame.zone_name ? `${zoneLabel} - ${frame.zone_name}` : zoneLabel}`);
   }
+  if (frame.behavior) {
+    labels.push(
+      `Behavior: ${frame.behavior.status[0].toUpperCase()}${frame.behavior.status.slice(1)} ${Math.round(frame.behavior.score * 100)}%`,
+    );
+  }
   if (labels.length === 0) {
     labels.push(frame.status === "unknown" ? unknownStatusLabel(frame) : "Compliant");
   }
@@ -452,6 +372,9 @@ function trackingColor(frame: TrackingOverlayFrame): string {
   if (frame.missing_equipment.length > 0 || frame.status === "violation" || !frame.compliant) {
     return "#ef4444";
   }
+  if (frame.behavior?.status === "falling") return "#ef4444";
+  if (frame.behavior?.status === "running") return "#3b82f6";
+  if (frame.behavior?.status === "unknown") return "#a1a1aa";
   if (frame.status === "unknown") return "#a1a1aa";
   return "#84cc16";
 }
@@ -459,6 +382,9 @@ function trackingColor(frame: TrackingOverlayFrame): string {
 function labelColor(label: string, fallback: string): string {
   if (label.startsWith("PPE:")) return "#fca5a5";
   if (label.startsWith("Zone:")) return fallback;
+  if (label.startsWith("Behavior:")) {
+    return label.includes("Falling") ? "#fca5a5" : label.includes("Running") ? "#93c5fd" : label.includes("Unknown") ? "#d4d4d8" : "#bbf7d0";
+  }
   if (
     label.startsWith("Track") ||
     label.startsWith("Worker") ||

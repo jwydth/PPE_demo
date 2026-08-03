@@ -31,7 +31,6 @@ import {
 import { BoundingBoxView } from "@/components/ppe/bounding-box-view";
 import { FileUpload } from "@/components/ppe/file-upload";
 import {
-  FallOverlayLayer,
   PPESuggestionBanner,
   SuggestionOverlayLayer,
   TrackingOverlayLayer,
@@ -53,7 +52,7 @@ import { useZoneDrawing } from "@/hooks/useZoneDrawing";
 import { useLiveStream } from "@/hooks/useLiveStream";
 import { useAutoZoneSuggestions } from "@/hooks/useAutoZoneSuggestions";
 import { AnalysisPhase, DraftZone } from "@/hooks/camera-panel-types";
-import { BehaviorIncident, FallLiveSummary } from "@/types/behavior";
+import { BehaviorIncident } from "@/types/behavior";
 import { useSafetyKpis } from "@/hooks/useSafetyKpis";
 import { TopBar, type DashboardView } from "./top-bar";
 import { ZoneSidebar } from "./zone-sidebar";
@@ -85,12 +84,16 @@ function filterTrackingOverlay(
   {
     showPpe,
     showZone,
+    showBehavior,
   }: {
     showPpe: boolean;
     showZone: boolean;
+    showBehavior: boolean;
   },
 ): TrackingOverlay | undefined {
-  if (!overlay || (!showPpe && !showZone)) return undefined;
+  // Behavior needs the same person boxes as PPE/Zone, including during its
+  // 60-frame warm-up where every person is labelled Behavior: Unknown.
+  if (!overlay || (!showPpe && !showZone && !showBehavior)) return undefined;
 
   const frames = overlay.frames.map((frame) => {
     const missingEquipment = showPpe ? frame.missing_equipment : [];
@@ -471,7 +474,7 @@ function CameraPanel({
     
     // Open WebSockets for all active cameras
     liveStream.syncCameraConnections(cameras);
-    
+
     // Focus the view on the current active camera
     liveStream.setViewedCamera(active.rtspUrl);
     void zoneDrawing.loadSavedZones(active.rtspUrl);
@@ -514,6 +517,7 @@ function CameraPanel({
         {
           showPpe: currentPpeEnabled,
           showZone: currentZoneEnabled,
+          showBehavior: currentFallEnabled,
         },
       ),
     [
@@ -523,6 +527,7 @@ function CameraPanel({
       liveStream.streamData.tracking_overlay,
       upload.videoResult?.tracking_overlay,
       currentZoneEnabled,
+      currentFallEnabled,
     ],
   );
   // Unified identifier for the current camera source: the RTSP URL for a live
@@ -531,8 +536,6 @@ function CameraPanel({
   const feedAspectRatio = visibleTrackingOverlay
     ? `${visibleTrackingOverlay.frame_width ?? 16} / ${visibleTrackingOverlay.frame_height ?? 9}`
     : "16 / 9";
-  const streamFrameWidth = liveStream.streamData.tracking_overlay.frame_width;
-  const streamFrameHeight = liveStream.streamData.tracking_overlay.frame_height;
   const currentFrameIndex = Math.round(
     liveStream.currentVideoTime * (liveStream.streamData.tracking_overlay.fps || 30),
   );
@@ -1183,19 +1186,19 @@ function CameraPanel({
                                         <TrackingOverlayLayer
                                           overlay={syntheticOverlay}
                                           currentTime={0}
+                                          behaviorDetections={
+                                            (cameraFeatureMap[c.id]?.["behavior_detection"] ?? cameraFeatureMap[c.id]?.["fall_detection"] ?? false)
+                                              ? overlayData.fallDetections
+                                              : []
+                                          }
+                                          behaviorEnabled={
+                                            cameraFeatureMap[c.id]?.["behavior_detection"] ?? cameraFeatureMap[c.id]?.["fall_detection"] ?? false
+                                          }
                                         />
                                       );
                                     })()
                                   )}
 
-                                  {/* Behavior Detection Overlay Layer */}
-                                  {(cameraFeatureMap[c.id]?.["behavior_detection"] ?? cameraFeatureMap[c.id]?.["fall_detection"] ?? false) && liveStream.cameraOverlays[c.rtspUrl] && (
-                                    <FallOverlayLayer
-                                      detections={liveStream.cameraOverlays[c.rtspUrl].fallDetections}
-                                      frameWidth={liveStream.cameraOverlays[c.rtspUrl].frameWidth}
-                                      frameHeight={liveStream.cameraOverlays[c.rtspUrl].frameHeight}
-                                    />
-                                  )}
                                 </>
                               ) : (
                                 <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-slate-500 bg-slate-950/80">
@@ -1270,13 +1273,8 @@ function CameraPanel({
                         <TrackingOverlayLayer
                           overlay={visibleTrackingOverlay}
                           currentTime={liveStream.currentVideoTime}
-                        />
-                      ) : null}
-                      {currentFallEnabled && !zoneDrawing.isDrawing ? (
-                        <FallOverlayLayer
-                          detections={liveStream.streamData.fall_detections}
-                          frameWidth={streamFrameWidth}
-                          frameHeight={streamFrameHeight}
+                          behaviorDetections={currentFallEnabled ? liveStream.streamData.fall_detections : []}
+                          behaviorEnabled={currentFallEnabled}
                           currentFrameIndex={currentFrameIndex}
                         />
                       ) : null}
@@ -1312,12 +1310,6 @@ function CameraPanel({
                       isLive={liveStream.isLive}
                       isPlaying={liveStream.isPlaying}
                       togglePlayback={liveStream.togglePlayback}
-                    />
-                    <FallStatusPanel
-                      enabled={currentFallEnabled}
-                      summary={liveStream.streamData.fall_summary}
-                      unavailable={liveStream.streamData.fall_unavailable}
-                      latestIncident={liveStream.streamData.behavior_incidents.at(-1)}
                     />
                   </div>
                 </div>
@@ -1394,103 +1386,6 @@ function ModelToggle({
         />
       </span>
     </button>
-  );
-}
-
-function FallStatusPanel({
-  enabled,
-  summary,
-  unavailable,
-  latestIncident,
-}: {
-  enabled: boolean;
-  summary: FallLiveSummary | null;
-  unavailable: string | null;
-  latestIncident?: BehaviorIncident;
-}) {
-  if (!enabled) {
-    return (
-      <section className="rounded-md border border-slate-800 bg-slate-950 p-3">
-        <div className="flex items-center justify-between gap-3">
-          <h3 className="text-sm font-semibold text-white">Behavior Detection</h3>
-          <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs font-semibold text-slate-300">
-            Disabled
-          </span>
-        </div>
-      </section>
-    );
-  }
-
-  const status = unavailable ? "unavailable" : summary?.status ?? (enabled ? "no_detection" : "off");
-  const statusClass =
-    status === "falling"
-      ? "border-red-400 bg-red-500/10 text-red-100"
-      : status === "running"
-      ? "border-blue-300 bg-blue-400/10 text-blue-100"
-      : status === "unavailable"
-      ? "border-slate-600 bg-slate-800 text-slate-200"
-      : status === "no_detection"
-      ? "border-slate-600 bg-slate-800 text-slate-200"
-      : "border-emerald-300 bg-emerald-400/10 text-emerald-100";
-  const label =
-    status === "falling"
-      ? "Falling"
-      : status === "running"
-      ? "Running"
-      : status === "unavailable"
-      ? "Unavailable"
-      : status === "no_detection"
-      ? "No detection"
-      : "Others";
-
-  return (
-    <section className="rounded-md border border-slate-800 bg-slate-950 p-3">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h3 className="text-sm font-semibold text-white">Behavior Detection</h3>
-          <p className="mt-1 text-xs text-slate-400">Live behavior classification from the pose model.</p>
-        </div>
-        <span className={`rounded border px-2 py-1 text-xs font-semibold ${statusClass}`}>
-          {label}
-        </span>
-      </div>
-
-      {unavailable ? (
-        <p className="mt-3 text-xs leading-5 text-slate-300">{unavailable}</p>
-      ) : (
-        <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
-          <MetricMini label="Confidence" value={`${Math.round((summary?.top_confidence ?? 0) * 100)}%`} />
-          <MetricMini label="People" value={`${summary?.person_count ?? 0}`} />
-          <MetricMini label="Running" value={`${summary?.running_count ?? 0}`} />
-          <MetricMini label="Falling" value={`${summary?.falling_count ?? 0}`} />
-        </div>
-      )}
-
-      {latestIncident ? (
-        <div className="mt-3 rounded-md border border-red-400/30 bg-red-500/10 p-2 text-xs text-red-50">
-          <p className="font-semibold">Persisted incident #{latestIncident.id}</p>
-          <p className="mt-1 text-red-100/80">
-            {latestIncident.severity ?? "HIGH"} - {Math.round((latestIncident.confidence ?? 0) * 100)}%
-          </p>
-          {latestIncident.snapshot_url ? (
-            <img
-              src={latestIncident.snapshot_url}
-              alt={`Behavior incident ${latestIncident.id}`}
-              className="mt-2 max-h-32 w-full rounded object-cover"
-            />
-          ) : null}
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
-function MetricMini({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded border border-slate-800 bg-slate-900 px-2 py-1.5">
-      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label}</p>
-      <p className="mt-1 font-semibold text-white">{value}</p>
-    </div>
   );
 }
 

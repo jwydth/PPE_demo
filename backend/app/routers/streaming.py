@@ -140,7 +140,7 @@ async def stream_video_ws(
                         settings_state["enable_fall"] = bool(new_settings["enable_fall"])
                 if "viewing" in new_settings:
                     settings_state["viewing"] = bool(new_settings["viewing"])
-                logger.info(f"[conn {conn_id}] [SIGNAL] Received dynamic settings update: {settings_state}")
+                logger.debug(f"[conn {conn_id}] [SIGNAL] Received dynamic settings update: {settings_state}")
             elif data.get("event") == "dismiss_suggestion":
                 sig = data.get("data", {}).get("suggestion_id")
                 if sig:
@@ -288,7 +288,7 @@ async def stream_video_ws(
             # frame — leaving this infinite stream running forever.
             await asyncio.sleep(0)
             if sent % 120 == 0:
-                logger.info(
+                logger.debug(
                     f"[conn {conn_id}] sent {sent} events, dropped {dropped_frames} stale frame(s) "
                     f"(client_state={websocket.client_state.name}, disconnect_event={disconnect_event.is_set()})"
                 )

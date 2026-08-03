@@ -90,7 +90,7 @@ def _record_violation_case(
     confirmed_aspect_ratios: list[float] | None = None,
 ) -> None:
     if worker.reported:
-        logger.info(
+        logger.debug(
             "[PPE] Suppressed persistence for already-reported worker: "
             "frame=%s track_id=%s missing=%s worker_match=%s",
             frame_index,
@@ -123,7 +123,7 @@ def _record_violation_case(
         else "create"
     )
     aspect_ratio = _bbox_aspect_ratio(person.bbox)
-    logger.info(
+    logger.debug(
         "[PPE] Persistence decision: frame=%s track_id=%s violation_type=%s "
         "missing=%s role=%s worker_match=%s case_match=%s action=%s duplicate=%s "
         "duplicate_reason=%s frame_gap=%s center_distance_ratio=%s aspect_ratio=%.3f",
@@ -567,7 +567,13 @@ async def real_video_pipeline(
                 if source_frame_index is not None
                 else (processed_frames - 1) * stride
             )
-            curr_ppe, curr_zone, curr_fall = get_flags()
+            curr_ppe, curr_zone, behavior_enabled = get_flags()
+            # A camera hidden outside the selected single/matrix view does not
+            # need behavior inference.  The frontend sends ``viewing=True``
+            # for every visible matrix tile, so all displayed cameras retain
+            # detection while background streams release their pose/ReID worker.
+            viewed = is_viewed()
+            curr_fall = behavior_enabled and viewed
             if curr_fall and behavior_worker is None:
                 # Feature toggles arrive after the WebSocket is already open.
                 # Start the independent pose worker at that moment instead of
@@ -629,7 +635,7 @@ async def real_video_pipeline(
                         worker.zone_last_in = {}
 
             if processed_frames % 60 == 1:
-                logger.info(f" [PIPELINE] Frame {frame_index} active state: ppe={curr_ppe}, zone={curr_zone}, fall={curr_fall}")
+                logger.debug(f" [PIPELINE] Frame {frame_index} active state: ppe={curr_ppe}, zone={curr_zone}, fall={curr_fall}")
 
             persons, helmets, vests, cleaning_coveralls = _extract_result_boxes(result)
 
@@ -854,7 +860,6 @@ async def real_video_pipeline(
                     for suggestion in ppe_sign_registry.update(signs, frame_width, frame_height, frame_index):
                         yield StreamEvent(event="ppe_suggestion", frame_index=frame_index, data=suggestion.model_dump())
 
-            viewed = is_viewed()
             has_image = is_stream and viewed
             # Offload the resize+encode (cv2, CPU-bound) to a thread instead of
             # running it inline on the event loop — same reasoning as the main

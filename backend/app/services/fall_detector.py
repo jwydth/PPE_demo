@@ -430,7 +430,24 @@ class FallLiveSession:
         # The WebSocket/UI contract uses a BoundingBox object, while the
         # internal inference and persistence code deliberately uses a compact
         # four-value list. Serialize at this boundary only.
-        live_payloads = [_schema(item).model_dump() for item in payloads]
+        # The classifier needs a 60-frame window before it can assign a real
+        # label.  Keep emitting pose boxes during that warm-up period so the
+        # UI can render ``Behavior: Unknown`` rather than showing no box.
+        live_payloads = []
+        for item in detections:
+            if "status" in item:
+                payload = _payload(item, self.incident_by_track.get(int(item["track_id"])))
+            else:
+                payload = {
+                    "track_id": int(item["track_id"]),
+                    "status": "unknown",
+                    "score": 0.0,
+                    "person_confidence": float(item["person_confidence"]),
+                    "bbox": [float(value) for value in item["bbox"]],
+                    "features": {},
+                    "keypoints": item["keypoints"],
+                }
+            live_payloads.append(_schema(payload).model_dump())
         self.sample_index += 1
         self.last_summary, self.last_detections, self.last_frame_index = _summary(payloads, [item.id for item in persisted]).model_dump(), live_payloads, frame_index
         return {"summary": self.last_summary, "detections": live_payloads, "incidents": [item.model_dump() for item in persisted], "frame_index": frame_index}
