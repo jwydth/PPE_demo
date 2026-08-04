@@ -568,12 +568,12 @@ async def real_video_pipeline(
                 else (processed_frames - 1) * stride
             )
             curr_ppe, curr_zone, behavior_enabled = get_flags()
-            # A camera hidden outside the selected single/matrix view does not
-            # need behavior inference.  The frontend sends ``viewing=True``
-            # for every visible matrix tile, so all displayed cameras retain
-            # detection while background streams release their pose/ReID worker.
+            # Behavior monitoring is independent of whether its video tile is
+            # currently open in the UI.  A camera with the feature enabled
+            # must keep collecting its temporal window and recording incidents
+            # continuously; ``viewed`` below controls preview delivery only.
             viewed = is_viewed()
-            curr_fall = behavior_enabled and viewed
+            curr_fall = behavior_enabled
             if curr_fall and behavior_worker is None:
                 # Feature toggles arrive after the WebSocket is already open.
                 # Start the independent pose worker at that moment instead of

@@ -341,8 +341,12 @@ function trackingLabels(frame: TrackingOverlayFrame): string[] {
     labels.push(`Zone: ${frame.zone_name ? `${zoneLabel} - ${frame.zone_name}` : zoneLabel}`);
   }
   if (frame.behavior) {
+    const behaviorLabel =
+      frame.behavior.status === "unknown"
+        ? "Normal"
+        : `${frame.behavior.status[0].toUpperCase()}${frame.behavior.status.slice(1)}`;
     labels.push(
-      `Behavior: ${frame.behavior.status[0].toUpperCase()}${frame.behavior.status.slice(1)} ${Math.round(frame.behavior.score * 100)}%`,
+      `Behavior: ${behaviorLabel} ${Math.round(frame.behavior.score * 100)}%`,
     );
   }
   if (labels.length === 0) {
@@ -374,7 +378,7 @@ function trackingColor(frame: TrackingOverlayFrame): string {
   }
   if (frame.behavior?.status === "falling") return "#ef4444";
   if (frame.behavior?.status === "running") return "#3b82f6";
-  if (frame.behavior?.status === "unknown") return "#a1a1aa";
+  if (frame.behavior?.status === "unknown") return "#84cc16";
   if (frame.status === "unknown") return "#a1a1aa";
   return "#84cc16";
 }
@@ -383,7 +387,7 @@ function labelColor(label: string, fallback: string): string {
   if (label.startsWith("PPE:")) return "#fca5a5";
   if (label.startsWith("Zone:")) return fallback;
   if (label.startsWith("Behavior:")) {
-    return label.includes("Falling") ? "#fca5a5" : label.includes("Running") ? "#93c5fd" : label.includes("Unknown") ? "#d4d4d8" : "#bbf7d0";
+    return label.includes("Falling") ? "#fca5a5" : label.includes("Running") ? "#93c5fd" : "#bbf7d0";
   }
   if (
     label.startsWith("Track") ||

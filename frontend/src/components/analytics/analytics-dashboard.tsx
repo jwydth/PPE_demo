@@ -160,7 +160,13 @@ function ChartTooltip({
   );
 }
 
-export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } = {}) {
+export function AnalyticsDashboard({
+  embedded = false,
+  isVisible = true,
+}: {
+  embedded?: boolean;
+  isVisible?: boolean;
+} = {}) {
   const [timeRange, setTimeRange] = useState<AnalyticsRangeParam>("7D");
   const [selectedZone, setSelectedZone] = useState<number | null>(null);
   const [comparisonMode, setComparisonMode] = useState<CompareMode>("week");
@@ -627,8 +633,9 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
               </div>
             </div>
             <div style={{ height: 270 }} className="mt-2">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={trendChartData} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+              {isVisible ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={trendChartData} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
                   <defs>
                     {zoneMeta.map((z) => (
                       <linearGradient key={zoneKey(z.id)} id={`grad-${zoneKey(z.id)}`} x1="0" y1="0" x2="0" y2="1">
@@ -664,8 +671,9 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
                       opacity={selectedZone != null && selectedZone !== z.id ? 0.15 : 1}
                     />
                   ))}
-                </AreaChart>
-              </ResponsiveContainer>
+                  </AreaChart>
+                </ResponsiveContainer>
+              ) : null}
             </div>
           </div>
 
@@ -761,8 +769,9 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
                   </span>
                 </div>
                 <div style={{ height: 200 }}>
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={compare?.points ?? []} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
+                  {isVisible ? (
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={compare?.points ?? []} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
                       <CartesianGrid vertical={false} stroke="#e2e8f0" strokeDasharray="3 3" />
                       <XAxis
                         dataKey="label"
@@ -779,8 +788,9 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
                       <Tooltip content={<ChartTooltip />} />
                       <Line type="monotone" dataKey="prior" name="Prior" stroke="#cbd5e1" strokeWidth={2} strokeDasharray="4 4" dot={false} />
                       <Line type="monotone" dataKey="current" name="Current" stroke="#0f172a" strokeWidth={2.5} dot={false} />
-                    </LineChart>
-                  </ResponsiveContainer>
+                      </LineChart>
+                    </ResponsiveContainer>
+                  ) : null}
                 </div>
               </div>
             </div>
@@ -795,8 +805,9 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
 
               <div className="mt-3 flex flex-wrap items-center gap-5">
                 <div className="relative size-36 shrink-0">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
+                  {isVisible ? (
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
                       <Pie data={severityPieData} dataKey="value" nameKey="name" innerRadius="62%" outerRadius="92%" paddingAngle={3} stroke="none">
                         {severityPieData.map((s) => (
                           <Cell key={s.name} fill={s.color} />
@@ -808,8 +819,9 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
                         allowEscapeViewBox={{ x: true, y: true }}
                         wrapperStyle={{ zIndex: 10 }}
                       />
-                    </PieChart>
-                  </ResponsiveContainer>
+                      </PieChart>
+                    </ResponsiveContainer>
+                  ) : null}
                   <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
                     <div className="font-mono text-xl font-semibold text-slate-950">{severityPieTotal}</div>
                     <div className="font-mono text-[0.625rem] text-slate-400">INCIDENTS</div>

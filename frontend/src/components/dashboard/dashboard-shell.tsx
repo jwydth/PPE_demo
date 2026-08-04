@@ -1663,7 +1663,7 @@ export function DashboardShell() {
                     data warm and switching back doesn't refetch from scratch. */}
                 {analyticsMounted ? (
                   <div className={activeView === "analytics" ? "grid gap-4" : "hidden"}>
-                    <AnalyticsDashboard embedded />
+                    <AnalyticsDashboard embedded isVisible={activeView === "analytics"} />
                   </div>
                 ) : null}
                 {activeView === "factory3d" ? (
