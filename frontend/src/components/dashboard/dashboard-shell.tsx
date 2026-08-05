@@ -1561,9 +1561,13 @@ function IncidentPanel() {
     currentPage * INCIDENTS_PAGE_SIZE,
   );
 
-  // isFetching (not isPending) so the spinner also shows on the manual
-  // refresh button click below, matching the previous setLoading(true)-on-
-  // every-call behavior.
+  // isFetching (not isPending) so the refresh icon still spins on a manual
+  // refresh click, and on the background refetch React Query fires every
+  // time this panel remounts (switching tabs away and back). That refetch
+  // keeps the previous page's cached data on screen the whole time — so the
+  // big "Loading recent incidents..." message below is deliberately gated
+  // on having no data yet, rather than on `loading` alone, or it would
+  // reappear over already-populated content on every single tab switch.
   const loading = eventsQuery.isFetching || deletingAll;
   const error =
     deleteAllError ||
@@ -1626,11 +1630,11 @@ function IncidentPanel() {
             className="rounded-md border border-slate-200 bg-white p-2 text-xs font-semibold text-slate-700 transition hover:border-slate-300 hover:text-slate-950"
             type="button"
           >
-            <RefreshCw className="size-3.5" aria-hidden="true" />
+            <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} aria-hidden="true" />
           </button>
         </div>
       </div>
-      {loading ? <LoadingState text="Loading recent incidents..." /> : null}
+      {loading && events.length === 0 ? <LoadingState text="Loading recent incidents..." /> : null}
       {error ? <ErrorState text={error} /> : null}
       {!loading && !error && events.length === 0 ? (
         <EmptyState text="No incidents have been recorded yet." />
