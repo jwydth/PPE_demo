@@ -70,6 +70,10 @@ class FeatureService:
             raise ServiceNotFoundError(f"Camera {camera_id} was not found.")
 
         feature = self.feature_repository.get_by_key(feature_key)
+        # Existing databases may still have the pre-migration key. Keep their
+        # camera configuration usable while init_db renames it in-place.
+        if feature is None and feature_key == "behavior_detection":
+            feature = self.feature_repository.get_by_key("fall_detection")
         if feature is None or feature.id is None:
             raise ServiceNotFoundError(f"Feature '{feature_key}' was not found.")
 

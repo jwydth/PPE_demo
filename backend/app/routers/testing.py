@@ -16,6 +16,7 @@ from app.services.reporting import ReportEmailError
 from app.services.reporting.email_sender import SmtpEmailSender
 from app.storage import StorageError
 from app.storage.evidence_storage import EvidenceStorage, get_evidence_storage
+from app.services.stream_health import clear_stream_health, stream_health_snapshot
 
 router = APIRouter(tags=["testing"])
 logger = logging.getLogger(__name__)
@@ -80,3 +81,16 @@ def smtp_health() -> dict[str, str]:
         ) from exc
 
     return {"smtp": "connected", **info}
+
+
+@router.get("/health/streams")
+def streams_health() -> dict[str, object]:
+    streams = stream_health_snapshot()
+    return {"stream_count": len(streams), "streams": streams}
+
+
+@router.delete("/health/streams")
+def reset_streams_health() -> dict[str, str]:
+    """Reset ephemeral performance samples before a controlled benchmark."""
+    clear_stream_health()
+    return {"status": "reset"}

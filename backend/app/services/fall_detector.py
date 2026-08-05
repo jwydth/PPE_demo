@@ -1,8 +1,17 @@
+"""Realtime fall detection backed by the trained pose-behavior classifier.
+
+Unlike the former geometric heuristic, this module uses the same 60-frame
+feature contract and ``best_behavior_model.joblib`` classifier as the PPE
+labeling project.
+"""
+
 from __future__ import annotations
 
 import base64
+import logging
 import tempfile
-from dataclasses import dataclass
+import time
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,810 +22,609 @@ import numpy as np
 from app.core.config import BACKEND_DIR, settings
 from app.schemas.detection import BoundingBox
 from app.schemas.fall_detection import (
-    BehaviorIncidentRead,
-    FallDetectionSummary,
-    FallImagePredictionResponse,
-    FallPoseDetection,
-    FallTimelineItem,
-    FallVideoMetadata,
-    FallVideoPredictionResponse,
+    BehaviorIncidentRead, FallDetectionSummary, FallImagePredictionResponse,
+    FallPoseDetection, FallTimelineItem, FallVideoMetadata, FallVideoPredictionResponse,
 )
-from app.services.behavior_incident_service import (
-    BehaviorIncidentService,
-    open_behavior_incident_service,
-)
+from app.services.behavior_features import extract_window_features, feature_columns
+from app.models.behavior_incident import BehaviorIncidentSeverity, BehaviorType
+from app.services.behavior_incident_service import BehaviorIncidentService, open_behavior_incident_service
 from app.services.ppe.device import _select_inference_device
 
+logger = logging.getLogger(__name__)
 
-KEYPOINT_NAMES = [
-    "nose", "left_eye", "right_eye", "left_ear", "right_ear",
-    "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
-    "left_wrist", "right_wrist", "left_hip", "right_hip",
-    "left_knee", "right_knee", "left_ankle", "right_ankle",
-]
-KPT = {name: index for index, name in enumerate(KEYPOINT_NAMES)}
-SKELETON = [
-    ("left_shoulder", "right_shoulder"), ("left_shoulder", "left_hip"), ("right_shoulder", "right_hip"),
-    ("left_hip", "right_hip"), ("left_shoulder", "left_elbow"), ("left_elbow", "left_wrist"),
-    ("right_shoulder", "right_elbow"), ("right_elbow", "right_wrist"), ("left_hip", "left_knee"),
-    ("left_knee", "left_ankle"), ("right_hip", "right_knee"), ("right_knee", "right_ankle"),
-]
-COLORS = {
-    "normal": (70, 122, 20),
-    "fall_risk": (0, 165, 255),
-    "fall": (24, 35, 180),
-}
+
+COLORS = {"others": (70, 122, 20), "running": (255, 165, 0), "falling": (24, 35, 180)}
+SKELETON = ((5, 6), (5, 11), (6, 12), (11, 12), (5, 7), (7, 9), (6, 8), (8, 10), (11, 13), (13, 15), (12, 14), (14, 16))
 
 
 class FallModelUnavailable(RuntimeError):
-    """Raised when fall detection weights are unavailable."""
+    """Raised when a required pose, ReID, or behavior-model asset is missing."""
 
 
-@dataclass
-class TrackState:
-    track_id: int
-    bbox: np.ndarray
-    center_y: float
-    last_frame_index: int
-    abnormal_seconds: float = 0.0
-    missed_frames: int = 0
+class PortableBehaviorClassifier:
+    """Small compatibility adapter around XGBoost's stable Booster format."""
 
+    def __init__(self, model_path: Path, *, threads: int) -> None:
+        import xgboost as xgb
 
-@dataclass(frozen=True)
-class FallDetectorConfig:
-    person_confidence: float
-    risk_threshold: float
-    fall_threshold: float
-    persistence_seconds: float
-    max_frames: int
-    frame_stride: int
-    image_size: int = 640
-    iou_threshold: float = 0.20
-    max_missed_frames: int = 12
+        self._xgb = xgb
+        self.booster = xgb.Booster()
+        self.booster.load_model(model_path)
+        self.booster.set_param({"device": "cpu", "nthread": threads})
+
+    def predict_proba(self, values: np.ndarray) -> np.ndarray:
+        matrix = self._xgb.DMatrix(np.asarray(values, dtype=np.float32))
+        probabilities = np.asarray(self.booster.predict(matrix), dtype=np.float32)
+        if probabilities.ndim == 1:
+            probabilities = probabilities.reshape(len(values), -1)
+        return probabilities
 
 
 class FallDetector:
     def __init__(self) -> None:
-        self.model = None
+        self.model: Any | None = None
+        self.behavior_model: Any | None = None
         self.device = _select_inference_device(settings.INFERENCE_DEVICE)
         self.model_path = _resolve_backend_path(settings.FALL_MODEL_PATH)
-        self.config = FallDetectorConfig(
-            person_confidence=settings.FALL_PERSON_CONFIDENCE,
-            risk_threshold=settings.FALL_RISK_THRESHOLD,
-            fall_threshold=settings.FALL_THRESHOLD,
-            persistence_seconds=settings.FALL_PERSISTENCE_SECONDS,
-            max_frames=settings.FALL_MAX_FRAMES,
-            frame_stride=max(1, settings.FALL_FRAME_STRIDE),
+        self.behavior_model_path = _resolve_backend_path(settings.FALL_BEHAVIOR_MODEL_PATH)
+        self.portable_behavior_model_path = _resolve_backend_path(
+            settings.FALL_BEHAVIOR_PORTABLE_MODEL_PATH
         )
+        self.reid_model_path = _resolve_backend_path(settings.FALL_REID_MODEL_PATH)
+        self.tracker_path = BACKEND_DIR / "app" / "inference" / "botsort_dedicated_reid.yaml"
+        self.window_size = settings.FALL_BEHAVIOR_WINDOW_FRAMES
+        self.window_stride = settings.FALL_BEHAVIOR_WINDOW_STRIDE
 
     def create_live_session(self, *, fps: float, frame_stride: int | None = None) -> "FallLiveSession":
-        return FallLiveSession(
-            detector=self,
-            fps=fps,
-            frame_stride=max(1, frame_stride or settings.FALL_LIVE_FRAME_STRIDE),
-        )
+        # The behavior model was trained at 24 FPS.  The caller should use a
+        # stride of 1; accepting the parameter preserves the existing API.
+        return FallLiveSession(self, fps=max(float(fps), 1.0), frame_stride=max(1, frame_stride or 1))
 
-    def predict_image(
-        self,
-        input_path: Path,
-        *,
-        source_name: str | None,
-    ) -> FallImagePredictionResponse:
-        model = self._ensure_model()
+    def predict_image(self, input_path: Path, *, source_name: str | None) -> FallImagePredictionResponse:
         image = cv2.imread(str(input_path))
         if image is None:
             raise ValueError(f"Could not decode image: {input_path}")
-
-        result = model.predict(
-            source=image,
-            conf=self.config.person_confidence,
-            imgsz=self.config.image_size,
-            device=self.device,
-            verbose=False,
-        )[0]
-        detections = extract_pose_detections(result, self.config.person_confidence)
-        tracker = SimplePoseTracker(
-            fps=24.0,
-            iou_threshold=self.config.iou_threshold,
-            max_missed_frames=self.config.max_missed_frames,
-            config=self.config,
-        )
-        detections = tracker.update(detections, 0)
-        scored = [
-            tracker.score_and_commit(
-                detection,
-                image.shape,
-                0,
-                still_image=True,
-            )
-            for detection in detections
-        ]
-        annotated = image.copy()
-        for detection in scored:
-            draw_detection(annotated, detection)
-
-        payloads = [detection_payload(item) for item in scored]
-        incidents = self._persist_confirmed_detections(
-            detections=scored,
-            frame=annotated,
-            source_name=source_name,
-            frame_index=0,
-            timestamp=datetime.now(timezone.utc),
-            incident_service=None,
-        )
-        by_track = {incident.track_id: incident.id for incident in incidents}
-        pose_detections = [_to_pose_schema(item, by_track.get(item["track_id"])) for item in payloads]
-        return FallImagePredictionResponse(
-            media_type="image",
-            device=self.device,
-            model_name=settings.FALL_MODEL_NAME,
-            model_version=settings.FALL_MODEL_VERSION,
-            summary=_summary_schema(payloads, [incident.id for incident in incidents]),
-            detections=pose_detections,
-            annotated_image=encode_jpeg(annotated),
-            incidents=incidents,
-        )
-
-    def predict_video(
-        self,
-        input_path: Path,
-        *,
-        source_name: str | None,
-    ) -> FallVideoPredictionResponse:
         model = self._ensure_model()
+        result = model.predict(source=image, conf=settings.FALL_PERSON_CONFIDENCE, imgsz=settings.BEHAVIOR_POSE_IMGSZ, device=self.device, verbose=False)[0]
+        detections = _pose_detections(result, fallback_track_ids=True)
+        # A single image is intentionally not classified: behavior.joblib needs
+        # a full 60-frame motion window.  Do not invent a temporary class.
+        payloads: list[dict[str, Any]] = []
+        return FallImagePredictionResponse(
+            media_type="image", device=self.device, model_name=settings.FALL_MODEL_NAME,
+            model_version=settings.FALL_MODEL_VERSION, summary=_summary(payloads, []),
+            detections=[_schema(item) for item in payloads], annotated_image=encode_jpeg(image), incidents=[],
+        )
+
+    def predict_video(self, input_path: Path, *, source_name: str | None) -> FallVideoPredictionResponse:
         cap = cv2.VideoCapture(str(input_path))
         if not cap.isOpened():
             raise ValueError(f"Could not decode video: {input_path}")
-
-        source_fps = float(cap.get(cv2.CAP_PROP_FPS) or 24.0)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-        stride = self.config.frame_stride
-        tracker = SimplePoseTracker(
-            fps=source_fps / max(stride, 1),
-            iou_threshold=self.config.iou_threshold,
-            max_missed_frames=self.config.max_missed_frames,
-            config=self.config,
-        )
-
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 24.0)
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        width, height = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        session = self.create_live_session(fps=fps, frame_stride=1)
         timeline: list[FallTimelineItem] = []
-        all_payloads: list[dict[str, Any]] = []
+        all_detections: list[dict[str, Any]] = []
         incidents: list[BehaviorIncidentRead] = []
-        active_fall_tracks: set[int] = set()
-        incident_by_track: dict[int, int] = {}
-        processed = 0
         frame_index = 0
-
-        while processed < self.config.max_frames:
+        while frame_index < settings.FALL_MAX_FRAMES:
             ok, frame = cap.read()
             if not ok or frame is None:
                 break
-
-            if frame_index % stride == 0:
-                result = model.predict(
-                    source=frame,
-                    conf=self.config.person_confidence,
-                    imgsz=self.config.image_size,
-                    device=self.device,
-                    verbose=False,
-                )[0]
-                detections = extract_pose_detections(result, self.config.person_confidence)
-                detections = tracker.update(detections, processed)
-                scored = [
-                    tracker.score_and_commit(detection, frame.shape, processed)
-                    for detection in detections
-                ]
-                annotated = frame.copy()
-                for detection in scored:
-                    draw_detection(annotated, detection)
-
-                payloads = [detection_payload(item) for item in scored]
-                current_tracks = {item["track_id"] for item in payloads}
-                active_fall_tracks.intersection_update(set(tracker.tracks))
-                active_fall_tracks.intersection_update(current_tracks)
-                timestamp = datetime.now(timezone.utc)
-                for detection, payload in zip(scored, payloads):
-                    track_id = int(payload["track_id"])
-                    if payload["status"] == "fall" and track_id not in active_fall_tracks:
-                        persisted = self._persist_confirmed_detections(
-                            detections=[detection],
-                            frame=annotated,
-                            source_name=source_name,
-                            frame_index=frame_index,
-                            timestamp=timestamp,
-                            incident_service=None,
-                        )
-                        if persisted:
-                            incidents.extend(persisted)
-                            incident_by_track[track_id] = persisted[0].id
-                        active_fall_tracks.add(track_id)
-                    elif payload["status"] == "normal":
-                        active_fall_tracks.discard(track_id)
-
-                summary = summarize(payloads)
-                all_payloads.extend(payloads)
-                timeline.append(
-                    FallTimelineItem(
-                        frame_index=frame_index,
-                        time_sec=frame_index / source_fps if source_fps > 0 else 0.0,
-                        status=summary["status"],
-                        top_label=summary["top_label"],
-                        top_confidence=summary["top_confidence"],
-                        detections=[
-                            _to_pose_schema(item, incident_by_track.get(int(item["track_id"])))
-                            for item in payloads
-                        ],
-                    )
-                )
-                processed += 1
-
+            if not session.accept_source_frame(frame_index / fps):
+                frame_index += 1
+                continue
+            output = session.process_frame(frame, frame_index=frame_index, source_name=source_name)
+            detections = output["detections"]
+            all_detections.extend(detections)
+            incidents.extend(BehaviorIncidentRead.model_validate(value) for value in output["incidents"])
+            summary = output["summary"]
+            timeline.append(FallTimelineItem(frame_index=frame_index, time_sec=frame_index / fps, status=summary["status"], top_label=summary["top_label"], top_confidence=summary["top_confidence"], detections=[FallPoseDetection.model_validate(item) for item in detections]))
             frame_index += 1
-
         cap.release()
         return FallVideoPredictionResponse(
-            media_type="video",
-            device=self.device,
-            model_name=settings.FALL_MODEL_NAME,
-            model_version=settings.FALL_MODEL_VERSION,
-            summary=_summary_schema(all_payloads, [incident.id for incident in incidents]),
-            video=FallVideoMetadata(
-                source_fps=source_fps,
-                sample_stride=stride,
-                total_frames=total_frames,
-                processed_frames=processed,
-                frame_width=width,
-                frame_height=height,
-            ),
-            timeline=timeline,
-            incidents=incidents,
+            media_type="video", device=self.device, model_name=settings.FALL_MODEL_NAME, model_version=settings.FALL_MODEL_VERSION,
+            summary=_summary(all_detections, [item.id for item in incidents]),
+            video=FallVideoMetadata(source_fps=fps, sample_stride=1, total_frames=total, processed_frames=len(timeline), frame_width=width, frame_height=height),
+            timeline=timeline, incidents=incidents,
         )
 
-    def _persist_confirmed_detections(
-        self,
-        *,
-        detections: list[dict[str, Any]],
-        frame: np.ndarray,
-        source_name: str | None,
-        frame_index: int,
-        timestamp: datetime,
-        incident_service: BehaviorIncidentService | None,
-    ) -> list[BehaviorIncidentRead]:
-        confirmed = [
-            detection
-            for detection in detections
-            if detection.get("fall", {}).get("status") == "fall"
-        ]
-        if not confirmed:
-            return []
-
-        if incident_service is None:
-            with open_behavior_incident_service() as service:
-                return self._persist_confirmed_detections(
-                    detections=confirmed,
-                    frame=frame,
-                    source_name=source_name,
-                    frame_index=frame_index,
-                    timestamp=timestamp,
-                    incident_service=service,
-                )
-
-        incidents: list[BehaviorIncidentRead] = []
-        for detection in confirmed:
-            local_snapshot = _write_temp_snapshot(frame)
-            payload = detection_payload(detection)
-            bbox = payload["bbox"]
-            track_id = int(payload["track_id"])
-            details = f"Track {track_id} fall detected at frame {frame_index}"
-            bundle = incident_service.persist_fall_incident(
-                timestamp=timestamp,
-                details=details,
-                local_snapshot_path=local_snapshot,
-                video_name=source_name,
-                frame_start=frame_index,
-                frame_end=frame_index,
-                track_id=track_id,
-                person_index=track_id,
-                bounding_box={"x1": bbox[0], "y1": bbox[1], "x2": bbox[2], "y2": bbox[3]},
-                confidence=float(payload["score"]),
-                keypoints=_keypoints_payload(detection["keypoints"]),
-                features=payload["features"],
-                metadata={
-                    "model_name": settings.FALL_MODEL_NAME,
-                    "model_version": settings.FALL_MODEL_VERSION,
-                    "person_confidence": payload["person_confidence"],
-                    "fall_status": payload["status"],
-                },
-            )
-            incidents.append(bundle.incident)
-        return incidents
-
-    def _ensure_model(self):
+    def _ensure_model(self) -> Any:
         if self.model is not None:
             return self.model
-        if not self.model_path.exists():
-            raise FallModelUnavailable(
-                f"Fall detection model is unavailable: weights not found at {self.model_path}"
-            )
+        for path, label in ((self.model_path, "pose weights"), (self.reid_model_path, "ReID weights"), (self.tracker_path, "BoT-SORT configuration")):
+            if not path.is_file():
+                raise FallModelUnavailable(f"Fall detection model is unavailable: {label} not found at {path}")
         try:
             from ultralytics import YOLO
         except Exception as exc:
-            raise FallModelUnavailable(
-                "Fall detection model is unavailable: ultralytics could not be imported."
-            ) from exc
+            raise FallModelUnavailable("Fall detection model is unavailable: ultralytics could not be imported.") from exc
         self.model = YOLO(str(self.model_path))
         return self.model
 
+    def _ensure_behavior_model(self) -> Any:
+        if self.behavior_model is not None:
+            return self.behavior_model
+        # The configured joblib classifier is the primary artifact. Do not
+        # let a leftover legacy UBJ file silently override it.
+        if self.behavior_model_path.is_file():
+            try:
+                import joblib
+
+                model = joblib.load(self.behavior_model_path)
+                if not hasattr(model, "predict_proba"):
+                    raise TypeError("model does not expose predict_proba")
+                # ExtraTrees uses n_jobs; legacy sklearn-wrapped XGBoost also
+                # supports this attribute. Keep a single CPU inference thread
+                # per live behavior worker for predictable latency.
+                if hasattr(model, "n_jobs"):
+                    model.n_jobs = settings.BEHAVIOR_XGBOOST_THREADS
+                get_booster = getattr(model, "get_booster", None)
+                if callable(get_booster):
+                    get_booster().set_param(
+                        {"device": "cpu", "nthread": settings.BEHAVIOR_XGBOOST_THREADS}
+                    )
+                self.behavior_model = model
+                logger.info(
+                    "Behavior classifier loaded from %s (%s)",
+                    self.behavior_model_path,
+                    type(model).__name__,
+                )
+                return self.behavior_model
+            except Exception as exc:
+                raise FallModelUnavailable(
+                    "Fall detection model is unavailable: configured behavior "
+                    f"classifier could not be loaded from {self.behavior_model_path}. "
+                    "Install its runtime dependencies (scikit-learn for the "
+                    "current ExtraTrees model)."
+                ) from exc
+
+        # Retain the portable XGBoost artifact solely as a fallback when the
+        # configured primary file is absent.
+        if self.portable_behavior_model_path.is_file():
+            try:
+                self.behavior_model = PortableBehaviorClassifier(
+                    self.portable_behavior_model_path,
+                    threads=settings.BEHAVIOR_XGBOOST_THREADS,
+                )
+                logger.info(
+                    "Primary behavior classifier missing; using portable fallback %s on CPU with %s thread(s)",
+                    self.portable_behavior_model_path,
+                    settings.BEHAVIOR_XGBOOST_THREADS,
+                )
+                return self.behavior_model
+            except Exception as exc:
+                raise FallModelUnavailable(
+                    "Fall detection model is unavailable: portable behavior "
+                    f"weights could not be loaded from {self.portable_behavior_model_path}."
+                ) from exc
+        raise FallModelUnavailable(
+            "Fall detection model is unavailable: behavior weights not found at "
+            f"{self.behavior_model_path} or {self.portable_behavior_model_path}"
+        )
+
+    def classify(self, frames: list[dict[str, Any] | None]) -> dict[str, Any] | None:
+        if len(frames) < self.window_size:
+            return None
+        feature_started = time.perf_counter()
+        feature = extract_window_features(frames[-self.window_size:])
+        feature_ms = (time.perf_counter() - feature_started) * 1000.0
+        if feature["quality"]["status"] != "good":
+            return None
+        raw = feature["raw"]
+        columns = [name for name in feature_columns() if name not in {"track_gap_count", "valid_frame_ratio"}]
+        values: list[float] = []
+        square_root = {"ground_speed_mean", "ground_speed_max", "combined_speed_mean", "combined_speed_std", "body_acceleration_max"}
+        double_log = {"skeleton_spread_ratio_max", "skeleton_spread_ratio_mean"}
+        for name in columns:
+            value = float(raw[name])
+            # Training clamps the aggregate hip-ankle feature and its 15
+            # sampled values to this physical range before fitting.
+            if name == "hip_ankle_vertical_diff_mean" or name.startswith("step_hip_ankle_"):
+                value = min(1.0, max(0.0, value))
+            if name in square_root:
+                value = float(np.sqrt(max(0.0, value)))
+            elif name in double_log:
+                value = float(np.log1p(np.log1p(max(0.0, value))))
+            values.append(value)
+        classifier_started = time.perf_counter()
+        probabilities = np.asarray(self._ensure_behavior_model().predict_proba(np.asarray([values], dtype=np.float32)), dtype=np.float32)[0]
+        classifier_ms = (time.perf_counter() - classifier_started) * 1000.0
+        if len(probabilities) != 3:
+            raise FallModelUnavailable("Fall detection model is unavailable: behavior model must return others/running/falling probabilities.")
+        others, running, falling = (float(value) for value in probabilities)
+        label, confidence = max((("others", others), ("running", running), ("falling", falling)), key=lambda item: item[1])
+        return {
+            "status": label,
+            "score": confidence,
+            "features": {
+                **{key: float(value) for key, value in raw.items()},
+                "others_probability": others,
+                "running_probability": running,
+                "falling_probability": falling,
+                "behavior_confidence": confidence,
+                "window_ready": 1.0,
+            },
+            "behavior_label": label,
+            "runtime_timings": {
+                "feature_extraction_ms": feature_ms,
+                "behavior_classifier_ms": classifier_ms,
+            },
+        }
+
+    def persist(self, detection: dict[str, Any], frame: np.ndarray, source_name: str | None, frame_index: int) -> BehaviorIncidentRead:
+        snapshot = _write_temp_snapshot(frame)
+        payload = _payload(detection)
+        label = str(detection["status"])
+        behavior_type = BehaviorType.RUNNING_DETECTED if label == "running" else BehaviorType.FALL_DETECTED
+        severity = BehaviorIncidentSeverity.MEDIUM if label == "running" else BehaviorIncidentSeverity.HIGH
+        with open_behavior_incident_service() as service:
+            return service.persist_behavior_incident(behavior_type=behavior_type, severity=severity, timestamp=datetime.now(timezone.utc), details=f"Track {payload['track_id']} {label} detected at frame {frame_index}", local_snapshot_path=snapshot, video_name=source_name, frame_start=frame_index, frame_end=frame_index, track_id=payload["track_id"], person_index=payload["track_id"], bounding_box={key: value for key, value in zip(("x1", "y1", "x2", "y2"), payload["bbox"], strict=True)}, confidence=payload["score"], keypoints=payload["keypoints"], features=payload["features"], metadata={"model_name": settings.FALL_MODEL_NAME, "model_version": settings.FALL_MODEL_VERSION, "behavior_label": detection.get("behavior_label", label)}).incident
+
 
 class FallLiveSession:
-    def __init__(self, *, detector: FallDetector, fps: float, frame_stride: int) -> None:
-        self.detector = detector
-        self.frame_stride = max(1, frame_stride)
-        self.effective_fps = max(float(fps) / self.frame_stride, 1.0)
-        self.tracker = SimplePoseTracker(
-            fps=self.effective_fps,
-            iou_threshold=detector.config.iou_threshold,
-            max_missed_frames=detector.config.max_missed_frames,
-            config=detector.config,
-        )
-        self.active_fall_tracks: set[int] = set()
-        self.last_persisted_at_by_track: dict[int, float] = {}
+    def __init__(self, detector: FallDetector, *, fps: float, frame_stride: int) -> None:
+        self.detector, self.fps, self.frame_stride = detector, fps, frame_stride
+        self.canonical_fps = max(1, settings.FALL_BEHAVIOR_CANONICAL_FPS)
+        self.last_canonical_frame = -1
+        self.timestamp_origin: float | None = None
+        self.windows: dict[int, deque[dict[str, Any] | None]] = defaultdict(lambda: deque(maxlen=detector.window_size))
+        self.probability_history: dict[int, deque[dict[str, float]]] = defaultdict(lambda: deque(maxlen=3))
+        self.last_prediction: dict[int, dict[str, Any]] = {}
+        self.active_behaviors: dict[int, str] = {}
+        self.last_incident_at: dict[tuple[int, str], float] = {}
+        self.missing_samples_by_track: dict[int, int] = defaultdict(int)
         self.incident_by_track: dict[int, int] = {}
-        self.last_fall_summary: dict[str, Any] | None = None
-        self.last_fall_detections: list[dict[str, Any]] = []
-        self.last_fall_frame_index: int | None = None
+        self.sample_index = 0
+        self.last_summary: dict[str, Any] | None = None
+        self.last_detections: list[dict[str, Any]] = []
+        self.last_frame_index: int | None = None
+        self.last_feature_ms = 0.0
+        self.last_classifier_ms = 0.0
+        self.last_pose_repaired_samples = 0
+
+    def mark_discontinuity(
+        self,
+        *,
+        frame_index: int,
+        timestamp_seconds: float,
+        dropped_frames: int,
+    ) -> None:
+        """Invalidate temporal state after a source/queue frame gap.
+
+        A 60-sample classifier window must never bridge an unknown interval.
+        Incident cooldown timestamps are intentionally retained to avoid a
+        reconnect/gap creating duplicate persisted incidents.
+        """
+        self.windows.clear()
+        self.probability_history.clear()
+        self.last_prediction.clear()
+        self.active_behaviors.clear()
+        self.missing_samples_by_track.clear()
+        self.incident_by_track.clear()
+        self.last_summary = None
+        self.last_detections = []
+        self.last_frame_index = None
+        self.last_feature_ms = 0.0
+        self.last_classifier_ms = 0.0
+        self.last_pose_repaired_samples = 0
+        self.timestamp_origin = timestamp_seconds
+        self.last_canonical_frame = -1
         self.sample_index = 0
 
-    def process_frame(
+    def accept_source_frame(self, timestamp_seconds: float) -> bool:
+        """Select frames by capture time onto the model's fixed 24-FPS timeline.
+
+        The behavior model was trained on canonical 24-FPS videos. RTSP feeds
+        commonly deliver 25 or 30 FPS (and may drop frames under load), so
+        passing every source frame makes all motion-speed features incorrect.
+        Gaps are inserted as missing samples so the model never mistakes a
+        dropped-frame gap for slow motion.
+        """
+        if self.timestamp_origin is None:
+            self.timestamp_origin = timestamp_seconds
+        canonical_index = int((timestamp_seconds - self.timestamp_origin) * self.canonical_fps)
+        if canonical_index <= self.last_canonical_frame:
+            return False
+        for _ in range(canonical_index - self.last_canonical_frame - 1):
+            self._append_missing_sample()
+        self.last_canonical_frame = canonical_index
+        return True
+
+    def _append_missing_sample(self) -> None:
+        for track_id, window in self.windows.items():
+            window.append(None)
+            self.missing_samples_by_track[track_id] += 1
+        self._prune_lost_tracks()
+        self.sample_index += 1
+
+    def _prune_lost_tracks(self) -> None:
+        expired = [
+            track_id
+            for track_id, missing in self.missing_samples_by_track.items()
+            if missing > settings.FALL_TRACK_MAX_MISSING_SAMPLES
+        ]
+        for track_id in expired:
+            self.windows.pop(track_id, None)
+            self.probability_history.pop(track_id, None)
+            self.last_prediction.pop(track_id, None)
+            self.missing_samples_by_track.pop(track_id, None)
+            self.active_behaviors.pop(track_id, None)
+            self.incident_by_track.pop(track_id, None)
+
+    def process_frame(self, frame: np.ndarray, *, frame_index: int, source_name: str | None, timestamp_seconds: float | None = None) -> dict[str, Any]:
+        model = self.detector._ensure_model()
+        # Ultralytics maintains the BoT-SORT/ReID state across calls when
+        # persist=True, giving a stable window per worker.
+        result = model.track(source=frame, persist=True, tracker=str(self.detector.tracker_path), conf=settings.FALL_PERSON_CONFIDENCE, imgsz=settings.BEHAVIOR_POSE_IMGSZ, device=self.detector.device, half=str(self.detector.device).startswith("cuda"), verbose=False)[0]
+        return self.process_pose_result(
+            result,
+            frame=frame,
+            frame_index=frame_index,
+            source_name=source_name,
+            timestamp_seconds=timestamp_seconds,
+        )
+
+    def process_pose_result(
         self,
-        frame: np.ndarray,
+        result: Any,
         *,
+        frame: np.ndarray,
         frame_index: int,
         source_name: str | None,
+        timestamp_seconds: float | None = None,
     ) -> dict[str, Any]:
-        model = self.detector._ensure_model()
-        result = model.predict(
-            source=frame,
-            conf=self.detector.config.person_confidence,
-            imgsz=self.detector.config.image_size,
-            device=self.detector.device,
-            verbose=False,
-        )[0]
-        detections = extract_pose_detections(result, self.detector.config.person_confidence)
-        detections = self.tracker.update(detections, self.sample_index)
-        scored = [
-            self.tracker.score_and_commit(detection, frame.shape, self.sample_index)
-            for detection in detections
-        ]
-        payloads = [detection_payload(item) for item in scored]
-        current_tracks = {int(item["track_id"]) for item in payloads}
-        self.active_fall_tracks.intersection_update(set(self.tracker.tracks))
-        self.active_fall_tracks.intersection_update(current_tracks)
-
-        persisted: list[BehaviorIncidentRead] = []
-        timestamp = datetime.now(timezone.utc)
-        time_seconds = self.sample_index / self.effective_fps
-        annotated = frame.copy()
-        for detection in scored:
-            draw_detection(annotated, detection)
-
-        for detection, payload in zip(scored, payloads):
-            track_id = int(payload["track_id"])
-            if payload["status"] == "normal":
-                self.active_fall_tracks.discard(track_id)
-                continue
-            if payload["status"] != "fall":
-                continue
-            if track_id in self.active_fall_tracks:
-                continue
-            last_persisted = self.last_persisted_at_by_track.get(track_id)
-            if (
-                last_persisted is not None
-                and time_seconds - last_persisted < settings.FALL_INCIDENT_COOLDOWN_SECONDS
-            ):
-                self.active_fall_tracks.add(track_id)
-                continue
-
-            incidents = self.detector._persist_confirmed_detections(
-                detections=[detection],
-                frame=annotated,
-                source_name=source_name,
-                frame_index=frame_index,
-                timestamp=timestamp,
-                incident_service=None,
+        """Consume an already-tracked YOLO-Pose result without re-running pose."""
+        # Report classifier work performed for this frame only. Reusing the
+        # previous non-zero value made rolling health samples misleading.
+        self.last_feature_ms = 0.0
+        self.last_classifier_ms = 0.0
+        self.last_pose_repaired_samples = 0
+        detections = _pose_detections(result)
+        for track_id, window in self.windows.items():
+            window.append(None)
+            self.missing_samples_by_track[track_id] += 1
+        for detection in detections:
+            track_id = int(detection["track_id"])
+            window = self.windows[track_id]
+            if window:
+                window[-1] = detection["frame"]
+            else:
+                window.append(detection["frame"])
+            self.last_pose_repaired_samples += self._repair_trailing_pose_gap(
+                window,
+                detection["frame"],
             )
-            if incidents:
-                persisted.extend(incidents)
-                self.incident_by_track[track_id] = incidents[0].id
-                self.last_persisted_at_by_track[track_id] = time_seconds
-            self.active_fall_tracks.add(track_id)
-
-        self.sample_index += 1
-        incident_ids = [incident.id for incident in persisted]
-        summary = _summary_schema(payloads, incident_ids).model_dump()
-        summary["source_frame_index"] = frame_index
-        detections_payload = [
-            {
-                **_to_pose_schema(
-                    item,
-                    self.incident_by_track.get(int(item["track_id"])),
-                ).model_dump(),
-                "source_frame_index": frame_index,
-            }
-            for item in payloads
+            self.missing_samples_by_track[track_id] = 0
+            # Match the labeling pipeline's 12-frame window stride and its
+            # three-window probability smoothing. Between window boundaries,
+            # keep the last model result for that worker.
+            # As in the batch labeling pipeline, incomplete 60-sample
+            # windows are not a behavior prediction and are omitted entirely.
+            if len(window) < self.detector.window_size:
+                continue
+            classification_ran = False
+            if track_id not in self.last_prediction or self.sample_index % self.detector.window_stride == 0:
+                prediction = self.detector.classify(list(window))
+                classification_ran = prediction is not None
+                if prediction is None:
+                    self.last_prediction.pop(track_id, None)
+                    continue
+                history = self.probability_history[track_id]
+                history.append({name: float(prediction["features"][f"{name}_probability"]) for name in ("others", "running", "falling")})
+                averaged = {name: sum(item[name] for item in history) / len(history) for name in history[0]}
+                label, confidence = max(averaged.items(), key=lambda item: item[1])
+                prediction["features"].update({f"{name}_probability": value for name, value in averaged.items()})
+                prediction["behavior_label"] = label
+                prediction["score"] = confidence
+                prediction["status"] = label
+                self.last_prediction[track_id] = prediction
+            else:
+                prediction = self.last_prediction[track_id]
+            if classification_ran:
+                timings = prediction.get("runtime_timings", {})
+                self.last_feature_ms = max(
+                    self.last_feature_ms,
+                    float(timings.get("feature_extraction_ms", 0.0)),
+                )
+                self.last_classifier_ms = max(
+                    self.last_classifier_ms,
+                    float(timings.get("behavior_classifier_ms", 0.0)),
+                )
+            detection.update(prediction)
+            draw_detection(frame, detection)
+        current_tracks = {int(item["track_id"]) for item in detections}
+        self.active_behaviors = {
+            track_id: label for track_id, label in self.active_behaviors.items()
+            if track_id in current_tracks
+        }
+        persisted: list[BehaviorIncidentRead] = []
+        for detection in detections:
+            track_id = int(detection["track_id"])
+            if "status" not in detection:
+                continue
+            label = str(detection["status"])
+            is_confirmed_behavior = label in {"running", "falling"} and detection["score"] >= settings.FALL_BEHAVIOR_MIN_CONFIDENCE
+            timestamp = timestamp_seconds if timestamp_seconds is not None else frame_index / self.fps
+            if is_confirmed_behavior and self.active_behaviors.get(track_id) != label:
+                incident_key = (track_id, label)
+                last_incident_at = self.last_incident_at.get(incident_key)
+                if last_incident_at is None or timestamp - last_incident_at >= settings.FALL_INCIDENT_COOLDOWN_SECONDS:
+                    incident = self.detector.persist(detection, frame, source_name, frame_index)
+                    persisted.append(incident)
+                    self.incident_by_track[track_id] = incident.id
+                    self.last_incident_at[incident_key] = timestamp
+                self.active_behaviors[track_id] = label
+            elif not is_confirmed_behavior:
+                self.active_behaviors.pop(track_id, None)
+        payloads = [
+            _payload(item, self.incident_by_track.get(int(item["track_id"])))
+            for item in detections
+            if "status" in item
         ]
-        self.last_fall_summary = summary
-        self.last_fall_detections = detections_payload
-        self.last_fall_frame_index = frame_index
+        self._prune_lost_tracks()
+        # The WebSocket/UI contract uses a BoundingBox object, while the
+        # internal inference and persistence code deliberately uses a compact
+        # four-value list. Serialize at this boundary only.
+        # The classifier needs a 60-frame window before it can assign a real
+        # label.  Keep emitting pose boxes during that warm-up period so the
+        # UI can render ``Behavior: Unknown`` rather than showing no box.
+        live_payloads = []
+        for item in detections:
+            if "status" in item:
+                payload = _payload(item, self.incident_by_track.get(int(item["track_id"])))
+            else:
+                payload = {
+                    "track_id": int(item["track_id"]),
+                    "status": "unknown",
+                    "score": 0.0,
+                    "person_confidence": float(item["person_confidence"]),
+                    "bbox": [float(value) for value in item["bbox"]],
+                    "features": {},
+                    "keypoints": item["keypoints"],
+                }
+            live_payloads.append(_schema(payload).model_dump())
+        self.sample_index += 1
+        self.last_summary, self.last_detections, self.last_frame_index = _summary(payloads, [item.id for item in persisted]).model_dump(), live_payloads, frame_index
+        return {"summary": self.last_summary, "detections": live_payloads, "incidents": [item.model_dump() for item in persisted], "frame_index": frame_index}
 
-        payload = self.payload_for_frame(
-            frame_index,
-            max_age_frames=max(1, settings.FALL_LIVE_FRAME_STRIDE * 2),
-        )
-        payload["incidents"] = [incident.model_dump() for incident in persisted]
-        return payload
+    def _repair_trailing_pose_gap(
+        self,
+        window: deque[dict[str, Any] | None],
+        current: dict[str, Any],
+    ) -> int:
+        """Interpolate a short same-track gap after its closing endpoint arrives."""
+        samples = list(window)
+        right = len(samples) - 1
+        left = right - 1
+        while left >= 0 and samples[left] is None:
+            left -= 1
+        gap = right - left - 1
+        if gap == 0 or gap > settings.BEHAVIOR_POSE_REPAIR_MAX_GAP or left < 0:
+            return 0
+
+        previous = samples[left]
+        if previous is None or not _pose_repair_is_safe(previous, current):
+            return 0
+        for offset in range(1, gap + 1):
+            alpha = offset / (gap + 1)
+            samples[left + offset] = _interpolate_pose_frame(previous, current, alpha)
+        window.clear()
+        window.extend(samples)
+        return gap
 
     def payload_for_frame(self, frame_index: int, *, max_age_frames: int) -> dict[str, Any]:
-        if self.last_fall_frame_index is None or self.last_fall_summary is None:
-            return {
-                "summary": None,
-                "detections": [],
-                "incidents": [],
-                "frame_index": frame_index,
-            }
-
-        age_frames = max(0, frame_index - self.last_fall_frame_index)
-        is_stale = age_frames > max_age_frames
-        summary = {
-            **self.last_fall_summary,
-            "frame_index": frame_index,
-            "age_frames": age_frames,
-            "is_stale": is_stale,
-            "is_interpolated": age_frames > 0 and not is_stale,
-        }
-        return {
-            "summary": summary,
-            "detections": [] if is_stale else [
-                {
-                    **detection,
-                    "frame_index": frame_index,
-                    "age_frames": age_frames,
-                    "is_stale": False,
-                    "is_interpolated": age_frames > 0,
-                }
-                for detection in self.last_fall_detections
-            ],
-            "incidents": [],
-            "frame_index": frame_index,
-        }
+        if self.last_summary is None or self.last_frame_index is None:
+            return {"summary": None, "detections": [], "incidents": [], "frame_index": frame_index}
+        age = frame_index - self.last_frame_index
+        return {"summary": {**self.last_summary, "frame_index": frame_index, "age_frames": age, "is_stale": age > max_age_frames, "is_interpolated": age > 0}, "detections": self.last_detections if age <= max_age_frames else [], "incidents": [], "frame_index": frame_index}
 
 
-class SimplePoseTracker:
-    def __init__(
-        self,
-        *,
-        fps: float,
-        iou_threshold: float,
-        max_missed_frames: int,
-        config: FallDetectorConfig,
-    ) -> None:
-        self.fps = max(float(fps), 1.0)
-        self.iou_threshold = iou_threshold
-        self.max_missed_frames = max_missed_frames
-        self.config = config
-        self.tracks: dict[int, TrackState] = {}
-        self.next_id = 1
-
-    def update(self, detections: list[dict[str, Any]], frame_index: int) -> list[dict[str, Any]]:
-        assigned_tracks: set[int] = set()
-        assigned_detections: set[int] = set()
-        for det_index, detection in enumerate(detections):
-            best_id = None
-            best_iou = 0.0
-            for track_id, track in self.tracks.items():
-                if track_id in assigned_tracks:
-                    continue
-                iou = box_iou(detection["bbox"], track.bbox)
-                if iou > best_iou:
-                    best_iou = iou
-                    best_id = track_id
-            if best_id is not None and best_iou >= self.iou_threshold:
-                detection["track_id"] = best_id
-                assigned_tracks.add(best_id)
-                assigned_detections.add(det_index)
-
-        for det_index, detection in enumerate(detections):
-            if det_index in assigned_detections:
-                continue
-            track_id = self.next_id
-            self.next_id += 1
-            detection["track_id"] = track_id
-            x1, y1, x2, y2 = detection["bbox"]
-            self.tracks[track_id] = TrackState(
-                track_id,
-                detection["bbox"].copy(),
-                float((y1 + y2) / 2),
-                frame_index,
-            )
-
-        current_ids = {int(detection["track_id"]) for detection in detections}
-        for track_id in list(self.tracks):
-            if track_id not in current_ids:
-                self.tracks[track_id].missed_frames += 1
-                if self.tracks[track_id].missed_frames > self.max_missed_frames:
-                    del self.tracks[track_id]
-        return detections
-
-    def score_and_commit(
-        self,
-        detection: dict[str, Any],
-        frame_shape: tuple[int, int, int],
-        frame_index: int,
-        *,
-        still_image: bool = False,
-    ) -> dict[str, Any]:
-        track = self.tracks[int(detection["track_id"])]
-        x1, y1, x2, y2 = detection["bbox"]
-        center_y = float((y1 + y2) / 2)
-        frame_delta = max(1, frame_index - track.last_frame_index)
-        seconds_delta = frame_delta / self.fps
-        velocity_y_norm = ((center_y - track.center_y) / max(frame_shape[0], 1)) / max(seconds_delta, 1e-6)
-        persistence_seconds = (
-            self.config.persistence_seconds
-            if still_image
-            else track.abnormal_seconds
-        )
-
-        tentative = score_detection(
-            detection,
-            frame_shape,
-            velocity_y_norm,
-            persistence_seconds,
-            self.config,
-        )
-        is_abnormal = tentative["score"] >= self.config.risk_threshold
-        if still_image and is_abnormal:
-            track.abnormal_seconds = self.config.persistence_seconds
-        elif is_abnormal:
-            track.abnormal_seconds += seconds_delta
-        else:
-            track.abnormal_seconds = max(0.0, track.abnormal_seconds - seconds_delta)
-        scored = score_detection(
-            detection,
-            frame_shape,
-            velocity_y_norm,
-            track.abnormal_seconds,
-            self.config,
-        )
-
-        track.bbox = detection["bbox"].copy()
-        track.center_y = center_y
-        track.last_frame_index = frame_index
-        track.missed_frames = 0
-        detection["fall"] = scored
-        return detection
-
-
-def extract_pose_detections(result: Any, person_conf: float) -> list[dict[str, Any]]:
-    detections: list[dict[str, Any]] = []
-    if result.boxes is None or len(result.boxes) == 0:
-        return detections
+def _pose_detections(result: Any, fallback_track_ids: bool = False) -> list[dict[str, Any]]:
+    if result.boxes is None or result.keypoints is None:
+        return []
     boxes = result.boxes.xyxy.detach().cpu().numpy()
     confidences = result.boxes.conf.detach().cpu().numpy()
-    keypoints = None
-    if result.keypoints is not None and result.keypoints.data is not None:
-        keypoints = result.keypoints.data.detach().cpu().numpy()
-    for index, (box, confidence) in enumerate(zip(boxes, confidences)):
-        if float(confidence) < person_conf:
+    ids = result.boxes.id.int().cpu().tolist() if result.boxes.id is not None else list(range(1, len(boxes) + 1))
+    points = result.keypoints.xy.detach().cpu().numpy()
+    scores = result.keypoints.conf.detach().cpu().numpy() if result.keypoints.conf is not None else np.zeros((len(boxes), 17), dtype=np.float32)
+    detections = []
+    for index, (box, confidence, track_id) in enumerate(zip(boxes, confidences, ids, strict=True)):
+        if not fallback_track_ids and result.boxes.id is None:
             continue
-        kpts = (
-            keypoints[index]
-            if keypoints is not None and index < len(keypoints)
-            else np.zeros((17, 3), dtype=np.float32)
-        )
-        detections.append(
-            {
-                "bbox": box.astype(np.float32),
-                "person_confidence": float(confidence),
-                "keypoints": kpts.astype(np.float32),
-                "track_id": None,
-            }
-        )
+        keypoints = [[float(x), float(y), float(score)] for (x, y), score in zip(points[index], scores[index], strict=True)]
+        record = {"bbox": [float(value) for value in box], "keypoints": [[value[0], value[1]] for value in keypoints], "keypoint_scores": [value[2] for value in keypoints], "person_confidence": float(confidence)}
+        detections.append({"track_id": int(track_id), "bbox": record["bbox"], "keypoints": keypoints, "person_confidence": float(confidence), "frame": record})
     return detections
 
 
-def score_detection(
-    detection: dict[str, Any],
-    frame_shape: tuple[int, int, int],
-    velocity_y_norm: float,
-    persistent_seconds: float,
-    config: FallDetectorConfig,
+def _pose_repair_is_safe(previous: dict[str, Any], current: dict[str, Any]) -> bool:
+    minimum = settings.BEHAVIOR_POSE_REPAIR_MIN_CONFIDENCE
+    for frame in (previous, current):
+        scores = [float(value) for value in frame.get("keypoint_scores", [])]
+        if not scores or sum(scores) / len(scores) < minimum:
+            return False
+
+    previous_box = [float(value) for value in previous["bbox"]]
+    current_box = [float(value) for value in current["bbox"]]
+    previous_center = (
+        (previous_box[0] + previous_box[2]) / 2.0,
+        (previous_box[1] + previous_box[3]) / 2.0,
+    )
+    current_center = (
+        (current_box[0] + current_box[2]) / 2.0,
+        (current_box[1] + current_box[3]) / 2.0,
+    )
+    width = max(1.0, previous_box[2] - previous_box[0])
+    height = max(1.0, previous_box[3] - previous_box[1])
+    shift_ratio = np.hypot(
+        current_center[0] - previous_center[0],
+        current_center[1] - previous_center[1],
+    ) / np.hypot(width, height)
+    return shift_ratio <= settings.BEHAVIOR_POSE_REPAIR_MAX_CENTER_SHIFT_RATIO
+
+
+def _interpolate_pose_frame(
+    previous: dict[str, Any],
+    current: dict[str, Any],
+    alpha: float,
 ) -> dict[str, Any]:
-    height, width = frame_shape[:2]
-    x1, y1, x2, y2 = [float(value) for value in detection["bbox"]]
-    box_w = max(1.0, x2 - x1)
-    box_h = max(1.0, y2 - y1)
-    box_ratio = box_w / box_h
-    box_center_y = (y1 + y2) / 2.0 / max(height, 1)
-    box_bottom_y = y2 / max(height, 1)
-    box_area = (box_w * box_h) / max(width * height, 1)
-
-    kpts = detection["keypoints"]
-    shoulder_mid = midpoint([safe_point(kpts, KPT["left_shoulder"]), safe_point(kpts, KPT["right_shoulder"])])
-    hip_mid = midpoint([safe_point(kpts, KPT["left_hip"]), safe_point(kpts, KPT["right_hip"])])
-    ankle_mid = midpoint([safe_point(kpts, KPT["left_ankle"], 0.10), safe_point(kpts, KPT["right_ankle"], 0.10)])
-    nose = safe_point(kpts, KPT["nose"], 0.10)
-
-    torso_angle = 90.0
-    torso_horizontal = 0.0
-    if shoulder_mid is not None and hip_mid is not None:
-        torso_angle = angle_to_horizontal(shoulder_mid, hip_mid)
-        torso_horizontal = 1.0 - ramp(torso_angle, 25.0, 75.0)
-
-    head_hip_compressed = 0.0
-    head_low = 0.0
-    if nose is not None and hip_mid is not None:
-        head_hip_dy = abs(float(nose[1] - hip_mid[1])) / box_h
-        head_hip_compressed = 1.0 - ramp(head_hip_dy, 0.32, 0.85)
-        head_low = ramp(float(nose[1]) / max(height, 1), 0.38, 0.78)
-
-    ankle_hip_flat = 0.0
-    if ankle_mid is not None and hip_mid is not None:
-        ankle_hip_dy = abs(float(ankle_mid[1] - hip_mid[1])) / box_h
-        ankle_hip_flat = 1.0 - ramp(ankle_hip_dy, 0.28, 0.90)
-
-    wide_box = ramp(box_ratio, 0.95, 1.85)
-    low_box = 0.65 * ramp(box_center_y, 0.45, 0.78) + 0.35 * ramp(box_bottom_y, 0.60, 0.92)
-    small_far_penalty = 1.0 - 0.35 * (1.0 - ramp(box_area, 0.015, 0.06))
-    downward_motion = ramp(velocity_y_norm, 0.015, 0.060)
-    persistence = ramp(persistent_seconds, 0.35, config.persistence_seconds)
-    score = clamp01((
-        0.28 * wide_box
-        + 0.24 * torso_horizontal
-        + 0.17 * head_hip_compressed
-        + 0.11 * ankle_hip_flat
-        + 0.12 * low_box
-        + 0.08 * head_low
-        + 0.12 * downward_motion
-        + 0.18 * persistence
-    ) * small_far_penalty)
-
-    if score >= config.fall_threshold and persistent_seconds >= config.persistence_seconds:
-        status = "fall"
-    elif score >= config.risk_threshold:
-        status = "fall_risk"
-    else:
-        status = "normal"
+    def values(left, right):
+        return [
+            float(first) + (float(second) - float(first)) * alpha
+            for first, second in zip(left, right, strict=True)
+        ]
 
     return {
-        "status": status,
-        "score": score,
-        "features": {
-            "wide_box": wide_box,
-            "torso_horizontal": torso_horizontal,
-            "head_hip_compressed": head_hip_compressed,
-            "ankle_hip_flat": ankle_hip_flat,
-            "low_box": low_box,
-            "head_low": head_low,
-            "downward_motion": downward_motion,
-            "persistence": persistence,
-            "box_ratio": box_ratio,
-            "torso_angle": torso_angle,
-            "velocity_y_norm": velocity_y_norm,
-            "persistent_seconds": persistent_seconds,
-        },
+        "bbox": values(previous["bbox"], current["bbox"]),
+        "keypoints": [
+            values(first, second)
+            for first, second in zip(
+                previous["keypoints"],
+                current["keypoints"],
+                strict=True,
+            )
+        ],
+        "keypoint_scores": values(
+            previous["keypoint_scores"],
+            current["keypoint_scores"],
+        ),
+        "is_synthetic": True,
+        "interpolation_alpha": alpha,
     }
 
 
-def detection_payload(detection: dict[str, Any]) -> dict[str, Any]:
-    fall = detection["fall"]
-    return {
-        "track_id": int(detection["track_id"]),
-        "status": fall["status"],
-        "score": float(fall["score"]),
-        "person_confidence": float(detection["person_confidence"]),
-        "bbox": [float(v) for v in detection["bbox"].tolist()],
-        "features": {key: float(value) for key, value in fall["features"].items()},
-        "keypoints": _keypoints_payload(detection["keypoints"]),
-    }
+def _payload(item: dict[str, Any], incident_id: int | None = None) -> dict[str, Any]:
+    return {"track_id": int(item["track_id"]), "status": item["status"], "score": float(item["score"]), "person_confidence": float(item["person_confidence"]), "bbox": [float(value) for value in item["bbox"]], "features": {key: float(value) for key, value in item["features"].items()}, "keypoints": item["keypoints"], "incident_id": incident_id}
 
 
-def summarize(items: list[dict[str, Any]]) -> dict[str, Any]:
-    fall = sum(1 for item in items if item["status"] == "fall")
-    risk = sum(1 for item in items if item["status"] == "fall_risk")
-    normal = sum(1 for item in items if item["status"] == "normal")
+def _schema(item: dict[str, Any]) -> FallPoseDetection:
+    return FallPoseDetection(track_id=item["track_id"], status=item["status"], score=item["score"], person_confidence=item["person_confidence"], bbox=BoundingBox(x1=item["bbox"][0], y1=item["bbox"][1], x2=item["bbox"][2], y2=item["bbox"][3]), features=item["features"], keypoints=item["keypoints"], incident_id=item.get("incident_id"))
+
+
+def _summary(items: list[dict[str, Any]], incident_ids: list[int]) -> FallDetectionSummary:
+    falling = sum(item["status"] == "falling" for item in items)
+    running = sum(item["status"] == "running" for item in items)
+    others = sum(item["status"] == "others" for item in items)
     top = max(items, key=lambda item: item["score"], default=None)
-    status = "fall" if fall else ("fall_risk" if risk else ("normal" if normal else "no_detection"))
-    return {
-        "status": status,
-        "fall_count": fall,
-        "fall_risk_count": risk,
-        "normal_count": normal,
-        "person_count": len(items),
-        "top_label": top["status"] if top else "none",
-        "top_confidence": top["score"] if top else 0.0,
-    }
+    return FallDetectionSummary(status="falling" if falling else ("running" if running else ("others" if others else "no_detection")), others_count=others, running_count=running, falling_count=falling, person_count=len(items), top_label=top["status"] if top else "none", top_confidence=top["score"] if top else 0.0, persisted_incident_ids=incident_ids)
 
 
 def draw_detection(image: np.ndarray, detection: dict[str, Any]) -> None:
-    fall = detection.get("fall", {"status": "normal", "score": 0.0, "features": {}})
-    status = fall["status"]
-    score = float(fall["score"])
-    color = COLORS.get(status, COLORS["normal"])
-    x1, y1, x2, y2 = detection["bbox"].astype(int).tolist()
-    cv2.rectangle(image, (x1, y1), (x2, y2), color, 3)
-    draw_skeleton(image, detection["keypoints"], color)
-    label = f"ID {detection.get('track_id', 0)} {status.upper()} {score:.2f}"
-    cv2.rectangle(image, (x1, max(0, y1 - 34)), (min(image.shape[1] - 1, x1 + 310), y1), color, -1)
-    cv2.putText(image, label, (x1 + 8, max(22, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-    features = fall.get("features", {})
-    details = f"wide {features.get('wide_box', 0):.2f} | torso {features.get('torso_horizontal', 0):.2f} | persist {features.get('persistent_seconds', 0):.1f}s"
-    cv2.putText(image, details, (x1, min(image.shape[0] - 12, y2 + 24)), cv2.FONT_HERSHEY_SIMPLEX, 0.52, color, 2)
+    color = COLORS[detection["status"]]
+    x1, y1, x2, y2 = (int(value) for value in detection["bbox"])
+    cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
+    for first, second in SKELETON:
+        points = detection["keypoints"]
+        if points[first][2] >= .12 and points[second][2] >= .12:
+            cv2.line(image, (int(points[first][0]), int(points[first][1])), (int(points[second][0]), int(points[second][1])), color, 2)
+    cv2.putText(image, f"ID {detection['track_id']} {detection['status'].upper()} {detection['score']:.2f}", (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, .65, color, 2)
 
 
-def draw_skeleton(image: np.ndarray, keypoints: np.ndarray, color: tuple[int, int, int]) -> None:
-    for a_name, b_name in SKELETON:
-        a = safe_point(keypoints, KPT[a_name], 0.12)
-        b = safe_point(keypoints, KPT[b_name], 0.12)
-        if a is not None and b is not None:
-            cv2.line(image, tuple(a.astype(int)), tuple(b.astype(int)), color, 2, cv2.LINE_AA)
-    for x, y, conf in keypoints:
-        if conf >= 0.12:
-            cv2.circle(image, (int(x), int(y)), 3, color, -1, cv2.LINE_AA)
-
-
-def safe_point(keypoints: np.ndarray, index: int, min_conf: float = 0.15) -> np.ndarray | None:
-    if keypoints is None or index >= len(keypoints):
-        return None
-    x, y, conf = keypoints[index]
-    if conf < min_conf or x <= 0 or y <= 0:
-        return None
-    return np.array([float(x), float(y)], dtype=np.float32)
-
-
-def midpoint(points: list[np.ndarray | None]) -> np.ndarray | None:
-    usable = [point for point in points if point is not None]
-    if not usable:
-        return None
-    return np.mean(np.stack(usable, axis=0), axis=0)
-
-
-def angle_to_horizontal(point_a: np.ndarray, point_b: np.ndarray) -> float:
-    dx = abs(float(point_b[0] - point_a[0]))
-    dy = abs(float(point_b[1] - point_a[1]))
-    if dx < 1e-6 and dy < 1e-6:
-        return 90.0
-    return float(np.degrees(np.arctan2(dy, dx)))
-
-
-def box_iou(box_a: np.ndarray, box_b: np.ndarray) -> float:
-    ax1, ay1, ax2, ay2 = box_a
-    bx1, by1, bx2, by2 = box_b
-    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
-    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
-    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
-    intersection = iw * ih
-    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
-    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
-    union = area_a + area_b - intersection
-    return float(intersection / union) if union > 0 else 0.0
-
-
-def ramp(value: float, low: float, high: float) -> float:
-    if high <= low:
-        return 0.0
-    return clamp01((value - low) / (high - low))
-
-
-def clamp01(value: float) -> float:
-    return max(0.0, min(1.0, float(value)))
-
-
-def encode_jpeg(image: np.ndarray, quality: int = 78) -> str:
-    ok, buffer = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
-    if not ok:
-        return ""
-    return "data:image/jpeg;base64," + base64.b64encode(buffer).decode("ascii")
+def encode_jpeg(image: np.ndarray) -> str:
+    ok, buffer = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), 78])
+    return "data:image/jpeg;base64," + base64.b64encode(buffer).decode("ascii") if ok else ""
 
 
 def _write_temp_snapshot(frame: np.ndarray) -> Path:
@@ -827,43 +635,6 @@ def _write_temp_snapshot(frame: np.ndarray) -> Path:
     return path
 
 
-def _to_pose_schema(item: dict[str, Any], incident_id: int | None = None) -> FallPoseDetection:
-    x1, y1, x2, y2 = item["bbox"]
-    return FallPoseDetection(
-        track_id=int(item["track_id"]),
-        status=item["status"],
-        score=float(item["score"]),
-        person_confidence=float(item["person_confidence"]),
-        bbox=BoundingBox(x1=x1, y1=y1, x2=x2, y2=y2),
-        features=item["features"],
-        keypoints=item.get("keypoints"),
-        incident_id=incident_id,
-    )
-
-
-def _summary_schema(
-    items: list[dict[str, Any]],
-    incident_ids: list[int],
-) -> FallDetectionSummary:
-    summary = summarize(items)
-    return FallDetectionSummary(
-        status=summary["status"],
-        fall_count=summary["fall_count"],
-        fall_risk_count=summary["fall_risk_count"],
-        normal_count=summary["normal_count"],
-        person_count=summary["person_count"],
-        top_label=summary["top_label"],
-        top_confidence=summary["top_confidence"],
-        persisted_incident_ids=incident_ids,
-    )
-
-
-def _keypoints_payload(keypoints: np.ndarray) -> list[list[float]]:
-    return [[float(x), float(y), float(conf)] for x, y, conf in keypoints.tolist()]
-
-
 def _resolve_backend_path(value: str) -> Path:
     path = Path(value).expanduser()
-    if not path.is_absolute():
-        path = BACKEND_DIR / path
-    return path.resolve()
+    return (path if path.is_absolute() else BACKEND_DIR / path).resolve()

@@ -1,56 +1,135 @@
 import numpy as np
 import pytest
+from collections import deque
 
-from app.services.fall_detector import (
-    FallDetector,
-    FallDetectorConfig,
-    FallModelUnavailable,
-    KPT,
-    score_detection,
-)
+from app.services.behavior_features import extract_window_features, feature_columns
+from app.services.fall_detector import FallDetector, FallModelUnavailable, _schema
 
 
-def _fallen_detection() -> dict:
-    keypoints = np.zeros((17, 3), dtype=np.float32)
-    keypoints[KPT["nose"]] = [120, 230, 0.9]
-    keypoints[KPT["left_shoulder"]] = [80, 250, 0.9]
-    keypoints[KPT["right_shoulder"]] = [180, 250, 0.9]
-    keypoints[KPT["left_hip"]] = [90, 260, 0.9]
-    keypoints[KPT["right_hip"]] = [190, 260, 0.9]
-    keypoints[KPT["left_ankle"]] = [80, 280, 0.8]
-    keypoints[KPT["right_ankle"]] = [200, 280, 0.8]
+def _pose_frame() -> dict:
+    keypoints = np.zeros((17, 2), dtype=np.float32)
+    scores = np.zeros(17, dtype=np.float32)
+    for index, point in {0: (120, 100), 5: (90, 140), 6: (150, 140), 11: (95, 210), 12: (145, 210), 15: (100, 300), 16: (140, 300)}.items():
+        keypoints[index] = point
+        scores[index] = .9
     return {
-        "bbox": np.array([40, 200, 260, 320], dtype=np.float32),
-        "keypoints": keypoints,
+        "bbox": [70, 90, 170, 320],
+        "keypoints": keypoints.tolist(),
+        "keypoint_scores": scores.tolist(),
     }
 
 
-def test_fall_score_can_reach_confirmed_fall():
-    config = FallDetectorConfig(
-        person_confidence=0.1,
-        risk_threshold=0.52,
-        fall_threshold=0.68,
-        persistence_seconds=1.0,
-        max_frames=1200,
-        frame_stride=1,
-    )
+def test_behavior_feature_window_matches_model_contract():
+    features = extract_window_features([_pose_frame() for _ in range(60)])
 
-    result = score_detection(
-        _fallen_detection(),
-        (480, 640, 3),
-        velocity_y_norm=0.06,
-        persistent_seconds=1.0,
-        config=config,
-    )
-
-    assert result["status"] == "fall"
-    assert result["score"] >= config.fall_threshold
-    assert result["features"]["wide_box"] > 0
+    assert set(features["raw"]) == set(feature_columns())
+    assert features["quality"]["status"] == "good"
 
 
-def test_fall_detector_missing_weights_is_unavailable(tmp_path):
+def test_fall_detector_missing_behavior_weights_is_unavailable(tmp_path):
     detector = FallDetector()
-    detector.model_path = tmp_path / "missing.pt"
+    detector.behavior_model_path = tmp_path / "missing.joblib"
+    detector.portable_behavior_model_path = tmp_path / "missing.ubj"
 
-    with pytest.raises(FallModelUnavailable, match="weights not found"):
-        detector._ensure_model()
+    with pytest.raises(FallModelUnavailable, match="behavior weights not found"):
+        detector._ensure_behavior_model()
+
+
+def test_primary_behavior_classifier_is_extra_trees_with_configured_threads():
+    detector = FallDetector()
+    classifier = detector._ensure_behavior_model()
+
+    assert type(classifier).__name__ == "ExtraTreesClassifier"
+    assert classifier.n_jobs == 1
+    assert detector.behavior_model_path.name == "best_behavior_model.joblib"
+
+
+def test_primary_behavior_classifier_returns_three_probabilities():
+    detector = FallDetector()
+    classifier = detector._ensure_behavior_model()
+    inputs = np.random.default_rng(42).normal(size=(4, 141)).astype(np.float32)
+
+    probabilities = np.asarray(classifier.predict_proba(inputs), dtype=np.float32)
+
+    assert probabilities.shape == (4, 3)
+    np.testing.assert_allclose(probabilities.sum(axis=1), np.ones(4), atol=1e-6)
+
+
+def test_live_payload_serializes_bbox_as_an_object():
+    schema = _schema({
+        "track_id": 4,
+        "status": "others",
+        "score": 1.0,
+        "person_confidence": .9,
+        "bbox": [10, 20, 30, 40],
+        "features": {},
+        "keypoints": [],
+    })
+
+    assert schema.model_dump()["bbox"] == {"x1": 10.0, "y1": 20.0, "x2": 30.0, "y2": 40.0}
+
+
+def test_live_session_resamples_a_30_fps_source_to_24_fps():
+    session = FallDetector().create_live_session(fps=30)
+
+    accepted = [index for index in range(30) if session.accept_source_frame(index / 30)]
+
+    assert accepted == [0, 2, 3, 4, 5, 7, 8, 9, 10, 12, 13, 14, 15, 17, 18, 19, 20, 22, 23, 24, 25, 27, 28, 29]
+
+
+def test_lost_track_discards_its_behavior_window():
+    session = FallDetector().create_live_session(fps=24)
+    session.windows[4].append(_pose_frame())
+    session.missing_samples_by_track[4] = 13
+
+    session._prune_lost_tracks()
+
+    assert 4 not in session.windows
+
+
+def test_discontinuity_invalidates_temporal_windows_but_keeps_incident_cooldown():
+    session = FallDetector().create_live_session(fps=24)
+    session.windows[4].extend(_pose_frame() for _ in range(59))
+    session.probability_history[4].append({"falling": 0.9})
+    session.last_incident_at[(4, "falling")] = 12.0
+
+    session.mark_discontinuity(
+        frame_index=100,
+        timestamp_seconds=100 / 24,
+        dropped_frames=3,
+    )
+
+    assert not session.windows
+    assert not session.probability_history
+    assert session.last_incident_at[(4, "falling")] == 12.0
+    assert session.sample_index == 0
+
+
+def test_pose_repair_interpolates_at_most_eight_same_track_samples():
+    session = FallDetector().create_live_session(fps=24)
+    previous = _pose_frame()
+    current = _pose_frame()
+    current["bbox"] = [78, 90, 178, 320]
+    window = deque([previous, *([None] * 8), current], maxlen=60)
+
+    repaired = session._repair_trailing_pose_gap(window, current)
+
+    assert repaired == 8
+    assert all(sample is not None for sample in window)
+    assert all(sample.get("is_synthetic") for sample in list(window)[1:-1])
+    assert list(window)[4]["bbox"][0] > previous["bbox"][0]
+
+
+def test_pose_repair_rejects_long_or_implausible_gaps():
+    session = FallDetector().create_live_session(fps=24)
+    previous = _pose_frame()
+    current = _pose_frame()
+    long_gap = deque([previous, *([None] * 9), current], maxlen=60)
+    current_far = _pose_frame()
+    current_far["bbox"] = [1000, 1000, 1100, 1230]
+    unsafe_gap = deque([previous, None, current_far], maxlen=60)
+
+    assert session._repair_trailing_pose_gap(long_gap, current) == 0
+    assert session._repair_trailing_pose_gap(unsafe_gap, current_far) == 0
+    assert any(sample is None for sample in long_gap)
+    assert any(sample is None for sample in unsafe_gap)

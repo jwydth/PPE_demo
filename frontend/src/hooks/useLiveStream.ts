@@ -1,9 +1,15 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { API_URL, toAbsoluteUrl } from "@/lib/ppe-api";
-import { TrackingOverlay, ViolationReport } from "@/types/detection";
+import { TrackingOverlay, TrackingOverlayFrame, ViolationReport } from "@/types/detection";
 import { BehaviorIncident, FallLiveDetection, FallLiveSummary } from "@/types/behavior";
 import { PPESuggestion, ZoneSuggestion, ZoneViolation } from "@/types/zone";
 import { AnalysisPhase } from "./camera-panel-types";
+import {
+  appendOverlayRing,
+  OVERLAY_BUFFER_MS,
+  type OverlaySelection,
+  type StreamTimeline,
+} from "@/lib/stream-timeline";
 
 export type StreamData = {
   summary: any | null;
@@ -71,6 +77,8 @@ export function useLiveStream({
     frameHeight: number;
     fallDetections: any[];
   }>>({});
+  const [hlsSourceTimes, setHlsSourceTimes] = useState<Record<string, number | null>>({});
+  const [currentSourceTimeMs, setCurrentSourceTimeMs] = useState<number | null>(null);
   
   // Manage concurrent connections keyed by RTSP URL
   const wsRefs = useRef<Record<string, WebSocket>>({});
@@ -94,6 +102,7 @@ export function useLiveStream({
   // has_image, instead of embedding it as base64 inside the JSON). Object URLs
   // must be explicitly revoked or they leak for the life of the tab.
   const pendingImageUrlRef = useRef<Record<string, string>>({});
+  const renderedOverlayRef = useRef<Record<string, OverlaySelection>>({});
 
   const revokePendingImage = (videoName: string) => {
     const url = pendingImageUrlRef.current[videoName];
@@ -132,7 +141,7 @@ export function useLiveStream({
 
         const ppe = featureDict ? featureDict["ppe_detection"] : ppeEnabled;
         const zone = featureDict ? featureDict["zone_monitoring"] : zoneEnabled;
-        const fall = featureDict ? featureDict["fall_detection"] : fallEnabled;
+        const fall = featureDict ? (featureDict["behavior_detection"] ?? featureDict["fall_detection"]) : fallEnabled;
 
         ws.send(
           JSON.stringify({
@@ -141,7 +150,7 @@ export function useLiveStream({
               features: {
                 ppe_detection: ppe !== undefined ? ppe : true,
                 zone_monitoring: zone !== undefined ? zone : false,
-                fall_detection: fall !== undefined ? fall : false,
+                behavior_detection: fall !== undefined ? fall : false,
               },
               viewing: isViewing,
             },
@@ -227,7 +236,7 @@ export function useLiveStream({
 
         const ppe = featureDict ? featureDict["ppe_detection"] : ppeEnabled;
         const zone = featureDict ? featureDict["zone_monitoring"] : zoneEnabled;
-        const fall = featureDict ? featureDict["fall_detection"] : fallEnabled;
+        const fall = featureDict ? (featureDict["behavior_detection"] ?? featureDict["fall_detection"]) : fallEnabled;
 
         ws.send(
           JSON.stringify({
@@ -236,7 +245,7 @@ export function useLiveStream({
               features: {
                 ppe_detection: ppe !== undefined ? ppe : true,
                 zone_monitoring: zone !== undefined ? zone : false,
-                fall_detection: fall !== undefined ? fall : false,
+                behavior_detection: fall !== undefined ? fall : false,
               },
               viewing: isViewing,
             },
@@ -265,12 +274,12 @@ export function useLiveStream({
 
       const ppe = featureDict ? featureDict["ppe_detection"] : ppeEnabled;
       const zone = featureDict ? featureDict["zone_monitoring"] : zoneEnabled;
-      const fall = featureDict ? featureDict["fall_detection"] : fallEnabled;
+      const fall = featureDict ? (featureDict["behavior_detection"] ?? featureDict["fall_detection"]) : fallEnabled;
 
       const wsUrlBase = API_URL.replace(/^http/, "ws");
       const wsUrl = `${wsUrlBase}/ws/stream?video_name=${encodeURIComponent(
         videoName,
-      )}&enable_ppe=${ppe !== undefined ? ppe : true}&enable_zone=${zone !== undefined ? zone : false}&enable_fall=${fall !== undefined ? fall : false}`;
+      )}&enable_ppe=${ppe !== undefined ? ppe : true}&enable_zone=${zone !== undefined ? zone : false}&enable_fall=${fall !== undefined ? fall : false}&metadata_only=${isAutoLive}`;
 
       const ws = new WebSocket(wsUrl);
       ws.binaryType = "blob";
@@ -299,7 +308,17 @@ export function useLiveStream({
         }
 
         const msg = JSON.parse(event.data);
-        const { event: eventType, data, frame_index, has_image } = msg;
+        const {
+          event: eventType,
+          data,
+          frame_index,
+          has_image,
+          stream_epoch,
+          media_pts_ms,
+          source_time_ms,
+          inference_completed_ms,
+          discontinuity_sequence,
+        } = msg;
         const isCurrent = videoName === viewedVideoNameRef.current;
 
         if (eventType === "start") {
@@ -325,13 +344,32 @@ export function useLiveStream({
           // later drop gets the full retry budget again.
           delete reconnectAttemptsRef.current[videoName];
 
+          const timeline = {
+            stream_epoch,
+            media_pts_ms,
+            source_time_ms,
+            inference_completed_ms,
+            discontinuity_sequence,
+          };
+          const timestampedFrames = (data.frames || []).map((frame: TrackingOverlayFrame) => ({
+            ...frame,
+            ...timeline,
+          }));
+          const behaviorTimeline = data.behavior_timeline ?? timeline;
+          const timestampedBehavior = (data.fall_detections || []).map((detection: FallLiveDetection) => ({
+            ...detection,
+            ...behaviorTimeline,
+          }));
           setCameraOverlays((prev) => ({
             ...prev,
             [videoName]: {
-              frames: data.frames || [],
+              frames: appendOverlayRing(prev[videoName]?.frames ?? [], timestampedFrames),
               frameWidth: data.frame_width || 1000,
               frameHeight: data.frame_height || 1000,
-              fallDetections: data.fall_detections || [],
+              fallDetections: appendBehaviorRing(
+                prev[videoName]?.fallDetections ?? [],
+                timestampedBehavior,
+              ),
             },
           }));
 
@@ -339,12 +377,16 @@ export function useLiveStream({
             setStreamData((prev) => {
               const nextOverlay = {
                 ...prev.tracking_overlay,
-                frames: isAutoLive ? data.frames : [...prev.tracking_overlay.frames, ...data.frames],
+                frames: isAutoLive
+                  ? appendOverlayRing(prev.tracking_overlay.frames, timestampedFrames)
+                  : [...prev.tracking_overlay.frames, ...timestampedFrames],
                 frame_width: data.frame_width || prev.tracking_overlay.frame_width,
                 frame_height: data.frame_height || prev.tracking_overlay.frame_height,
               };
 
-              setCurrentVideoTime(frame_index / (nextOverlay.fps || 30));
+              if (!isAutoLive) {
+                setCurrentVideoTime(frame_index / (nextOverlay.fps || 30));
+              }
 
               const nextLiveFrame = has_image
                 ? (pendingImageUrlRef.current[videoName] ?? prev.live_frame)
@@ -357,7 +399,9 @@ export function useLiveStream({
                 ...prev,
                 live_frame: nextLiveFrame,
                 fall_summary: data.fall_summary ?? prev.fall_summary,
-                fall_detections: data.fall_detections ?? prev.fall_detections,
+                fall_detections: isAutoLive
+                  ? appendBehaviorRing(prev.fall_detections, timestampedBehavior)
+                  : timestampedBehavior,
                 fall_unavailable: data.fall_unavailable ?? prev.fall_unavailable,
                 tracking_overlay: nextOverlay,
               };
@@ -473,11 +517,10 @@ export function useLiveStream({
         }
       };
       ws.onerror = (event) => {
-        console.error(`WebSocket error for ${videoName}:`, event);
-        if (videoName === viewedVideoNameRef.current) {
-          setError("WebSocket connection failed. Check browser console for security/CORS errors.");
-          setPhase("error");
-        }
+        // Browser error events intentionally expose no useful cause. The
+        // following onclose event contains the close code/reason and is the
+        // single source of truth for UI error state and reconnect behavior.
+        console.error(`WebSocket transport error for ${videoName} (state=${ws.readyState}):`, event);
       };
     } catch (err) {
       if (videoName === viewedVideoNameRef.current) {
@@ -549,7 +592,7 @@ export function useLiveStream({
   }, [isPlaying, videoElement]);
 
   useEffect(() => {
-    if (!isStreaming || !videoElement) return;
+    if (!isStreaming || !videoElement || isLive) return;
 
     const overlay = streamData.tracking_overlay;
     const fps = overlay.fps || 30;
@@ -580,6 +623,44 @@ export function useLiveStream({
     }
   }, [streamData.tracking_overlay.frames, surfaceVideoTime, isStreaming, isPlaying, streamData.tracking_overlay, videoElement]);
 
+  const handleHlsTimeline = useCallback((videoName: string, timeline: StreamTimeline) => {
+    setHlsSourceTimes((current) => ({ ...current, [videoName]: timeline.sourceTimeMs }));
+    if (videoName === viewedVideoNameRef.current) {
+      setCurrentSourceTimeMs(timeline.sourceTimeMs);
+      setCurrentVideoTime(timeline.mediaTimeSeconds);
+    }
+  }, []);
+
+  const handleOverlayPresentation = useCallback((
+    videoName: string,
+    selection: OverlaySelection,
+  ) => {
+    renderedOverlayRef.current[videoName] = selection;
+  }, []);
+
+  const handlePlaybackMetrics = useCallback((videoName: string, metrics: {
+    liveDelayMs: number | null;
+    sourceTimeMs: number | null;
+    rebufferCount: number;
+    droppedVideoFrames: number;
+  }) => {
+    const socket = wsRefs.current[videoName];
+    if (socket?.readyState !== WebSocket.OPEN) return;
+    const renderedOverlay = renderedOverlayRef.current[videoName];
+    const signedOverlaySkewMs = renderedOverlay?.signedSkewMs ?? null;
+    socket.send(JSON.stringify({
+      event: "playback_metrics",
+      data: {
+        live_delay_ms: metrics.liveDelayMs,
+        overlay_skew_ms: signedOverlaySkewMs === null ? null : Math.abs(signedOverlaySkewMs),
+        rendered_overlay_signed_skew_ms: signedOverlaySkewMs,
+        overlay_selection_mode: renderedOverlay?.mode ?? "missing",
+        rebuffer_count: metrics.rebufferCount,
+        dropped_video_frames: metrics.droppedVideoFrames,
+      },
+    }));
+  }, []);
+
   return {
     streamData,
     setStreamData,
@@ -593,6 +674,11 @@ export function useLiveStream({
     setPpeSuggestions,
     liveFrames,
     cameraOverlays,
+    hlsSourceTimes,
+    currentSourceTimeMs,
+    handleHlsTimeline,
+    handleOverlayPresentation,
+    handlePlaybackMetrics,
     startStreaming,
     sendMessage,
     resetStream,
@@ -608,4 +694,11 @@ export function useLiveStream({
     setViewedCamera,
     syncCameraConnections,
   };
+}
+
+function appendBehaviorRing<T extends { source_time_ms?: number }>(current: T[], incoming: T[]): T[] {
+  const combined = [...current, ...incoming];
+  const newest = Math.max(...combined.map((item) => item.source_time_ms ?? 0), 0);
+  if (newest <= 0) return combined.slice(-240);
+  return combined.filter((item) => (item.source_time_ms ?? newest) >= newest - OVERLAY_BUFFER_MS);
 }

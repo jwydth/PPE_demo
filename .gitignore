@@ -22,4 +22,7 @@ auto.crt
 # Working notes from this session's performance/debugging pass — not meant
 # to be a tracked project doc.
 PERF_PLAN.md
-.claude
+task.md
+.codex
+.agents
+AGENTS.md

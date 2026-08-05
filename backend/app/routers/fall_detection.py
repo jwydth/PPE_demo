@@ -18,7 +18,7 @@ from app.services.behavior_incident_service import (
 )
 from app.services.fall_detector import FallDetector, FallModelUnavailable
 
-router = APIRouter(tags=["fall-detection"])
+router = APIRouter(tags=["behavior-detection"])
 logger = logging.getLogger(__name__)
 
 _fall_detector = FallDetector()
@@ -34,7 +34,8 @@ _ALLOWED_VIDEO_TYPES = {
 }
 
 
-@router.post("/fall-detection/predict", response_model=FallImagePredictionResponse)
+@router.post("/behavior-detection/predict", response_model=FallImagePredictionResponse)
+@router.post("/fall-detection/predict", response_model=FallImagePredictionResponse, deprecated=True)
 async def predict_fall_image(file: UploadFile = File(...)) -> FallImagePredictionResponse:
     if file.content_type not in _ALLOWED_IMAGE_TYPES:
         raise HTTPException(
@@ -61,7 +62,8 @@ async def predict_fall_image(file: UploadFile = File(...)) -> FallImagePredictio
         _cleanup_temp_file(tmp_path)
 
 
-@router.post("/fall-detection/predict-video", response_model=FallVideoPredictionResponse)
+@router.post("/behavior-detection/predict-video", response_model=FallVideoPredictionResponse)
+@router.post("/fall-detection/predict-video", response_model=FallVideoPredictionResponse, deprecated=True)
 async def predict_fall_video(file: UploadFile = File(...)) -> FallVideoPredictionResponse:
     if file.content_type not in _ALLOWED_VIDEO_TYPES:
         raise HTTPException(

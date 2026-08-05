@@ -21,14 +21,30 @@ class Settings(BaseSettings):
     # caps VRAM/connect-latency instead of loading a fresh copy of the weights
     # per websocket connection. Connections beyond this count queue for a free
     # instance (see PPEDetector.acquire_model_instance).
-    MAX_CONCURRENT_STREAMS: int = 4
-    INFERENCE_HALF: bool = False   # set True only on a CUDA GPU
+    # A 12 GB GPU cannot safely hold the former four-instance PPE pool plus
+    # an independent Pose/ReID behavior worker. Extra streams queue instead
+    # of exhausting VRAM and crashing all active streams.
+    MAX_CONCURRENT_STREAMS: int = 1
+    INFERENCE_HALF: bool = True    # applied only on CUDA by the pipeline
     INFERENCE_IMGSZ: int = 640     # pin inference resolution for predictable latency
     CONFIDENCE_THRESHOLD: float = 0.3
     # Minimum fraction of an equipment box that must overlap its person box
     # for the two to be considered associated (0.0 – 1.0)
     PPE_OVERLAP_THRESHOLD: float = 0.3
     VIDEO_FRAME_STRIDE: int = 1
+    LIVE_PPE_TARGET_FPS: float = 8.0
+    # Server-composed live output. AI remains asynchronous; the compositor
+    # releases each buffered source frame at its presentation deadline.
+    ANNOTATED_STREAM_ENABLED: bool = True
+    ANNOTATED_STREAM_DELAY_SECONDS: float = 3.0
+    ANNOTATED_STREAM_QUEUE_SIZE: int = 180
+    ANNOTATED_PPE_TTL_FRAMES: int = 8
+    ANNOTATED_SIGN_TTL_SECONDS: float = 3.0
+    ANNOTATED_PPE_MATCH_IOU: float = 0.20
+    ANNOTATED_RTSP_BASE_URL: str = "rtsp://127.0.0.1:8554"
+    ANNOTATED_PATH_SUFFIX: str = "_annotated"
+    ANNOTATED_FFMPEG_PATH: str = "ffmpeg"
+    ANNOTATED_ENCODER: str = "auto"
     VIDEO_TRACKER: str = "bytetrack.yaml"
     VIDEO_CASE_IOU_THRESHOLD: float = 0.2
     VIDEO_CASE_CENTER_DISTANCE_RATIO: float = 0.75
@@ -63,6 +79,8 @@ class Settings(BaseSettings):
     SIGN_CLASS_PPE_TRIGGER: set[int] = {0, 1}
     AUTO_ZONE_BUFFER_RATIO: float = 0.25
     SIGN_PASS_FRAME_INTERVAL: int = 15
+    LIVE_SIGN_TARGET_FPS: float = 1.0
+    LIVE_SIGN_PHASE_FRAME: int = 13
     AUTO_ZONE_CONFIRM_FRAMES: int = 3
     AUTO_PPE_CONFIRM_FRAMES: int = 1
     AUTO_ZONE_DEDUPE_GRID: float = 0.05
@@ -78,18 +96,54 @@ class Settings(BaseSettings):
     # detected walker is treated as being outside a walkway.  A violation is
     # raised once the worker has been visible for this many consecutive seconds.
     NO_WALKWAY_DWELL_SECONDS: float = 1.5
-    # Fall-detection / behavior incident settings.
-    FALL_MODEL_PATH: str = "weights/yolo26m-pose.pt"
-    FALL_PERSON_CONFIDENCE: float = 0.10
-    FALL_RISK_THRESHOLD: float = 0.52
-    FALL_THRESHOLD: float = 0.68
-    FALL_PERSISTENCE_SECONDS: float = 1.0
+    # Behavioral-detection / behavior-incident settings.
+    # Pose + behavior-classifier pipeline.  The classifier was trained on
+    # 60-frame COCO-pose windows and predicts others/running/falling.
+    FALL_MODEL_PATH: str = "weights/pose.pt"
+    # Primary classifier: 141 transformed pose/motion features ->
+    # others/running/falling. The current production artifact is an
+    # sklearn ExtraTreesClassifier.
+    FALL_BEHAVIOR_MODEL_PATH: str = "weights/best_behavior_model.joblib"
+    FALL_REID_MODEL_PATH: str = "weights/reid.pt"
+    FALL_PERSON_CONFIDENCE: float = 0.20
+    FALL_BEHAVIOR_WINDOW_FRAMES: int = 60
+    FALL_BEHAVIOR_WINDOW_STRIDE: int = 12
+    FALL_BEHAVIOR_CANONICAL_FPS: int = 24
+    FALL_BEHAVIOR_MIN_CONFIDENCE: float = 0.50
+    FALL_TRACK_MAX_MISSING_SAMPLES: int = 12
     FALL_MAX_FRAMES: int = 1200
     FALL_FRAME_STRIDE: int = 1
-    FALL_LIVE_FRAME_STRIDE: int = 5
+    # Do not subsample pose frames: behavior.joblib was trained on 60 frames
+    # at 24 FPS, so its temporal features require every source frame.
+    FALL_LIVE_FRAME_STRIDE: int = 1
+    # Multi-camera behavior runtime. Behavior frames remain ordered and are
+    # never subsampled; batching only combines one ready frame per camera into
+    # a single finite CUDA forward pass.
+    BEHAVIOR_ORDERED_QUEUE_SIZE: int = 180
+    BEHAVIOR_BATCH_MAX_SIZE: int = 4
+    BEHAVIOR_CAMERA_BURST_SIZE: int = 2
+    BEHAVIOR_BATCH_WAIT_MS: float = 4.0
+    BEHAVIOR_POSE_IMGSZ: int = 448
+    BEHAVIOR_FIXED_CAMERA: bool = True
+    BEHAVIOR_GMC_METHOD: str = "none"
+    BEHAVIOR_REID_HALF: bool = True
+    BEHAVIOR_REID_INTERVAL_FRAMES: int = 4
+    BEHAVIOR_POSE_REPAIR_MAX_GAP: int = 8
+    BEHAVIOR_POSE_REPAIR_MIN_CONFIDENCE: float = 0.10
+    BEHAVIOR_POSE_REPAIR_MAX_CENTER_SHIFT_RATIO: float = 1.50
+    BEHAVIOR_LIVE_WARMUP_FRAMES: int = 3
+    BEHAVIOR_START_COHORT_WAIT_MS: float = 1200.0
+    BEHAVIOR_TORCH_THREADS: int = 4
+    BEHAVIOR_TORCH_INTEROP_THREADS: int = 1
+    BEHAVIOR_OPENCV_THREADS: int = 4
+    BEHAVIOR_XGBOOST_THREADS: int = 1
+    BEHAVIOR_HEALTH_LOG_INTERVAL_SECONDS: float = 10.0
+    # Optional legacy XGBoost artifact. It is used only when the configured
+    # primary classifier is unavailable.
+    FALL_BEHAVIOR_PORTABLE_MODEL_PATH: str = "weights/behavior.ubj"
     FALL_INCIDENT_COOLDOWN_SECONDS: float = 10.0
-    FALL_MODEL_NAME: str = "yolo26m-pose"
-    FALL_MODEL_VERSION: str = "v8.4.0"
+    FALL_MODEL_NAME: str = "pose-behavior-xgboost"
+    FALL_MODEL_VERSION: str = "behavior-v1"
     # Upper bound on rows UnifiedIncidentService will read per category per call.
     # Analytics aggregates in Python (see analytics_service.py's module docstring
     # for why), so a date range with more incidents than this gets its oldest
@@ -139,6 +193,78 @@ class Settings(BaseSettings):
     def _validate_smtp(self) -> "Settings":
         if self.SMTP_USE_SSL and self.SMTP_USE_STARTTLS:
             raise ValueError("SMTP_USE_SSL and SMTP_USE_STARTTLS are mutually exclusive.")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_behavior_runtime(self) -> "Settings":
+        positive_ints = {
+            "FALL_BEHAVIOR_WINDOW_FRAMES": self.FALL_BEHAVIOR_WINDOW_FRAMES,
+            "FALL_BEHAVIOR_WINDOW_STRIDE": self.FALL_BEHAVIOR_WINDOW_STRIDE,
+            "FALL_BEHAVIOR_CANONICAL_FPS": self.FALL_BEHAVIOR_CANONICAL_FPS,
+            "FALL_LIVE_FRAME_STRIDE": self.FALL_LIVE_FRAME_STRIDE,
+            "BEHAVIOR_ORDERED_QUEUE_SIZE": self.BEHAVIOR_ORDERED_QUEUE_SIZE,
+            "BEHAVIOR_BATCH_MAX_SIZE": self.BEHAVIOR_BATCH_MAX_SIZE,
+            "BEHAVIOR_CAMERA_BURST_SIZE": self.BEHAVIOR_CAMERA_BURST_SIZE,
+            "BEHAVIOR_POSE_IMGSZ": self.BEHAVIOR_POSE_IMGSZ,
+            "BEHAVIOR_TORCH_THREADS": self.BEHAVIOR_TORCH_THREADS,
+            "BEHAVIOR_TORCH_INTEROP_THREADS": self.BEHAVIOR_TORCH_INTEROP_THREADS,
+            "BEHAVIOR_OPENCV_THREADS": self.BEHAVIOR_OPENCV_THREADS,
+            "BEHAVIOR_XGBOOST_THREADS": self.BEHAVIOR_XGBOOST_THREADS,
+            "BEHAVIOR_REID_INTERVAL_FRAMES": self.BEHAVIOR_REID_INTERVAL_FRAMES,
+            "BEHAVIOR_POSE_REPAIR_MAX_GAP": self.BEHAVIOR_POSE_REPAIR_MAX_GAP,
+            "BEHAVIOR_LIVE_WARMUP_FRAMES": self.BEHAVIOR_LIVE_WARMUP_FRAMES,
+            "ANNOTATED_STREAM_QUEUE_SIZE": self.ANNOTATED_STREAM_QUEUE_SIZE,
+            "ANNOTATED_PPE_TTL_FRAMES": self.ANNOTATED_PPE_TTL_FRAMES,
+        }
+        invalid = [name for name, value in positive_ints.items() if value < 1]
+        if invalid:
+            raise ValueError(f"Behavior runtime values must be positive: {', '.join(invalid)}")
+        if self.BEHAVIOR_CAMERA_BURST_SIZE > self.BEHAVIOR_BATCH_MAX_SIZE:
+            raise ValueError(
+                "BEHAVIOR_CAMERA_BURST_SIZE cannot exceed BEHAVIOR_BATCH_MAX_SIZE."
+            )
+        if self.FALL_LIVE_FRAME_STRIDE != 1:
+            raise ValueError(
+                "FALL_LIVE_FRAME_STRIDE must remain 1; behavior.joblib requires "
+                "ordered 24-FPS temporal samples."
+            )
+        if self.BEHAVIOR_BATCH_WAIT_MS < 0:
+            raise ValueError("BEHAVIOR_BATCH_WAIT_MS cannot be negative.")
+        if self.BEHAVIOR_START_COHORT_WAIT_MS < 0:
+            raise ValueError("BEHAVIOR_START_COHORT_WAIT_MS cannot be negative.")
+        if self.BEHAVIOR_HEALTH_LOG_INTERVAL_SECONDS <= 0:
+            raise ValueError("BEHAVIOR_HEALTH_LOG_INTERVAL_SECONDS must be positive.")
+        if self.LIVE_PPE_TARGET_FPS <= 0 or self.LIVE_SIGN_TARGET_FPS <= 0:
+            raise ValueError("Live model target FPS values must be positive.")
+        if self.ANNOTATED_STREAM_DELAY_SECONDS < 0:
+            raise ValueError("ANNOTATED_STREAM_DELAY_SECONDS cannot be negative.")
+        if self.ANNOTATED_SIGN_TTL_SECONDS <= 0:
+            raise ValueError("ANNOTATED_SIGN_TTL_SECONDS must be positive.")
+        if not 0 <= self.ANNOTATED_PPE_MATCH_IOU <= 1:
+            raise ValueError("ANNOTATED_PPE_MATCH_IOU must be between 0 and 1.")
+        if self.ANNOTATED_ENCODER not in {"auto", "h264_nvenc", "libx264"}:
+            raise ValueError(
+                "ANNOTATED_ENCODER must be auto, h264_nvenc, or libx264."
+            )
+        if not self.ANNOTATED_PATH_SUFFIX or "/" in self.ANNOTATED_PATH_SUFFIX:
+            raise ValueError("ANNOTATED_PATH_SUFFIX must be a non-empty path suffix.")
+        if self.LIVE_SIGN_PHASE_FRAME < 0:
+            raise ValueError("LIVE_SIGN_PHASE_FRAME cannot be negative.")
+        if not 0 <= self.BEHAVIOR_POSE_REPAIR_MIN_CONFIDENCE <= 1:
+            raise ValueError(
+                "BEHAVIOR_POSE_REPAIR_MIN_CONFIDENCE must be between 0 and 1."
+            )
+        if self.BEHAVIOR_POSE_REPAIR_MAX_CENTER_SHIFT_RATIO <= 0:
+            raise ValueError(
+                "BEHAVIOR_POSE_REPAIR_MAX_CENTER_SHIFT_RATIO must be positive."
+            )
+        allowed_gmc = {"none", "orb", "sift", "ecc", "sparseOptFlow"}
+        if self.BEHAVIOR_GMC_METHOD not in allowed_gmc:
+            raise ValueError(
+                f"BEHAVIOR_GMC_METHOD must be one of {sorted(allowed_gmc)}."
+            )
+        if self.BEHAVIOR_FIXED_CAMERA:
+            self.BEHAVIOR_GMC_METHOD = "none"
         return self
 
     class Config:

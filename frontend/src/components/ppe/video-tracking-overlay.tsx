@@ -7,37 +7,79 @@ import { FallLiveDetection } from "@/types/behavior";
 import { PPESuggestion, ZoneSuggestion } from "@/types/zone";
 import { countLabel } from "@/lib/format";
 import { ChipActionButton, DetectionChip } from "@/components/ppe/detection-chip";
+import {
+  selectOverlayAtTimeWithDiagnostics,
+  type OverlaySelection,
+} from "@/lib/stream-timeline";
 
 export function TrackingOverlayLayer({
   overlay,
   currentTime,
+  behaviorDetections = [],
+  behaviorEnabled = false,
+  currentFrameIndex,
+  currentSourceTimeMs,
+  behaviorTtlFrames = 8,
+  onPresentation,
 }: {
   overlay?: TrackingOverlay;
   currentTime: number;
+  behaviorDetections?: FallLiveDetection[];
+  behaviorEnabled?: boolean;
+  currentFrameIndex?: number;
+  currentSourceTimeMs?: number | null;
+  behaviorTtlFrames?: number;
+  onPresentation?: (selection: OverlaySelection) => void;
 }) {
-  const currentBoxes = useCurrentBoxes(overlay, currentTime);
+  const selection = useCurrentBoxes(overlay, currentTime, currentSourceTimeMs);
+  const currentBoxes = selection.frames;
+  const mergedBoxes = mergeBehaviorDetections(
+    currentBoxes,
+    behaviorDetections,
+    behaviorEnabled,
+    currentFrameIndex,
+    behaviorTtlFrames,
+    currentSourceTimeMs,
+  );
+  const renderedSelection = useMemo(
+    () => describeRenderedSelection(mergedBoxes, currentSourceTimeMs, selection),
+    [currentSourceTimeMs, mergedBoxes, selection],
+  );
   const frameWidth = overlay?.frame_width || 16;
   const frameHeight = overlay?.frame_height || 9;
+  const aiDelayed = useMemo(() => {
+    if (currentSourceTimeMs == null || !overlay?.frames.length) return false;
+    const nearestDelta = Math.min(
+      ...overlay.frames
+        .filter((frame) => frame.source_time_ms !== undefined)
+        .map((frame) => Math.abs((frame.source_time_ms ?? 0) - currentSourceTimeMs)),
+    );
+    return Number.isFinite(nearestDelta) && nearestDelta > 8 * 1000 / (overlay.fps || 24);
+  }, [currentSourceTimeMs, overlay]);
+
+  useEffect(() => {
+    onPresentation?.(renderedSelection);
+  }, [onPresentation, renderedSelection]);
 
   if (!overlay) return null;
 
   return (
     <>
-      {currentBoxes.length > 0 ? (
+      {mergedBoxes.length > 0 ? (
         <svg
           className="pointer-events-none absolute inset-0 h-full w-full"
           viewBox={`0 0 ${frameWidth} ${frameHeight}`}
           preserveAspectRatio="none"
         >
           <TrackingBoxes
-            frames={currentBoxes}
+            frames={mergedBoxes}
             frameWidth={frameWidth}
             frameHeight={frameHeight}
           />
         </svg>
       ) : null}
       <div className="pointer-events-none absolute left-3 top-3 rounded bg-black/65 px-2 py-1 text-xs font-semibold text-white ring-1 ring-white/10">
-        Tracking {countLabel(currentBoxes.length, "worker")}
+        {aiDelayed ? "AI delayed" : `Tracking ${countLabel(mergedBoxes.length, "worker")}`}
       </div>
     </>
   );
@@ -53,7 +95,7 @@ export function VideoTrackingOverlay({
   const videoRef = useRef<HTMLVideoElement>(null);
   const animationRef = useRef<number | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
-  const currentBoxes = useCurrentBoxes(overlay, currentTime);
+  const currentBoxes = useCurrentBoxes(overlay, currentTime).frames;
   const frameWidth = overlay?.frame_width || 16;
   const frameHeight = overlay?.frame_height || 9;
 
@@ -113,50 +155,11 @@ export function VideoTrackingOverlay({
   );
 }
 
-export function FallOverlayLayer({
-  detections,
-  frameWidth,
-  frameHeight,
-  currentFrameIndex,
-  ttlFrames = 10,
-}: {
-  detections: FallLiveDetection[];
-  frameWidth?: number | null;
-  frameHeight?: number | null;
-  currentFrameIndex?: number;
-  ttlFrames?: number;
-}) {
-  const width = frameWidth || 16;
-  const height = frameHeight || 9;
-  const visibleDetections = detections.filter((detection) => {
-    if (!detection.bbox) return false;
-    if (detection.is_stale) return false;
-    if (detection.age_frames !== undefined && detection.age_frames > ttlFrames) return false;
-    if (detection.frame_index === undefined || currentFrameIndex === undefined) return true;
-    return Math.abs(currentFrameIndex - detection.frame_index) <= ttlFrames;
-  });
-
-  if (visibleDetections.length === 0) return null;
-
-  return (
-    <svg
-      className="pointer-events-none absolute inset-0 h-full w-full"
-      viewBox={`0 0 ${width} ${height}`}
-      preserveAspectRatio="none"
-    >
-      {visibleDetections.map((detection, index) => (
-        <FallDetectionShape
-          key={`${detection.track_id}-${detection.status}-${index}`}
-          detection={detection}
-          frameWidth={width}
-          frameHeight={height}
-        />
-      ))}
-    </svg>
-  );
-}
-
-function useCurrentBoxes(overlay: TrackingOverlay | undefined, currentTime: number) {
+function useCurrentBoxes(
+  overlay: TrackingOverlay | undefined,
+  currentTime: number,
+  currentSourceTimeMs?: number | null,
+) {
   const sortedFrameIndexes = useMemo(() => {
     if (!overlay?.frames.length) return [];
     return Array.from(new Set(overlay.frames.map((frame) => frame.frame_index))).sort(
@@ -171,172 +174,168 @@ function useCurrentBoxes(overlay: TrackingOverlay | undefined, currentTime: numb
     return grouped;
   }, [overlay]);
   const currentBoxes = useMemo(() => {
-    if (!overlay || sortedFrameIndexes.length === 0) return [];
+    if (!overlay || sortedFrameIndexes.length === 0) {
+      return { frames: [], mode: "missing", signedSkewMs: null } satisfies OverlaySelection;
+    }
+    if (currentSourceTimeMs !== undefined) {
+      return selectOverlayAtTimeWithDiagnostics(
+        overlay.frames,
+        currentSourceTimeMs ?? null,
+        overlay.fps || 24,
+      );
+    }
     const currentFrame = Math.round(currentTime * overlay.fps);
     const nearestFrame = findNearestFrame(sortedFrameIndexes, currentFrame);
-    if (nearestFrame === null) return [];
+    if (nearestFrame === null) {
+      return { frames: [], mode: "missing", signedSkewMs: null } satisfies OverlaySelection;
+    }
 
     const tolerance = Math.max(overlay.stride || 1, 1) * 30; // Increased tolerance for slow inference
-    if (Math.abs(nearestFrame - currentFrame) > tolerance) return [];
-    return framesByIndex.get(nearestFrame) ?? [];
-  }, [currentTime, framesByIndex, overlay, sortedFrameIndexes]);
+    if (Math.abs(nearestFrame - currentFrame) > tolerance) {
+      return { frames: [], mode: "missing", signedSkewMs: null } satisfies OverlaySelection;
+    }
+    return {
+      frames: framesByIndex.get(nearestFrame) ?? [],
+      mode: "exact",
+      signedSkewMs: null,
+    } satisfies OverlaySelection;
+  }, [currentSourceTimeMs, currentTime, framesByIndex, overlay, sortedFrameIndexes]);
   return currentBoxes;
 }
 
-function FallDetectionShape({
-  detection,
-  frameWidth,
-  frameHeight,
-}: {
-  detection: FallLiveDetection;
-  frameWidth: number;
-  frameHeight: number;
-}) {
-  const color = fallColor(detection.status);
-  const label = fallLabel(detection);
-  const box = detection.bbox;
-  const width = Math.max(0, box.x2 - box.x1);
-  const height = Math.max(0, box.y2 - box.y1);
-  const panelWidth = Math.min(
-    frameWidth - box.x1,
-    Math.max(frameWidth * 0.20, label.length * frameWidth * 0.008),
-  );
-  const panelHeight = frameHeight * 0.052;
-  const panelY =
-    box.y1 > panelHeight + frameHeight * 0.012
-      ? box.y1 - panelHeight - frameHeight * 0.008
-      : Math.min(frameHeight - panelHeight, box.y2 + frameHeight * 0.008);
-  const panelX = Math.min(box.x1, frameWidth - panelWidth);
+function mergeBehaviorDetections(
+  frames: TrackingOverlayFrame[],
+  detections: FallLiveDetection[],
+  behaviorEnabled: boolean,
+  currentFrameIndex: number | undefined,
+  ttlFrames: number,
+  currentSourceTimeMs?: number | null,
+): TrackingOverlayFrame[] {
+  const merged = frames.map((frame) => ({ ...frame }));
+  const visible = detections
+    .filter((detection) => isVisibleBehaviorDetection(
+      detection,
+      currentFrameIndex,
+      ttlFrames,
+      currentSourceTimeMs,
+    ))
+    .sort(compareBehaviorRecency);
 
-  return (
-    <g>
-      <rect
-        x={box.x1}
-        y={box.y1}
-        width={width}
-        height={height}
-        fill="transparent"
-        stroke={color}
-        strokeWidth={Math.max(frameWidth, frameHeight) * 0.005}
-        opacity={detection.is_interpolated ? 0.68 : 1}
-      />
-      <FallSkeleton
-        keypoints={detection.keypoints ?? []}
-        color={color}
-        frameWidth={frameWidth}
-        opacity={detection.is_interpolated ? 0.62 : 1}
-      />
-      <rect
-        x={panelX}
-        y={panelY}
-        width={panelWidth}
-        height={panelHeight}
-        rx={frameWidth * 0.006}
-        fill="rgba(2, 6, 23, 0.9)"
-        stroke={color}
-        strokeWidth={Math.max(frameWidth, frameHeight) * 0.0015}
-        opacity={detection.is_interpolated ? 0.82 : 1}
-      />
-      <text
-        x={panelX + frameWidth * 0.008}
-        y={panelY + panelHeight * 0.64}
-        fill="#ffffff"
-        fontSize={frameHeight * 0.024}
-        fontWeight={800}
-        opacity={detection.is_interpolated ? 0.86 : 1}
-      >
-        {label}
-      </text>
-    </g>
-  );
+  for (const detection of visible) {
+    const matchedIndex = findBehaviorMatch(merged, detection);
+    const behavior: NonNullable<TrackingOverlayFrame["behavior"]> = {
+      status: detection.status,
+      score: detection.score,
+      track_id: detection.track_id,
+      source_time_ms: detection.source_time_ms,
+    };
+    if (matchedIndex >= 0) {
+      const matched = merged[matchedIndex];
+      if (!matched.behavior) {
+        merged[matchedIndex] = { ...matched, behavior };
+      }
+      continue;
+    }
+    merged.push({
+      frame_index: detection.frame_index ?? currentFrameIndex ?? 0,
+      time_seconds: 0,
+      track_id: detection.track_id,
+      bbox: detection.bbox,
+      confidence: detection.person_confidence,
+      compliant: true,
+      missing_equipment: [],
+      status: "unknown",
+      behavior,
+      stream_epoch: detection.stream_epoch,
+      media_pts_ms: detection.media_pts_ms,
+      source_time_ms: detection.source_time_ms,
+      inference_completed_ms: detection.inference_completed_ms,
+      discontinuity_sequence: detection.discontinuity_sequence,
+    });
+  }
+  return behaviorEnabled
+    ? merged.map((frame) => frame.behavior ? frame : {
+      ...frame,
+      behavior: { status: "unknown", score: 0, track_id: frame.track_id },
+    })
+    : merged;
 }
 
-function FallSkeleton({
-  keypoints,
-  color,
-  frameWidth,
-  opacity = 1,
-}: {
-  keypoints: number[][];
-  color: string;
-  frameWidth: number;
-  opacity?: number;
-}) {
-  if (keypoints.length === 0) return null;
-  const usablePoint = (index: number) => {
-    const point = keypoints[index];
-    if (!point || point.length < 3 || point[2] < 0.12 || point[0] <= 0 || point[1] <= 0) return null;
-    return { x: point[0], y: point[1] };
+function isVisibleBehaviorDetection(
+  detection: FallLiveDetection,
+  currentFrameIndex: number | undefined,
+  ttlFrames: number,
+  currentSourceTimeMs?: number | null,
+) {
+  const { x1, y1, x2, y2 } = detection.bbox ?? {};
+  if (![x1, y1, x2, y2].every(Number.isFinite) || x2 <= x1 || y2 <= y1) return false;
+  if (detection.is_stale || (detection.age_frames !== undefined && detection.age_frames > ttlFrames)) return false;
+  if (currentSourceTimeMs != null && detection.source_time_ms !== undefined) {
+    const ageMs = currentSourceTimeMs - detection.source_time_ms;
+    return ageMs >= 0 && ageMs <= ttlFrames * 1000 / 24;
+  }
+  return detection.frame_index === undefined || currentFrameIndex === undefined
+    ? true
+    : Math.abs(currentFrameIndex - detection.frame_index) <= ttlFrames;
+}
+
+function findBehaviorMatch(frames: TrackingOverlayFrame[], detection: FallLiveDetection): number {
+  const sameTrack = frames.findIndex(
+    (frame) => frame.track_id !== undefined && frame.track_id === detection.track_id,
+  );
+  if (sameTrack >= 0) return sameTrack;
+  let bestIndex = -1;
+  let bestIou = 0.25;
+  for (const [index, frame] of frames.entries()) {
+    const iou = boxIou(frame.bbox, detection.bbox);
+    if (iou > bestIou) {
+      bestIou = iou;
+      bestIndex = index;
+    }
+  }
+  return bestIndex;
+}
+
+function boxIou(a: TrackingOverlayFrame["bbox"], b: FallLiveDetection["bbox"]) {
+  const overlapWidth = Math.max(0, Math.min(a.x2, b.x2) - Math.max(a.x1, b.x1));
+  const overlapHeight = Math.max(0, Math.min(a.y2, b.y2) - Math.max(a.y1, b.y1));
+  const overlap = overlapWidth * overlapHeight;
+  const union = (a.x2 - a.x1) * (a.y2 - a.y1) + (b.x2 - b.x1) * (b.y2 - b.y1) - overlap;
+  return union > 0 ? overlap / union : 0;
+}
+
+function compareBehaviorRecency(a: FallLiveDetection, b: FallLiveDetection) {
+  const aTime = a.source_time_ms ?? a.frame_index ?? 0;
+  const bTime = b.source_time_ms ?? b.frame_index ?? 0;
+  return bTime - aTime
+    || behaviorPriority(b.status) - behaviorPriority(a.status)
+    || b.score - a.score;
+}
+
+function describeRenderedSelection(
+  frames: TrackingOverlayFrame[],
+  currentSourceTimeMs: number | null | undefined,
+  geometrySelection: OverlaySelection,
+): OverlaySelection {
+  if (currentSourceTimeMs == null || frames.length === 0) return geometrySelection;
+  const sourceTimes = frames.flatMap((frame) => [
+    frame.source_time_ms,
+    frame.behavior?.source_time_ms,
+  ]).filter((value): value is number => typeof value === "number");
+  if (sourceTimes.length === 0) return geometrySelection;
+  const signedSkewMs = sourceTimes
+    .map((sourceTimeMs) => sourceTimeMs - currentSourceTimeMs)
+    .reduce((worst, current) => Math.abs(current) > Math.abs(worst) ? current : worst, 0);
+  return {
+    frames: geometrySelection.frames,
+    mode: Math.abs(signedSkewMs) > 0.5 ? "held" : geometrySelection.mode,
+    signedSkewMs,
   };
-
-  return (
-    <>
-      {FALL_SKELETON.map(([a, b]) => {
-        const pointA = usablePoint(a);
-        const pointB = usablePoint(b);
-        if (!pointA || !pointB) return null;
-        return (
-          <line
-            key={`${a}-${b}`}
-            x1={pointA.x}
-            y1={pointA.y}
-            x2={pointB.x}
-            y2={pointB.y}
-            stroke={color}
-            strokeWidth={frameWidth * 0.003}
-            strokeLinecap="round"
-            opacity={opacity}
-          />
-        );
-      })}
-      {keypoints.map((_, index) => {
-        const point = usablePoint(index);
-        if (!point) return null;
-        return (
-          <circle
-            key={index}
-            cx={point.x}
-            cy={point.y}
-            r={frameWidth * 0.004}
-            fill={color}
-            opacity={opacity}
-          />
-        );
-      })}
-    </>
-  );
 }
 
-function fallColor(status: FallLiveDetection["status"]): string {
-  if (status === "fall") return "#ef4444";
-  if (status === "fall_risk") return "#f59e0b";
-  return "#22c55e";
+function behaviorPriority(status: NonNullable<TrackingOverlayFrame["behavior"]>["status"]) {
+  return status === "falling" ? 3 : status === "running" ? 2 : status === "others" ? 1 : 0;
 }
-
-function fallLabel(detection: FallLiveDetection): string {
-  const label =
-    detection.status === "fall"
-      ? "detected"
-      : detection.status === "fall_risk"
-      ? "risk"
-      : "normal";
-  return `Fall: ${label} ${detection.score.toFixed(2)}`;
-}
-
-const FALL_SKELETON: Array<[number, number]> = [
-  [5, 6],
-  [5, 11],
-  [6, 12],
-  [11, 12],
-  [5, 7],
-  [7, 9],
-  [6, 8],
-  [8, 10],
-  [11, 13],
-  [13, 15],
-  [12, 14],
-  [14, 16],
-];
 
 function TrackingBoxes({
   frames,
@@ -402,7 +401,7 @@ function TrackingBoxes({
                   key={label}
                   x={panelX + frameWidth * 0.008}
                   dy={labelIndex === 0 ? 0 : lineHeight}
-                  fill={labelColor(label, color)}
+                  fill={color}
                 >
                   {label}
                 </tspan>
@@ -418,7 +417,7 @@ function TrackingBoxes({
 function trackingLabels(frame: TrackingOverlayFrame): string[] {
   const labels: string[] = [];
   if (frame.missing_equipment.length > 0) {
-    labels.push(`PPE: ${frame.missing_equipment.map(formatEquipmentLabel).join(", ")}`);
+    labels.push(`PPE: ${ppeViolationLabel(frame.missing_equipment)}`);
   }
   if (frame.zone_type) {
     const zoneLabel =
@@ -429,22 +428,15 @@ function trackingLabels(frame: TrackingOverlayFrame): string[] {
         : "Walkway violation";
     labels.push(`Zone: ${frame.zone_name ? `${zoneLabel} - ${frame.zone_name}` : zoneLabel}`);
   }
-  if (labels.length === 0) {
-    labels.push(frame.status === "unknown" ? unknownStatusLabel(frame) : "Compliant");
+  if (frame.behavior?.status === "running" || frame.behavior?.status === "falling") {
+    const behaviorLabel =
+      frame.behavior.status[0].toUpperCase() + frame.behavior.status.slice(1);
+    labels.push(`Behavior: ${behaviorLabel}`);
   }
-  labels.push(`${formatFrameRole(frame)} ${frame.track_id ?? frame.person_id ?? "-"}`);
+  if (labels.length === 0) {
+    labels.push(frame.status === "violation" ? "Violation" : "Compliant");
+  }
   return labels;
-}
-
-function unknownStatusLabel(frame: TrackingOverlayFrame): string {
-  if (frame.role === "worker" || frame.role === "janitor") return "PPE status pending";
-  return "Role unknown";
-}
-
-function formatFrameRole(frame: TrackingOverlayFrame): string {
-  if (frame.role === "worker") return "Worker";
-  if (frame.role === "janitor") return "Janitor";
-  return "Person";
 }
 
 function formatEquipmentLabel(label: string): string {
@@ -452,26 +444,31 @@ function formatEquipmentLabel(label: string): string {
   return label;
 }
 
-function trackingColor(frame: TrackingOverlayFrame): string {
-  if (frame.missing_equipment.length > 0 || frame.status === "violation" || !frame.compliant) {
-    return "#ef4444";
-  }
-  if (frame.status === "unknown") return "#a1a1aa";
-  return "#84cc16";
+function ppeViolationLabel(missingEquipment: string[]): string {
+  const normalized = new Set(missingEquipment.map((item) => item.trim().toLowerCase()));
+  const hasHelmet = ["helmet", "hardhat", "safety helmet"].some((item) => normalized.has(item));
+  const hasVest = ["vest", "safety vest"].some((item) => normalized.has(item));
+  const hasCoverall = normalized.has("cleaning coverall");
+  const hasUniform = normalized.has("role uniform");
+  if (hasHelmet && hasVest) return "Missing Helmet and Vest";
+  if (hasHelmet && hasCoverall) return "Missing Helmet and Cleaning Coverall";
+  if (hasHelmet && hasUniform) return "Missing Helmet and Role Uniform";
+  if (hasHelmet) return "Missing Safety Helmet";
+  if (hasVest) return "Missing Safety Vest";
+  if (hasCoverall) return "Missing Cleaning Coverall";
+  if (hasUniform) return "Missing Role Uniform";
+  return `Missing ${missingEquipment.map(formatEquipmentLabel).join(" and ")}`;
 }
 
-function labelColor(label: string, fallback: string): string {
-  if (label.startsWith("PPE:")) return "#fca5a5";
-  if (label.startsWith("Zone:")) return fallback;
-  if (
-    label.startsWith("Track") ||
-    label.startsWith("Worker") ||
-    label.startsWith("Janitor") ||
-    label.startsWith("Person")
-  ) {
-    return "#cbd5e1";
+function trackingColor(frame: TrackingOverlayFrame): string {
+  if (frame.missing_equipment.length > 0 || frame.status === "violation") {
+    return "#ef4444";
   }
-  return fallback;
+  if (frame.zone_type) return "#ef4444";
+  if (frame.behavior?.status === "falling" || frame.behavior?.status === "running") {
+    return "#ef4444";
+  }
+  return "#84cc16";
 }
 
 const SIGN_HUMAN_NAMES: Record<string, string> = {

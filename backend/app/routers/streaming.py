@@ -1,12 +1,19 @@
 import asyncio
 import itertools
 import logging
+import time
 from collections import deque
 from pathlib import Path
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import HTMLResponse
 from app.schemas.streaming import StreamEvent
 from app.services.ppe_detector import PPEDetector
+from app.services.stream_health import (
+    increment_stream_health,
+    mark_stream_event,
+    observe_stream_timing,
+    update_stream_health,
+)
 from app.storage.local_paths import UPLOAD_DIR, ensure_upload_dir
 
 router = APIRouter(tags=["streaming"])
@@ -34,18 +41,29 @@ async def stream_video_ws(
     enable_ppe: bool = Query(True),
     enable_zone: bool = Query(True),
     enable_fall: bool = Query(False),
+    enable_sign: bool = Query(True),
+    metadata_only: bool = Query(False),
 ):
     global _current_cancel
     conn_id = next(_conn_counter)
     await websocket.accept()
     ensure_upload_dir()
-    logger.info(f"[conn {conn_id}] WS accepted (ppe={enable_ppe}, zone={enable_zone}, fall={enable_fall})")
+    logger.info(
+        "[conn %s] WS accepted (ppe=%s, zone=%s, fall=%s, metadata_only=%s)",
+        conn_id,
+        enable_ppe,
+        enable_zone,
+        enable_fall,
+        metadata_only,
+    )
     
     # Dynamic settings state
     settings_state = {
         "enable_ppe": enable_ppe,
         "enable_zone": enable_zone,
         "enable_fall": enable_fall,
+        "enable_sign": enable_sign,
+        "metadata_only": metadata_only,
         "dismissed_signatures": [],
         "dismissed_ppe_signatures": [],
         "reload_zones": False,
@@ -127,8 +145,8 @@ async def stream_video_ws(
                         settings_state["enable_ppe"] = bool(feats["ppe_detection"])
                     if "zone_monitoring" in feats:
                         settings_state["enable_zone"] = bool(feats["zone_monitoring"])
-                    if "fall_detection" in feats:
-                        settings_state["enable_fall"] = bool(feats["fall_detection"])
+                    if "behavior_detection" in feats or "fall_detection" in feats:
+                        settings_state["enable_fall"] = bool(feats.get("behavior_detection", feats.get("fall_detection")))
                 else:
                     if "enable_ppe" in new_settings:
                         settings_state["enable_ppe"] = bool(new_settings["enable_ppe"])
@@ -136,9 +154,11 @@ async def stream_video_ws(
                         settings_state["enable_zone"] = bool(new_settings["enable_zone"])
                     if "enable_fall" in new_settings:
                         settings_state["enable_fall"] = bool(new_settings["enable_fall"])
+                    if "enable_sign" in new_settings:
+                        settings_state["enable_sign"] = bool(new_settings["enable_sign"])
                 if "viewing" in new_settings:
                     settings_state["viewing"] = bool(new_settings["viewing"])
-                logger.info(f"[conn {conn_id}] [SIGNAL] Received dynamic settings update: {settings_state}")
+                logger.debug(f"[conn {conn_id}] [SIGNAL] Received dynamic settings update: {settings_state}")
             elif data.get("event") == "dismiss_suggestion":
                 sig = data.get("data", {}).get("suggestion_id")
                 if sig:
@@ -152,6 +172,36 @@ async def stream_video_ws(
             elif data.get("event") == "reload_zones":
                 settings_state["reload_zones"] = True
                 logger.info(f"[conn {conn_id}] [SIGNAL] Zone reload requested by client")
+            elif data.get("event") == "playback_metrics":
+                metrics = data.get("data", {})
+                update_stream_health(
+                    video_name,
+                    hls_rebuffer_count=max(0, int(metrics.get("rebuffer_count", 0))),
+                    hls_dropped_video_frames=max(
+                        0,
+                        int(metrics.get("dropped_video_frames", 0)),
+                    ),
+                    overlay_selection_mode=(
+                        metrics.get("overlay_selection_mode")
+                        if metrics.get("overlay_selection_mode")
+                        in {"exact", "interpolated", "held", "missing"}
+                        else "missing"
+                    ),
+                )
+                for metric_name, timing_name in (
+                    ("live_delay_ms", "hls_live_delay"),
+                    ("overlay_skew_ms", "overlay_video_skew"),
+                ):
+                    value = metrics.get(metric_name)
+                    if isinstance(value, (int, float)) and value >= 0:
+                        observe_stream_timing(video_name, timing_name, float(value))
+                signed_skew = metrics.get("rendered_overlay_signed_skew_ms")
+                if isinstance(signed_skew, (int, float)):
+                    observe_stream_timing(
+                        video_name,
+                        "rendered_overlay_signed_skew",
+                        float(signed_skew),
+                    )
 
     settings_task = asyncio.create_task(listen_for_settings())
 
@@ -215,9 +265,29 @@ async def stream_video_ws(
         # Binary JPEG frame first, then the JSON envelope referencing it via
         # has_image — same connection, so WS delivers them to the client in
         # this order (PERF_PLAN.md Tier 2.2: raw bytes instead of base64-in-JSON).
+        send_started = time.perf_counter()
         if event.image_bytes is not None:
             await websocket.send_bytes(event.image_bytes)
         await websocket.send_text(event.model_dump_json())
+        websocket_ms = (time.perf_counter() - send_started) * 1000.0
+        observe_stream_timing(video_name, "websocket_send", websocket_ms)
+        if event.source_time_ms is not None:
+            now_ms = time.time() * 1000.0
+            observe_stream_timing(
+                video_name,
+                "metadata_delivery_age",
+                max(0.0, now_ms - event.source_time_ms),
+            )
+            if event.inference_completed_ms is not None:
+                observe_stream_timing(
+                    video_name,
+                    "inference_ready_age",
+                    max(0.0, event.inference_completed_ms - event.source_time_ms),
+                )
+            mark_stream_event(video_name, "metadata_sent")
+        if event.event == "frame" and event.image_bytes is not None:
+            increment_stream_health(video_name, preview_sent_frames=1)
+            mark_stream_event(video_name, "preview_sent")
 
     async def produce() -> None:
         nonlocal latest_frame, dropped_frames
@@ -228,6 +298,7 @@ async def stream_video_ws(
                 if event.event == "frame":
                     if latest_frame is not None:
                         dropped_frames += 1
+                        increment_stream_health(video_name, preview_coalesced_frames=1)
                     latest_frame = event
                 else:
                     reliable_events.append(event)
@@ -281,7 +352,7 @@ async def stream_video_ws(
             # frame — leaving this infinite stream running forever.
             await asyncio.sleep(0)
             if sent % 120 == 0:
-                logger.info(
+                logger.debug(
                     f"[conn {conn_id}] sent {sent} events, dropped {dropped_frames} stale frame(s) "
                     f"(client_state={websocket.client_state.name}, disconnect_event={disconnect_event.is_set()})"
                 )

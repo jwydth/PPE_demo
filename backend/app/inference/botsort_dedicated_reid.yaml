@@ -1,0 +1,16 @@
+# BoT-SORT/ReID profile used by the behavior model's training pipeline.
+tracker_type: botsort
+track_high_thresh: 0.20
+track_low_thresh: 0.05
+new_track_thresh: 0.20
+track_buffer: 72
+match_thresh: 0.90
+fuse_score: true
+# Factory cameras are fixed; optical-flow camera-motion compensation adds a
+# full CPU pass per frame without improving tracking. The runtime can override
+# this through BEHAVIOR_GMC_METHOD when moving cameras are introduced.
+gmc_method: none
+proximity_thresh: 0.15
+appearance_thresh: 0.65
+with_reid: true
+model: weights/reid.pt

@@ -11,6 +11,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
+from app.core.runtime import configure_inference_runtime
+
+configure_inference_runtime()
+
 from app.routers import (
     analytics,
     cameras,
@@ -83,6 +87,11 @@ async def startup() -> None:
 @app.on_event("shutdown")
 async def shutdown() -> None:
     _report_scheduler.shutdown(wait=False)
+    from app.services.behavior_inference import shutdown_behavior_scheduler
+    from app.services.frame_hub import frame_hubs
+
+    await frame_hubs.close_all()
+    await shutdown_behavior_scheduler()
 
 
 @app.get("/health", tags=["meta"])

@@ -24,14 +24,22 @@ def create_db_and_tables() -> None:
             is_active=True,
         ),
         Feature(
-            key="fall_detection",
-            name="Fall Detection",
-            description="Detect workers falling in real-time.",
+            key="behavior_detection",
+            name="Behavior Detection",
+            description="Classify worker behavior: others, running, and falling.",
             is_active=True,
         ),
     ]
 
     with Session(engine) as session:
+        # Rename the old feature in-place so existing camera feature links keep
+        # their ID and state instead of creating a disconnected new toggle.
+        legacy_behavior = session.exec(select(Feature).where(Feature.key == "fall_detection")).first()
+        canonical_behavior = session.exec(select(Feature).where(Feature.key == "behavior_detection")).first()
+        if legacy_behavior and not canonical_behavior:
+            legacy_behavior.key = "behavior_detection"
+            legacy_behavior.name = "Behavior Detection"
+            legacy_behavior.description = "Classify worker behavior: others, running, and falling."
         for feat in default_features:
             statement = select(Feature).where(Feature.key == feat.key)
             existing = session.exec(statement).first()

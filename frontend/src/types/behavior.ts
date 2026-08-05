@@ -46,7 +46,7 @@ export interface BehaviorIncident {
   evidence: BehaviorEvidence[];
 }
 
-export type FallLiveStatus = "normal" | "fall_risk" | "fall" | "no_detection" | "unavailable";
+export type FallLiveStatus = "others" | "running" | "falling" | "no_detection" | "unavailable";
 
 export interface FallLiveSummary {
   frame_index?: number;
@@ -55,9 +55,9 @@ export interface FallLiveSummary {
   is_stale?: boolean;
   is_interpolated?: boolean;
   status: FallLiveStatus;
-  fall_count: number;
-  fall_risk_count: number;
-  normal_count: number;
+  others_count: number;
+  running_count: number;
+  falling_count: number;
   person_count: number;
   top_label: string;
   top_confidence: number;
@@ -71,7 +71,7 @@ export interface FallLiveDetection {
   is_stale?: boolean;
   is_interpolated?: boolean;
   track_id: number;
-  status: "normal" | "fall_risk" | "fall";
+  status: "unknown" | "others" | "running" | "falling";
   score: number;
   person_confidence: number;
   bbox: {
@@ -83,4 +83,9 @@ export interface FallLiveDetection {
   features: Record<string, number>;
   keypoints?: number[][] | null;
   incident_id?: number | null;
+  stream_epoch?: string;
+  media_pts_ms?: number;
+  source_time_ms?: number;
+  inference_completed_ms?: number;
+  discontinuity_sequence?: number;
 }

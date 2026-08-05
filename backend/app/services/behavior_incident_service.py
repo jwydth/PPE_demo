@@ -28,6 +28,7 @@ from app.schemas.fall_detection import (
     BehaviorIncidentSubjectRead,
 )
 from app.services import ServiceNotFoundError, ServiceValidationError
+from app.services.camera_identity import normalize_camera_source_key
 from app.storage.evidence_storage import EvidenceStorage, get_evidence_storage
 
 logger = logging.getLogger(__name__)
@@ -55,9 +56,11 @@ class BehaviorIncidentService:
         self.camera_repository = camera_repository
         self.factory_repository = factory_repository
 
-    def persist_fall_incident(
+    def persist_behavior_incident(
         self,
         *,
+        behavior_type: BehaviorType,
+        severity: BehaviorIncidentSeverity,
         timestamp: str | datetime,
         details: str,
         local_snapshot_path: str | Path,
@@ -75,17 +78,18 @@ class BehaviorIncidentService:
         ended_at: str | datetime | None = None,
     ) -> BehaviorIncidentBundle:
         occurred_at = _parse_timestamp(timestamp)
-        resolved_camera_id = self._resolve_camera_id(camera_id, video_name)
+        source_key = _normalized_source_key(video_name)
+        resolved_camera_id = self._resolve_camera_id(camera_id, source_key)
         storage = self._require_storage()
         stored_object = storage.upload_behavior_snapshot(local_snapshot_path)
 
         incident = self.repository.create(
             BehaviorIncident(
                 camera_id=_optional_positive_id(resolved_camera_id, "camera_id"),
-                source_key=_optional_text(video_name),
-                behavior_type=BehaviorType.FALL_DETECTED.value,
+                source_key=source_key,
+                behavior_type=behavior_type.value,
                 status=BehaviorIncidentStatus.NEW.value,
-                severity=BehaviorIncidentSeverity.HIGH.value,
+                severity=severity.value,
                 confidence=_validate_confidence(confidence),
                 track_id=track_id,
                 frame_start=_optional_nonnegative(frame_start, "frame_start"),
@@ -123,6 +127,15 @@ class BehaviorIncidentService:
         return BehaviorIncidentBundle(
             incident=self._to_read(incident),
             object_key=stored_object.object_key,
+        )
+
+    # Compatibility entrypoint for existing integrations. New behavioral
+    # inference must call persist_behavior_incident with its actual label.
+    def persist_fall_incident(self, **kwargs: Any) -> BehaviorIncidentBundle:
+        return self.persist_behavior_incident(
+            behavior_type=BehaviorType.FALL_DETECTED,
+            severity=BehaviorIncidentSeverity.HIGH,
+            **kwargs,
         )
 
     def get_incident(self, incident_id: int) -> BehaviorIncidentRead:
@@ -371,6 +384,11 @@ def _optional_text(value: str | None) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def _normalized_source_key(value: str | None) -> str | None:
+    normalized = _optional_text(value)
+    return normalize_camera_source_key(normalized) if normalized is not None else None
 
 
 def get_behavior_incident_service(

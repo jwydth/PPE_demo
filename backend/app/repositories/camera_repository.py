@@ -7,6 +7,7 @@ from sqlmodel import Session, select
 from app.db.session import get_session
 from app.models.camera import Camera
 from app.repositories import RepositoryError
+from app.services.camera_identity import normalize_camera_source_key
 
 
 class CameraRepository:
@@ -17,6 +18,7 @@ class CameraRepository:
         self.session = session
 
     def create(self, camera: Camera) -> Camera:
+        camera.source_key = normalize_camera_source_key(camera.source_key)
         self.session.add(camera)
         return self._commit_and_refresh(camera, "create camera")
 
@@ -29,7 +31,9 @@ class CameraRepository:
 
     def get_by_source_key(self, source_key: str) -> Camera | None:
         try:
-            statement = select(Camera).where(Camera.source_key == source_key)
+            statement = select(Camera).where(
+                Camera.source_key == normalize_camera_source_key(source_key)
+            )
             return self.session.exec(statement).first()
         except SQLAlchemyError as exc:
             self.session.rollback()

@@ -32,8 +32,8 @@ import {
 } from "@/lib/ppe-api";
 import { BoundingBoxView } from "@/components/ppe/bounding-box-view";
 import { FileUpload } from "@/components/ppe/file-upload";
+import { LlHlsVideo } from "@/components/ppe/ll-hls-video";
 import {
-  FallOverlayLayer,
   PPESuggestionBanner,
   SuggestionOverlayLayer,
   TrackingOverlayLayer,
@@ -55,7 +55,7 @@ import { useZoneDrawing } from "@/hooks/useZoneDrawing";
 import { useLiveStream } from "@/hooks/useLiveStream";
 import { useAutoZoneSuggestions } from "@/hooks/useAutoZoneSuggestions";
 import { AnalysisPhase, DraftZone } from "@/hooks/camera-panel-types";
-import { BehaviorIncident, FallLiveSummary } from "@/types/behavior";
+import { BehaviorIncident } from "@/types/behavior";
 import { useSafetyKpis } from "@/hooks/useSafetyKpis";
 import { TopBar, type DashboardView } from "./top-bar";
 import { ZoneSidebar } from "./zone-sidebar";
@@ -87,12 +87,16 @@ function filterTrackingOverlay(
   {
     showPpe,
     showZone,
+    showBehavior,
   }: {
     showPpe: boolean;
     showZone: boolean;
+    showBehavior: boolean;
   },
 ): TrackingOverlay | undefined {
-  if (!overlay || (!showPpe && !showZone)) return undefined;
+  // Behavior needs the same person boxes as PPE/Zone, including during its
+  // 60-frame warm-up where every person is labelled Behavior: Unknown.
+  if (!overlay || (!showPpe && !showZone && !showBehavior)) return undefined;
 
   const frames = overlay.frames.map((frame) => {
     const missingEquipment = showPpe ? frame.missing_equipment : [];
@@ -133,10 +137,41 @@ interface CameraConfig {
 }
 
 const DEFAULT_CAMERAS: CameraConfig[] = [
-  { id: 1, name: "Production Area", rtspUrl: "rtsp://127.0.0.1:8554/stream1", zoneId: "Z01", homeZoneId: null, active: true },
-  { id: 2, name: "Warehouse Intake", rtspUrl: "rtsp://127.0.0.1:8554/stream2", zoneId: "Z02", homeZoneId: null, active: false },
+  { id: 2, name: "Production Area", rtspUrl: "rtsp://127.0.0.1:8554/stream1", zoneId: "Z01", homeZoneId: null, active: true },
+  { id: 1, name: "Warehouse Intake", rtspUrl: "rtsp://127.0.0.1:8554/stream2", zoneId: "Z02", homeZoneId: null, active: false },
   { id: 3, name: "Packing Area", rtspUrl: "rtsp://127.0.0.1:8554/stream3", zoneId: "Z03", homeZoneId: null, active: false },
 ];
+
+function normalizeCameraSourceKey(value: string): string {
+  const normalized = value.trim();
+  try {
+    const parsed = new URL(normalized);
+    if (
+      (parsed.protocol === "rtsp:" || parsed.protocol === "rtsps:") &&
+      (parsed.hostname === "localhost" || parsed.hostname === "[::1]")
+    ) {
+      parsed.hostname = "127.0.0.1";
+    }
+    return parsed.toString();
+  } catch {
+    return normalized;
+  }
+}
+
+function normalizeConfiguredCameras(cameras: CameraConfig[]): CameraConfig[] {
+  const sourceKeys = new Set<string>();
+  return cameras
+    .map((camera) => ({
+      ...camera,
+      rtspUrl: normalizeCameraSourceKey(camera.rtspUrl),
+      homeZoneId: camera.homeZoneId ?? null,
+    }))
+    .filter((camera) => {
+      if (!camera.rtspUrl || sourceKeys.has(camera.rtspUrl)) return false;
+      sourceKeys.add(camera.rtspUrl);
+      return true;
+    });
+}
 
 interface CameraPanelProps {
   cameras: CameraConfig[];
@@ -184,7 +219,7 @@ function CameraPanel({
     : zoneEnabled;
 
   const currentFallEnabled = viewMode === "single"
-    ? (cameraFeatureMap[activeCameraId]?.["fall_detection"] ?? fallEnabled)
+    ? (cameraFeatureMap[activeCameraId]?.["behavior_detection"] ?? cameraFeatureMap[activeCameraId]?.["fall_detection"] ?? fallEnabled)
     : fallEnabled;
 
   useEffect(() => {
@@ -385,32 +420,14 @@ function CameraPanel({
   };
 
   const handleSaveCameraConfig = async (updatedCameras: CameraConfig[]) => {
+    const camerasToSave = normalizeConfiguredCameras(updatedCameras);
+    const currentSource = cameras.find(
+      (camera) => camera.id === activeCameraId,
+    )?.rtspUrl;
     // Identify cameras that were deleted
-    const deletedCameras = cameras.filter((c) => !updatedCameras.some((uc) => uc.id === c.id));
-
-    onCamerasUpdate(updatedCameras);
-    localStorage.setItem("ppe_demo_cameras", JSON.stringify(updatedCameras));
-    setIsConfiguringCameras(false);
-
-    // Sync all camera connections to open/close sockets as needed
-    liveStream.syncCameraConnections(updatedCameras);
-
-    const currentCam = updatedCameras.find((c) => c.id === activeCameraId);
-    if (currentCam) {
-      if (!currentCam.active) {
-        const firstActive = updatedCameras.find((c) => c.active) || updatedCameras[0];
-        if (firstActive) {
-          void handleCameraChange(firstActive.id);
-        }
-      } else {
-        void handleCameraChange(activeCameraId);
-      }
-    } else if (updatedCameras.length > 0) {
-      const firstActive = updatedCameras.find((c) => c.active) || updatedCameras[0];
-      if (firstActive) {
-        void handleCameraChange(firstActive.id);
-      }
-    }
+    const deletedCameras = cameras.filter(
+      (camera) => !camerasToSave.some((candidate) => candidate.id === camera.id),
+    );
 
     try {
       // First, handle deletions on the backend
@@ -426,7 +443,7 @@ function CameraPanel({
 
       // Then save/ensure updated cameras
       await Promise.all(
-        updatedCameras.map(async (cam) => {
+        camerasToSave.map(async (cam) => {
           const backendCamera = await ensureCamera(cam.name, cam.rtspUrl);
           await setCameraHomeZone(backendCamera.id, cam.homeZoneId);
         }),
@@ -434,12 +451,31 @@ function CameraPanel({
 
       // Re-fetch backend cameras to sync any homeZoneId changes
       const latestBackendCameras = await getCameras();
-      const reconciled = updatedCameras.map((cam) => {
-        const match = latestBackendCameras.find((bc) => bc.source_key === cam.rtspUrl);
+      const reconciled = camerasToSave.map((cam) => {
+        const match = latestBackendCameras.find(
+          (backendCamera) =>
+            normalizeCameraSourceKey(backendCamera.source_key) === cam.rtspUrl,
+        );
         return match ? { ...cam, id: match.id, homeZoneId: match.home_zone_id } : cam;
       });
       onCamerasUpdate(reconciled);
       localStorage.setItem("ppe_demo_cameras", JSON.stringify(reconciled));
+      setIsConfiguringCameras(false);
+      liveStream.syncCameraConnections(reconciled);
+
+      const retainedCamera = reconciled.find(
+        (camera) =>
+          camera.active &&
+          normalizeCameraSourceKey(camera.rtspUrl) ===
+            normalizeCameraSourceKey(currentSource ?? ""),
+      );
+      const nextCamera =
+        retainedCamera || reconciled.find((camera) => camera.active) || reconciled[0];
+      if (nextCamera) {
+        onCameraChange(nextCamera.id);
+        liveStream.setViewedCamera(nextCamera.rtspUrl);
+        void zoneDrawing.loadSavedZones(nextCamera.rtspUrl);
+      }
       window.alert("Camera configuration saved successfully.");
     } catch (err) {
       setError(
@@ -473,7 +509,7 @@ function CameraPanel({
     
     // Open WebSockets for all active cameras
     liveStream.syncCameraConnections(cameras);
-    
+
     // Focus the view on the current active camera
     liveStream.setViewedCamera(active.rtspUrl);
     void zoneDrawing.loadSavedZones(active.rtspUrl);
@@ -516,6 +552,7 @@ function CameraPanel({
         {
           showPpe: currentPpeEnabled,
           showZone: currentZoneEnabled,
+          showBehavior: currentFallEnabled,
         },
       ),
     [
@@ -525,16 +562,17 @@ function CameraPanel({
       liveStream.streamData.tracking_overlay,
       upload.videoResult?.tracking_overlay,
       currentZoneEnabled,
+      currentFallEnabled,
     ],
   );
   // Unified identifier for the current camera source: the RTSP URL for a live
   // feed, otherwise the uploaded file name. Used as the zone storage key so
   // auto-zone save/load/clear works identically for live and uploaded sources.
-  const feedAspectRatio = visibleTrackingOverlay
-    ? `${visibleTrackingOverlay.frame_width ?? 16} / ${visibleTrackingOverlay.frame_height ?? 9}`
-    : "16 / 9";
-  const streamFrameWidth = liveStream.streamData.tracking_overlay.frame_width;
-  const streamFrameHeight = liveStream.streamData.tracking_overlay.frame_height;
+  const feedWidth = visibleTrackingOverlay?.frame_width ?? 16;
+  const feedHeight = visibleTrackingOverlay?.frame_height ?? 9;
+  const feedAspectRatio = feedWidth > 0 && feedHeight > 0
+    ? feedWidth / feedHeight
+    : 16 / 9;
   const currentFrameIndex = Math.round(
     liveStream.currentVideoTime * (liveStream.streamData.tracking_overlay.fps || 30),
   );
@@ -1009,13 +1047,13 @@ function CameraPanel({
                   }}
                 />
                 <ModelToggle
-                  label="Fall Detection"
+                  label="Behavior Detection"
                   description="Live pose risk and incident capture"
                   enabled={currentFallEnabled && (liveStream.isLive || isVideo)}
                   disabled={!liveStream.isLive && !isVideo}
                   onToggle={() => {
                     if (viewMode === "single" && activeCameraId) {
-                      void handleToggleCameraFeature(activeCameraId, "fall_detection");
+                      void handleToggleCameraFeature(activeCameraId, "behavior_detection");
                     } else {
                       setFallEnabled((current) => !current);
                     }
@@ -1072,7 +1110,6 @@ function CameraPanel({
                       {cameras
                         .filter((c) => selectedCameraIds.includes(c.id))
                         .map((c) => {
-                          const frameUrl = liveStream.liveFrames[c.rtspUrl];
                           return (
                             <div
                               key={c.id}
@@ -1082,7 +1119,7 @@ function CameraPanel({
                               }}
                               className="group relative aspect-video overflow-hidden rounded-md border border-slate-800 bg-black cursor-pointer hover:border-slate-500 transition-all shadow-md"
                             >
-                              {c.active && frameUrl ? (
+                              {c.active ? (
                                 <>
                                   {/* Camera specific inline feature toggles */}
                                   <div className="absolute top-2 right-2 flex gap-1.5 z-10">
@@ -1118,13 +1155,13 @@ function CameraPanel({
                                     </button>
                                     <button
                                       type="button"
-                                      title="Toggle Fall Detection"
+                                      title="Toggle Behavior Detection"
                                       onClick={(e) => {
                                         e.stopPropagation();
-                                        void handleToggleCameraFeature(c.id, "fall_detection");
+                                        void handleToggleCameraFeature(c.id, "behavior_detection");
                                       }}
                                       className={`rounded-md p-1.5 shadow-md backdrop-blur transition-all duration-200 border cursor-pointer ${
-                                        (cameraFeatureMap[c.id]?.["fall_detection"] ?? false)
+                                        (cameraFeatureMap[c.id]?.["behavior_detection"] ?? cameraFeatureMap[c.id]?.["fall_detection"] ?? false)
                                           ? "bg-red-500/90 text-slate-950 border-red-400 hover:bg-red-500"
                                           : "bg-slate-900/80 text-slate-400 border-slate-700/50 hover:bg-slate-800"
                                       }`}
@@ -1133,19 +1170,20 @@ function CameraPanel({
                                     </button>
                                   </div>
 
-                                  <img
-                                    src={frameUrl}
-                                    alt={c.name}
-                                    className="absolute inset-0 h-full w-full object-contain animate-fadeIn"
-                                  />
-                                  {/* Zones Overlay */}
-                                  {(cameraFeatureMap[c.id]?.["zone_monitoring"] ?? false) && cameraZones[c.rtspUrl] && (
-                                    <svg
-                                      className="pointer-events-none absolute inset-0 h-full w-full"
-                                      viewBox="0 0 1 1"
-                                      preserveAspectRatio="none"
-                                    >
-                                      {cameraZones[c.rtspUrl].map((zone) => {
+                                  <LlHlsVideo
+                                    source={c.rtspUrl}
+                                    annotated
+                                    className="absolute inset-0 h-full w-full object-contain"
+                                    onTimeline={(timeline) => liveStream.handleHlsTimeline(c.rtspUrl, timeline)}
+                                    onPlaybackMetrics={(metrics) => liveStream.handlePlaybackMetrics(c.rtspUrl, metrics)}
+                                  >
+                                    {(cameraFeatureMap[c.id]?.["zone_monitoring"] ?? false) && cameraZones[c.rtspUrl] && (
+                                      <svg
+                                        className="pointer-events-none absolute inset-0 h-full w-full"
+                                        viewBox="0 0 1 1"
+                                        preserveAspectRatio="none"
+                                      >
+                                        {cameraZones[c.rtspUrl].map((zone) => {
                                         const pathData = zone.points.length > 0
                                           ? `M ${zone.points[0].x} ${zone.points[0].y} ` +
                                             zone.points.map((p, i) => {
@@ -1157,69 +1195,21 @@ function CameraPanel({
                                             }).join(" ") + " Z"
                                           : "";
 
-                                        return (
-                                          <path
-                                            key={zone.id}
-                                            d={pathData}
-                                            fill={`${zoneColors[zone.type]}33`}
-                                            stroke={zoneColors[zone.type]}
-                                            strokeWidth={0.004}
-                                            className="pointer-events-none"
-                                          />
-                                        );
-                                      })}
-                                    </svg>
-                                  )}
+                                          return (
+                                            <path
+                                              key={zone.id}
+                                              d={pathData}
+                                              fill={`${zoneColors[zone.type]}33`}
+                                              stroke={zoneColors[zone.type]}
+                                              strokeWidth={0.004}
+                                              className="pointer-events-none"
+                                            />
+                                          );
+                                        })}
+                                      </svg>
+                                    )}
+                                  </LlHlsVideo>
 
-                                  {/* Tracking Overlay Layer (PPE / Zone Violations) */}
-                                  {liveStream.cameraOverlays[c.rtspUrl] && (
-                                    (() => {
-                                      const overlayData = liveStream.cameraOverlays[c.rtspUrl];
-                                      const isPpeEnabled = cameraFeatureMap[c.id]?.["ppe_detection"] ?? true;
-                                      const isZoneEnabled = cameraFeatureMap[c.id]?.["zone_monitoring"] ?? false;
-                                      // Filter frames based on global models enabled
-                                      const filteredFrames = overlayData.frames.map((frame) => {
-                                        const missing = isPpeEnabled ? frame.missing_equipment : [];
-                                        const incursionType = isZoneEnabled ? frame.zone_type : null;
-                                        const incursionName = isZoneEnabled ? frame.zone_name : null;
-                                        const compliant = isPpeEnabled ? frame.compliant : true;
-                                        
-                                        return {
-                                          ...frame,
-                                          missing_equipment: missing,
-                                          zone_type: incursionType,
-                                          zone_name: incursionName,
-                                          compliant: compliant,
-                                        };
-                                      }).filter((frame) => {
-                                        return frame.missing_equipment.length > 0 || frame.zone_type !== null || isPpeEnabled;
-                                      });
-
-                                      const syntheticOverlay = {
-                                        fps: 30,
-                                        stride: 1,
-                                        frame_width: overlayData.frameWidth,
-                                        frame_height: overlayData.frameHeight,
-                                        frames: filteredFrames.map((f) => ({ ...f, frame_index: 0 })),
-                                      };
-
-                                      return (
-                                        <TrackingOverlayLayer
-                                          overlay={syntheticOverlay}
-                                          currentTime={0}
-                                        />
-                                      );
-                                    })()
-                                  )}
-
-                                  {/* Fall Detection Overlay Layer */}
-                                  {(cameraFeatureMap[c.id]?.["fall_detection"] ?? false) && liveStream.cameraOverlays[c.rtspUrl] && (
-                                    <FallOverlayLayer
-                                      detections={liveStream.cameraOverlays[c.rtspUrl].fallDetections}
-                                      frameWidth={liveStream.cameraOverlays[c.rtspUrl].frameWidth}
-                                      frameHeight={liveStream.cameraOverlays[c.rtspUrl].frameHeight}
-                                    />
-                                  )}
                                 </>
                               ) : (
                                 <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-slate-500 bg-slate-950/80">
@@ -1254,19 +1244,28 @@ function CameraPanel({
                 <div className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_340px]">
                   <div>
                     <div
-                      ref={(el) => zoneDrawing.setSurfaceElement(el)}
+                      ref={liveStream.isLive ? undefined : zoneDrawing.setSurfaceElement}
                       onMouseMove={zoneDrawing.handleMouseMove}
                       onMouseUp={zoneDrawing.handleMouseUp}
                       onMouseLeave={zoneDrawing.handleMouseUp}
                       className="relative aspect-video overflow-hidden rounded-md border border-slate-800 bg-black"
                       style={{ aspectRatio: feedAspectRatio }}
                     >
-                      {liveStream.isLive && liveStream.streamData.live_frame ? (
-                        <img
-                          src={liveStream.streamData.live_frame}
-                          alt="Live stream"
+                      {liveStream.isLive ? (
+                        <LlHlsVideo
+                          source={liveStream.liveUrl}
+                          annotated
+                          aspectRatio={feedAspectRatio}
                           className="absolute inset-0 h-full w-full object-contain"
-                        />
+                          onTimeline={(timeline) => liveStream.handleHlsTimeline(liveStream.liveUrl, timeline)}
+                          onPlaybackMetrics={(metrics) => liveStream.handlePlaybackMetrics(liveStream.liveUrl, metrics)}
+                          onVideoElement={liveStream.setVideoElement}
+                          onSurfaceElement={zoneDrawing.setSurfaceElement}
+                        >
+                          {currentZoneEnabled || zoneDrawing.isDrawing || zoneDrawing.pendingAutoZoneIds.size > 0 ? (
+                            <ZoneOverlaySvg zoneDrawing={zoneDrawing} zoneColors={zoneColors} />
+                          ) : null}
+                        </LlHlsVideo>
                       ) : upload.videoUrl ? (
                         <video
                           ref={(el) => liveStream.setVideoElement(el)}
@@ -1287,21 +1286,20 @@ function CameraPanel({
                           <Loader2 className="size-8 animate-spin" />
                         </div>
                       )}
-                      {currentZoneEnabled || zoneDrawing.isDrawing || zoneDrawing.pendingAutoZoneIds.size > 0 ? (
+                      {!liveStream.isLive && (currentZoneEnabled || zoneDrawing.isDrawing || zoneDrawing.pendingAutoZoneIds.size > 0) ? (
                         <ZoneOverlaySvg zoneDrawing={zoneDrawing} zoneColors={zoneColors} />
                       ) : null}
-                      {!zoneDrawing.isDrawing ? (
+                      {!zoneDrawing.isDrawing && !liveStream.isLive ? (
                         <TrackingOverlayLayer
                           overlay={visibleTrackingOverlay}
                           currentTime={liveStream.currentVideoTime}
-                        />
-                      ) : null}
-                      {currentFallEnabled && !zoneDrawing.isDrawing ? (
-                        <FallOverlayLayer
-                          detections={liveStream.streamData.fall_detections}
-                          frameWidth={streamFrameWidth}
-                          frameHeight={streamFrameHeight}
+                          behaviorDetections={currentFallEnabled ? liveStream.streamData.fall_detections : []}
+                          behaviorEnabled={currentFallEnabled}
                           currentFrameIndex={currentFrameIndex}
+                          currentSourceTimeMs={liveStream.currentSourceTimeMs}
+                          onPresentation={(selection) =>
+                            liveStream.handleOverlayPresentation(liveStream.liveUrl, selection)
+                          }
                         />
                       ) : null}
                       <SuggestionOverlayLayer
@@ -1336,12 +1334,6 @@ function CameraPanel({
                       isLive={liveStream.isLive}
                       isPlaying={liveStream.isPlaying}
                       togglePlayback={liveStream.togglePlayback}
-                    />
-                    <FallStatusPanel
-                      enabled={currentFallEnabled}
-                      summary={liveStream.streamData.fall_summary}
-                      unavailable={liveStream.streamData.fall_unavailable}
-                      latestIncident={liveStream.streamData.behavior_incidents.at(-1)}
                     />
                   </div>
                 </div>
@@ -1418,103 +1410,6 @@ function ModelToggle({
         />
       </span>
     </button>
-  );
-}
-
-function FallStatusPanel({
-  enabled,
-  summary,
-  unavailable,
-  latestIncident,
-}: {
-  enabled: boolean;
-  summary: FallLiveSummary | null;
-  unavailable: string | null;
-  latestIncident?: BehaviorIncident;
-}) {
-  if (!enabled) {
-    return (
-      <section className="rounded-md border border-slate-800 bg-slate-950 p-3">
-        <div className="flex items-center justify-between gap-3">
-          <h3 className="text-sm font-semibold text-white">Fall Detection</h3>
-          <span className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs font-semibold text-slate-300">
-            Disabled
-          </span>
-        </div>
-      </section>
-    );
-  }
-
-  const status = unavailable ? "unavailable" : summary?.status ?? (enabled ? "no_detection" : "off");
-  const statusClass =
-    status === "fall"
-      ? "border-red-400 bg-red-500/10 text-red-100"
-      : status === "fall_risk"
-      ? "border-amber-300 bg-amber-400/10 text-amber-100"
-      : status === "unavailable"
-      ? "border-slate-600 bg-slate-800 text-slate-200"
-      : status === "no_detection"
-      ? "border-slate-600 bg-slate-800 text-slate-200"
-      : "border-emerald-300 bg-emerald-400/10 text-emerald-100";
-  const label =
-    status === "fall"
-      ? "Fall detected"
-      : status === "fall_risk"
-      ? "Fall risk"
-      : status === "unavailable"
-      ? "Unavailable"
-      : status === "no_detection"
-      ? "No detection"
-      : "Normal";
-
-  return (
-    <section className="rounded-md border border-slate-800 bg-slate-950 p-3">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h3 className="text-sm font-semibold text-white">Fall Detection</h3>
-          <p className="mt-1 text-xs text-slate-400">Live pose status from the backend stream.</p>
-        </div>
-        <span className={`rounded border px-2 py-1 text-xs font-semibold ${statusClass}`}>
-          {label}
-        </span>
-      </div>
-
-      {unavailable ? (
-        <p className="mt-3 text-xs leading-5 text-slate-300">{unavailable}</p>
-      ) : (
-        <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
-          <MetricMini label="Confidence" value={`${Math.round((summary?.top_confidence ?? 0) * 100)}%`} />
-          <MetricMini label="People" value={`${summary?.person_count ?? 0}`} />
-          <MetricMini label="Risk" value={`${summary?.fall_risk_count ?? 0}`} />
-          <MetricMini label="Falls" value={`${summary?.fall_count ?? 0}`} />
-        </div>
-      )}
-
-      {latestIncident ? (
-        <div className="mt-3 rounded-md border border-red-400/30 bg-red-500/10 p-2 text-xs text-red-50">
-          <p className="font-semibold">Persisted incident #{latestIncident.id}</p>
-          <p className="mt-1 text-red-100/80">
-            {latestIncident.severity ?? "HIGH"} - {Math.round((latestIncident.confidence ?? 0) * 100)}%
-          </p>
-          {latestIncident.snapshot_url ? (
-            <img
-              src={latestIncident.snapshot_url}
-              alt={`Fall incident ${latestIncident.id}`}
-              className="mt-2 max-h-32 w-full rounded object-cover"
-            />
-          ) : null}
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
-function MetricMini({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded border border-slate-800 bg-slate-900 px-2 py-1.5">
-      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label}</p>
-      <p className="mt-1 font-semibold text-white">{value}</p>
-    </div>
   );
 }
 
@@ -1736,7 +1631,7 @@ export function DashboardShell() {
     },
     [router, searchParams],
   );
-  const [activeCameraId, setActiveCameraId] = useState<number>(1);
+  const [activeCameraId, setActiveCameraId] = useState<number>(0);
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
   const [physicalZones, setPhysicalZones] = useState<PhysicalZone[]>([]);
   // Same hook and default range/zone (7D, all zones) as the Incident
@@ -1745,46 +1640,54 @@ export function DashboardShell() {
   const { kpis } = useSafetyKpis();
 
   useEffect(() => {
+    let cancelled = false;
     const stored = localStorage.getItem("ppe_demo_cameras");
     let loaded: CameraConfig[] = DEFAULT_CAMERAS;
     if (stored) {
       try {
         loaded = JSON.parse(stored);
-      } catch (e) {
+      } catch {
         loaded = DEFAULT_CAMERAS;
       }
     } else {
       localStorage.setItem("ppe_demo_cameras", JSON.stringify(DEFAULT_CAMERAS));
     }
-    // Backfill homeZoneId for configs saved before this field existed.
-    loaded = loaded.map((c) => ({ ...c, homeZoneId: c.homeZoneId ?? null }));
-    setCameras(loaded);
-    const active = loaded.find((c) => c.active) || loaded[0];
-    setActiveCameraId(active.id);
+    loaded = normalizeConfiguredCameras(loaded);
 
     void getPhysicalZones().then(setPhysicalZones).catch(() => {});
 
-    // Reconcile home-zone assignment from the backend (source of truth), so
-    // it survives a reload even though the rest of the camera config is
-    // still cached in localStorage only.
-    void getCameras()
-      .then((backendCameras) => {
-        setCameras((prev) => {
-          const reconciled = prev.map((cam) => {
-            const match = backendCameras.find((bc) => bc.source_key === cam.rtspUrl);
-            return match ? { ...cam, id: match.id, homeZoneId: match.home_zone_id } : cam;
-          });
-          localStorage.setItem("ppe_demo_cameras", JSON.stringify(reconciled));
-          
-          // Sync activeCameraId to match the reconciled database camera ID
-          const active = reconciled.find((c) => c.active) || reconciled[0];
-          if (active) {
-            setActiveCameraId(active.id);
-          }
-          return reconciled;
-        });
+    // Resolve every source to its database camera before CameraPanel mounts.
+    // Feature requests and WebSocket settings can therefore never use a stale
+    // localStorage ID during the asynchronous startup window.
+    void Promise.all(
+      loaded.map(async (camera) => {
+        const backendCamera = await ensureCamera(camera.name, camera.rtspUrl);
+        return {
+          ...camera,
+          id: backendCamera.id,
+          homeZoneId: backendCamera.home_zone_id,
+        };
+      }),
+    )
+      .then((reconciled) => {
+        if (cancelled) return;
+        localStorage.setItem("ppe_demo_cameras", JSON.stringify(reconciled));
+        setCameras(reconciled);
+        const active = reconciled.find((camera) => camera.active) || reconciled[0];
+        setActiveCameraId(active?.id ?? 0);
       })
-      .catch(() => {});
+      .catch((error) => {
+        if (cancelled) return;
+        console.error("Could not reconcile camera IDs with the backend", error);
+        localStorage.setItem("ppe_demo_cameras", JSON.stringify(loaded));
+        setCameras(loaded);
+        const active = loaded.find((camera) => camera.active) || loaded[0];
+        setActiveCameraId(active?.id ?? 0);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
   const cameraCountsByZone = useMemo(() => {
     const counts: Record<number, number> = {};
@@ -1857,7 +1760,7 @@ export function DashboardShell() {
                     data warm and switching back doesn't refetch from scratch. */}
                 {analyticsMounted ? (
                   <div className={activeView === "analytics" ? "grid gap-4" : "hidden"}>
-                    <AnalyticsDashboard embedded />
+                    <AnalyticsDashboard embedded isVisible={activeView === "analytics"} />
                   </div>
                 ) : null}
                 {activeView === "factory3d" ? (

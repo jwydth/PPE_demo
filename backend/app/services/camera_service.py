@@ -11,6 +11,7 @@ from app.repositories.camera_repository import CameraRepository
 from app.repositories.factory_repository import FactoryRepository
 from app.repositories.physical_zone_repository import PhysicalZoneRepository
 from app.services import ServiceNotFoundError, ServiceValidationError
+from app.services.camera_identity import normalize_camera_source_key
 
 
 @dataclass(frozen=True)
@@ -53,7 +54,9 @@ class CameraService:
         is_active: bool = True,
     ) -> CameraDTO:
         normalized_name = _require_text(name, "name")
-        normalized_source_key = _require_text(source_key, "source_key")
+        normalized_source_key = normalize_camera_source_key(
+            _require_text(source_key, "source_key")
+        )
         if self.repository.get_by_source_key(normalized_source_key) is not None:
             raise ServiceValidationError(
                 f"Camera source_key '{normalized_source_key}' already exists."
@@ -82,7 +85,9 @@ class CameraService:
         return [_to_dto(camera) for camera in self.repository.list_all()]
 
     def get_or_create_camera(self, *, name: str, source_key: str) -> CameraDTO:
-        normalized_source_key = _require_text(source_key, "source_key")
+        normalized_source_key = normalize_camera_source_key(
+            _require_text(source_key, "source_key")
+        )
         normalized_name = _require_text(name, "name")
         camera = self.repository.get_by_source_key(normalized_source_key)
         if camera is not None:
@@ -116,7 +121,9 @@ class CameraService:
         return _to_dto(camera)
 
     def get_camera_by_source_key(self, source_key: str) -> CameraDTO:
-        normalized_source_key = _require_text(source_key, "source_key")
+        normalized_source_key = normalize_camera_source_key(
+            _require_text(source_key, "source_key")
+        )
         camera = self.repository.get_by_source_key(normalized_source_key)
         if camera is None:
             raise ServiceNotFoundError(
