@@ -153,3 +153,51 @@ def test_prepare_camera_warms_before_first_submission():
         await scheduler.shutdown()
 
     asyncio.run(run())
+
+
+def test_scheduler_releases_gpu_lock_before_cpu_tracking(monkeypatch):
+    async def run():
+        monkeypatch.setattr("app.services.behavior_inference.settings.BEHAVIOR_BATCH_WAIT_MS", 0)
+
+        class GuardLock:
+            held = False
+
+            def __enter__(self):
+                self.held = True
+
+            def __exit__(self, *_args):
+                self.held = False
+
+        guard = GuardLock()
+        monkeypatch.setattr("app.services.behavior_inference.gpu_inference_lock", guard)
+
+        class FakePoseModel:
+            def predict(self, images, **_kwargs):
+                assert guard.held
+                return list(images)
+
+        class FakeDetector(FallDetector):
+            def _ensure_model(self):
+                return FakePoseModel()
+
+        class FakeTracker:
+            def __init__(self, _detector):
+                pass
+
+            def update(self, result):
+                assert not guard.held
+                return result
+
+            def close(self):
+                pass
+
+        scheduler = BehaviorInferenceScheduler(
+            FakeDetector(),
+            tracker_factory=FakeTracker,
+        )
+        result = await scheduler.infer("camera-a", np.zeros((2, 2, 3)))
+        await scheduler.shutdown()
+
+        assert result.shape == (2, 2, 3)
+
+    asyncio.run(run())

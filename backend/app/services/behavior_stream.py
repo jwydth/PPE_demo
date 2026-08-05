@@ -19,7 +19,11 @@ from app.services.behavior_inference import (
 )
 from app.services.fall_detector import FallDetector, FallModelUnavailable
 from app.services.frame_hub import FrameHubRegistry, frame_hubs
-from app.services.stream_health import update_stream_health
+from app.services.stream_health import (
+    mark_stream_event,
+    observe_stream_timing,
+    update_stream_health,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +163,7 @@ class BehaviorStreamWorker:
                             )
                             self._last_logged_status = status
                     self.processed_frames += 1
+                    mark_stream_event(self.source, "behavior_output")
                     scheduler_health = self.scheduler.health_snapshot().get(self.source)
                     update_stream_health(
                         self.source,
@@ -167,14 +172,14 @@ class BehaviorStreamWorker:
                         behavior_dropped_frames=self.dropped_frames,
                         behavior_gap_events=self.gap_events,
                         behavior_batch_size=(scheduler_health.last_batch_size if scheduler_health else 0),
-                        pose_inference_ms=(scheduler_health.last_pose_ms if scheduler_health else 0.0),
-                        reid_tracking_ms=(scheduler_health.last_tracking_ms if scheduler_health else 0.0),
-                        behavior_queue_wait_ms=(scheduler_health.last_queue_wait_ms if scheduler_health else 0.0),
-                        behavior_total_ms=(scheduler_health.last_total_ms if scheduler_health else 0.0),
-                        behavior_postprocess_ms=postprocess_ms,
-                        feature_extraction_ms=getattr(self.session, "last_feature_ms", 0.0),
-                        xgboost_ms=getattr(self.session, "last_classifier_ms", 0.0),
                     )
+                    observe_stream_timing(self.source, "behavior_postprocess", postprocess_ms)
+                    feature_ms = getattr(self.session, "last_feature_ms", 0.0)
+                    classifier_ms = getattr(self.session, "last_classifier_ms", 0.0)
+                    if feature_ms > 0:
+                        observe_stream_timing(self.source, "behavior_feature_extraction", feature_ms)
+                    if classifier_ms > 0:
+                        observe_stream_timing(self.source, "behavior_classifier", classifier_ms)
                     now = time.monotonic()
                     if now - self._last_health_log >= settings.BEHAVIOR_HEALTH_LOG_INTERVAL_SECONDS:
                         windows = self.session.windows

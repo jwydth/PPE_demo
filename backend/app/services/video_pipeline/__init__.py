@@ -39,7 +39,12 @@ from app.services.behavior_stream import BehaviorStreamWorker
 from app.services.inference_coordination import gpu_inference_lock
 from app.services.fall_detector import FallDetector, FallModelUnavailable
 from app.services.frame_hub import FrameSubscription, frame_hubs
-from app.services.stream_health import update_stream_health
+from app.services.stream_health import (
+    increment_stream_health,
+    mark_stream_event,
+    observe_stream_timing,
+    update_stream_health,
+)
 from app.services.ppe_violation_service import open_ppe_violation_service
 from app.services.zone_service import (
     COORD_SCALE,
@@ -376,8 +381,9 @@ async def real_video_pipeline(
                 settings_state.get("enable_ppe", enable_ppe),
                 settings_state.get("enable_zone", enable_zone),
                 settings_state.get("enable_fall", enable_fall),
+                settings_state.get("enable_sign", True),
             )
-        return enable_ppe, enable_zone, enable_fall
+        return enable_ppe, enable_zone, enable_fall, True
 
     # Helper to check if feed is actively viewed
     def is_viewed():
@@ -442,7 +448,7 @@ async def real_video_pipeline(
     # a fresh copy of the weights from disk on every connection (see PERF_PLAN.md
     # Tier 1.1). The pool caps VRAM at a known ceiling and keeps track(persist=True)
     # state isolated per concurrent stream.
-    initial_ppe, initial_zone, initial_fall = get_flags()
+    initial_ppe, initial_zone, initial_fall, _initial_sign = get_flags()
     # Behavior always uses the finite batched scheduler. Keeping the pooled PPE
     # renderer as the primary path also avoids reintroducing an infinite shared
     # pose predictor for behavior-only views.
@@ -503,7 +509,10 @@ async def real_video_pipeline(
             results_iter = iter(results)
 
         def infer_live_frame(image: np.ndarray):
+            lock_requested_at = time.perf_counter()
             with gpu_inference_lock:
+                lock_wait_ms = (time.perf_counter() - lock_requested_at) * 1000.0
+                compute_started = time.perf_counter()
                 tracked = model_instance.track(
                     source=image,
                     stream=False,
@@ -516,17 +525,23 @@ async def real_video_pipeline(
                     imgsz=image_size,
                     verbose=False,
                 )
-            return tracked[0] if tracked else None
+                compute_ms = (time.perf_counter() - compute_started) * 1000.0
+            return (tracked[0] if tracked else None), lock_wait_ms, compute_ms
 
         def infer_signs(image: np.ndarray):
+            lock_requested_at = time.perf_counter()
             with gpu_inference_lock:
-                return detector.sign_model.predict(
+                lock_wait_ms = (time.perf_counter() - lock_requested_at) * 1000.0
+                compute_started = time.perf_counter()
+                results = detector.sign_model.predict(
                     image,
                     conf=settings.SIGN_CONFIDENCE_THRESHOLD,
                     classes=sign_classes,
                     device=detector.device,
                     verbose=False,
                 )
+                compute_ms = (time.perf_counter() - compute_started) * 1000.0
+            return results, lock_wait_ms, compute_ms
 
         processed_frames = 0
         while True:
@@ -538,21 +553,34 @@ async def real_video_pipeline(
                 if packet.frame_index % model_stride != 0:
                     continue
                 source_frame_index = packet.frame_index
-                inference_started = time.perf_counter()
-                result = await asyncio.to_thread(infer_live_frame, packet.image)
-                ppe_inference_ms = (time.perf_counter() - inference_started) * 1000.0
+                end_to_end_started = time.perf_counter()
+                result, ppe_lock_wait_ms, ppe_compute_ms = await asyncio.to_thread(
+                    infer_live_frame,
+                    packet.image,
+                )
+                ppe_end_to_end_ms = (time.perf_counter() - end_to_end_started) * 1000.0
             else:
                 # Local files keep Ultralytics' streaming loader. Network
                 # sources are decoded once by CameraFrameHub.
                 result = await asyncio.to_thread(next, results_iter, None)
-                ppe_inference_ms = 0.0
+                ppe_lock_wait_ms = 0.0
+                ppe_compute_ms = 0.0
+                ppe_end_to_end_ms = 0.0
             if result is None:
                 break
             processed_frames += 1
+            mark_stream_event(source_str, "ppe_output")
+            if ppe_subscription is not None:
+                update_stream_health(
+                    source_str,
+                    ppe_dropped_frames=ppe_subscription.dropped_frames,
+                )
+                observe_stream_timing(source_str, "ppe_gpu_lock_wait", ppe_lock_wait_ms)
+                observe_stream_timing(source_str, "ppe_compute", ppe_compute_ms)
+                observe_stream_timing(source_str, "ppe_end_to_end", ppe_end_to_end_ms)
             update_stream_health(
                 source_str,
                 ppe_processed_frames=processed_frames,
-                ppe_inference_ms=ppe_inference_ms,
             )
             if processed_frames == 1:
                 # Dominated by the source handshake (RTSP connect + wait for a
@@ -567,7 +595,7 @@ async def real_video_pipeline(
                 if source_frame_index is not None
                 else (processed_frames - 1) * stride
             )
-            curr_ppe, curr_zone, behavior_enabled = get_flags()
+            curr_ppe, curr_zone, behavior_enabled, sign_enabled = get_flags()
             # Behavior monitoring is independent of whether its video tile is
             # currently open in the UI.  A camera with the feature enabled
             # must keep collecting its temporal window and recording incidents
@@ -838,7 +866,7 @@ async def real_video_pipeline(
                     if len(cases) > old_case_count:
                         yield StreamEvent(event="violation", frame_index=frame_index, data=cases[-1].report.model_dump())
 
-            if detector.sign_model is not None and frame_width and frame_height and frame_index % settings.SIGN_PASS_FRAME_INTERVAL == 0:
+            if sign_enabled and detector.sign_model is not None and frame_width and frame_height and frame_index % settings.SIGN_PASS_FRAME_INTERVAL == 0:
                 if settings_state:
                     pending_zone = settings_state.get("dismissed_signatures", [])
                     if pending_zone:
@@ -850,10 +878,20 @@ async def real_video_pipeline(
                         settings_state["dismissed_ppe_signatures"] = []
                         for sig in pending_ppe:
                             ppe_sign_registry.dismiss(sig)
-                sign_results = await asyncio.to_thread(
+                sign_end_to_end_started = time.perf_counter()
+                sign_results, sign_lock_wait_ms, sign_compute_ms = await asyncio.to_thread(
                     infer_signs,
                     frame,
                 )
+                sign_end_to_end_ms = (
+                    time.perf_counter() - sign_end_to_end_started
+                ) * 1000.0
+                increment_stream_health(source_str, sign_calls=1)
+                update_stream_health(source_str, sign_last_frame_index=frame_index)
+                mark_stream_event(source_str, "sign_output")
+                observe_stream_timing(source_str, "sign_gpu_lock_wait", sign_lock_wait_ms)
+                observe_stream_timing(source_str, "sign_compute", sign_compute_ms)
+                observe_stream_timing(source_str, "sign_end_to_end", sign_end_to_end_ms)
                 if sign_results:
                     signs = extract_signs(sign_results[0])
                     for suggestion in sign_registry.update(signs, frame_width, frame_height, frame_index, fps):
@@ -872,10 +910,10 @@ async def real_video_pipeline(
                 await asyncio.to_thread(_encode_frame_to_jpeg, frame) if has_image else None
             )
             if has_image:
-                update_stream_health(
-                    source_str,
-                    jpeg_ms=(time.perf_counter() - jpeg_started) * 1000.0,
-                )
+                jpeg_ms = (time.perf_counter() - jpeg_started) * 1000.0
+                increment_stream_health(source_str, preview_generated_frames=1)
+                mark_stream_event(source_str, "preview_generated")
+                observe_stream_timing(source_str, "jpeg_encode", jpeg_ms)
             yield StreamEvent(
                 event="frame",
                 frame_index=frame_index,

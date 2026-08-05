@@ -1,4 +1,3 @@
-import joblib
 import numpy as np
 import pytest
 
@@ -35,25 +34,24 @@ def test_fall_detector_missing_behavior_weights_is_unavailable(tmp_path):
         detector._ensure_behavior_model()
 
 
-def test_portable_behavior_classifier_uses_cpu_and_configured_threads():
+def test_primary_behavior_classifier_is_extra_trees_with_configured_threads():
     detector = FallDetector()
     classifier = detector._ensure_behavior_model()
 
-    assert classifier.booster.attributes().get("device") in {None, "cpu"}
-    assert detector.portable_behavior_model_path.suffix == ".ubj"
+    assert type(classifier).__name__ == "ExtraTreesClassifier"
+    assert classifier.n_jobs == 1
+    assert detector.behavior_model_path.name == "best_behavior_model.joblib"
 
 
-def test_portable_behavior_classifier_matches_legacy_probabilities():
+def test_primary_behavior_classifier_returns_three_probabilities():
     detector = FallDetector()
-    with pytest.warns(UserWarning, match="serialized model"):
-        legacy = joblib.load(detector.behavior_model_path)
-    portable = detector._ensure_behavior_model()
+    classifier = detector._ensure_behavior_model()
     inputs = np.random.default_rng(42).normal(size=(4, 141)).astype(np.float32)
 
-    legacy_probabilities = np.asarray(legacy.predict_proba(inputs), dtype=np.float32)
-    portable_probabilities = portable.predict_proba(inputs)
+    probabilities = np.asarray(classifier.predict_proba(inputs), dtype=np.float32)
 
-    np.testing.assert_allclose(portable_probabilities, legacy_probabilities, atol=1e-7)
+    assert probabilities.shape == (4, 3)
+    np.testing.assert_allclose(probabilities.sum(axis=1), np.ones(4), atol=1e-6)
 
 
 def test_live_payload_serializes_bbox_as_an_object():

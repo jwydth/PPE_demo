@@ -8,7 +8,11 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import HTMLResponse
 from app.schemas.streaming import StreamEvent
 from app.services.ppe_detector import PPEDetector
-from app.services.stream_health import update_stream_health
+from app.services.stream_health import (
+    increment_stream_health,
+    mark_stream_event,
+    observe_stream_timing,
+)
 from app.storage.local_paths import UPLOAD_DIR, ensure_upload_dir
 
 router = APIRouter(tags=["streaming"])
@@ -36,6 +40,7 @@ async def stream_video_ws(
     enable_ppe: bool = Query(True),
     enable_zone: bool = Query(True),
     enable_fall: bool = Query(False),
+    enable_sign: bool = Query(True),
 ):
     global _current_cancel
     conn_id = next(_conn_counter)
@@ -48,6 +53,7 @@ async def stream_video_ws(
         "enable_ppe": enable_ppe,
         "enable_zone": enable_zone,
         "enable_fall": enable_fall,
+        "enable_sign": enable_sign,
         "dismissed_signatures": [],
         "dismissed_ppe_signatures": [],
         "reload_zones": False,
@@ -138,6 +144,8 @@ async def stream_video_ws(
                         settings_state["enable_zone"] = bool(new_settings["enable_zone"])
                     if "enable_fall" in new_settings:
                         settings_state["enable_fall"] = bool(new_settings["enable_fall"])
+                    if "enable_sign" in new_settings:
+                        settings_state["enable_sign"] = bool(new_settings["enable_sign"])
                 if "viewing" in new_settings:
                     settings_state["viewing"] = bool(new_settings["viewing"])
                 logger.debug(f"[conn {conn_id}] [SIGNAL] Received dynamic settings update: {settings_state}")
@@ -221,10 +229,11 @@ async def stream_video_ws(
         if event.image_bytes is not None:
             await websocket.send_bytes(event.image_bytes)
         await websocket.send_text(event.model_dump_json())
-        update_stream_health(
-            video_name,
-            websocket_ms=(time.perf_counter() - send_started) * 1000.0,
-        )
+        websocket_ms = (time.perf_counter() - send_started) * 1000.0
+        observe_stream_timing(video_name, "websocket_send", websocket_ms)
+        if event.event == "frame":
+            increment_stream_health(video_name, preview_sent_frames=1)
+            mark_stream_event(video_name, "preview_sent")
 
     async def produce() -> None:
         nonlocal latest_frame, dropped_frames
@@ -235,6 +244,7 @@ async def stream_video_ws(
                 if event.event == "frame":
                     if latest_frame is not None:
                         dropped_frames += 1
+                        increment_stream_health(video_name, preview_coalesced_frames=1)
                     latest_frame = event
                 else:
                     reliable_events.append(event)

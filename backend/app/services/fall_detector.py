@@ -249,7 +249,7 @@ class FallDetector:
             "behavior_label": label,
             "runtime_timings": {
                 "feature_extraction_ms": feature_ms,
-                "xgboost_ms": classifier_ms,
+                "behavior_classifier_ms": classifier_ms,
             },
         }
 
@@ -374,6 +374,10 @@ class FallLiveSession:
         timestamp_seconds: float | None = None,
     ) -> dict[str, Any]:
         """Consume an already-tracked YOLO-Pose result without re-running pose."""
+        # Report classifier work performed for this frame only. Reusing the
+        # previous non-zero value made rolling health samples misleading.
+        self.last_feature_ms = 0.0
+        self.last_classifier_ms = 0.0
         detections = _pose_detections(result)
         for track_id, window in self.windows.items():
             window.append(None)
@@ -393,8 +397,10 @@ class FallLiveSession:
             # windows are not a behavior prediction and are omitted entirely.
             if len(window) < self.detector.window_size:
                 continue
+            classification_ran = False
             if track_id not in self.last_prediction or self.sample_index % self.detector.window_stride == 0:
                 prediction = self.detector.classify(list(window))
+                classification_ran = prediction is not None
                 if prediction is None:
                     self.last_prediction.pop(track_id, None)
                     continue
@@ -409,9 +415,16 @@ class FallLiveSession:
                 self.last_prediction[track_id] = prediction
             else:
                 prediction = self.last_prediction[track_id]
-            timings = prediction.get("runtime_timings", {})
-            self.last_feature_ms = float(timings.get("feature_extraction_ms", self.last_feature_ms))
-            self.last_classifier_ms = float(timings.get("xgboost_ms", self.last_classifier_ms))
+            if classification_ran:
+                timings = prediction.get("runtime_timings", {})
+                self.last_feature_ms = max(
+                    self.last_feature_ms,
+                    float(timings.get("feature_extraction_ms", 0.0)),
+                )
+                self.last_classifier_ms = max(
+                    self.last_classifier_ms,
+                    float(timings.get("behavior_classifier_ms", 0.0)),
+                )
             detection.update(prediction)
             draw_detection(frame, detection)
         current_tracks = {int(item["track_id"]) for item in detections}

@@ -19,7 +19,7 @@ from typing import Any, Callable, Literal
 import numpy as np
 
 from app.core.config import settings
-from app.services.stream_health import update_stream_health
+from app.services.stream_health import mark_stream_event, update_stream_health
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +206,7 @@ class CameraFrameHub:
                 )
                 self.health.captured_frames += 1
                 self.health.last_frame_monotonic = packet.captured_monotonic
+                mark_stream_event(self.source, "capture")
                 if frame_index % max(1, int(self.health.fps)) == 0:
                     update_stream_health(
                         self.source,

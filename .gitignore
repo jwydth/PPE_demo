@@ -23,3 +23,5 @@ auto.crt
 # to be a tracked project doc.
 PERF_PLAN.md
 task.md
+.codex
+.agents
