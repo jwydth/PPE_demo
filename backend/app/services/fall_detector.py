@@ -1,7 +1,8 @@
 """Realtime fall detection backed by the trained pose-behavior classifier.
 
 Unlike the former geometric heuristic, this module uses the same 60-frame
-feature contract and ``behavior.joblib`` model as the PPE labeling project.
+feature contract and ``best_behavior_model.joblib`` classifier as the PPE
+labeling project.
 """
 
 from __future__ import annotations
@@ -145,6 +146,42 @@ class FallDetector:
     def _ensure_behavior_model(self) -> Any:
         if self.behavior_model is not None:
             return self.behavior_model
+        # The configured joblib classifier is the primary artifact. Do not
+        # let a leftover legacy UBJ file silently override it.
+        if self.behavior_model_path.is_file():
+            try:
+                import joblib
+
+                model = joblib.load(self.behavior_model_path)
+                if not hasattr(model, "predict_proba"):
+                    raise TypeError("model does not expose predict_proba")
+                # ExtraTrees uses n_jobs; legacy sklearn-wrapped XGBoost also
+                # supports this attribute. Keep a single CPU inference thread
+                # per live behavior worker for predictable latency.
+                if hasattr(model, "n_jobs"):
+                    model.n_jobs = settings.BEHAVIOR_XGBOOST_THREADS
+                get_booster = getattr(model, "get_booster", None)
+                if callable(get_booster):
+                    get_booster().set_param(
+                        {"device": "cpu", "nthread": settings.BEHAVIOR_XGBOOST_THREADS}
+                    )
+                self.behavior_model = model
+                logger.info(
+                    "Behavior classifier loaded from %s (%s)",
+                    self.behavior_model_path,
+                    type(model).__name__,
+                )
+                return self.behavior_model
+            except Exception as exc:
+                raise FallModelUnavailable(
+                    "Fall detection model is unavailable: configured behavior "
+                    f"classifier could not be loaded from {self.behavior_model_path}. "
+                    "Install its runtime dependencies (scikit-learn for the "
+                    "current ExtraTrees model)."
+                ) from exc
+
+        # Retain the portable XGBoost artifact solely as a fallback when the
+        # configured primary file is absent.
         if self.portable_behavior_model_path.is_file():
             try:
                 self.behavior_model = PortableBehaviorClassifier(
@@ -152,7 +189,7 @@ class FallDetector:
                     threads=settings.BEHAVIOR_XGBOOST_THREADS,
                 )
                 logger.info(
-                    "Behavior classifier loaded from portable model %s on CPU with %s thread(s)",
+                    "Primary behavior classifier missing; using portable fallback %s on CPU with %s thread(s)",
                     self.portable_behavior_model_path,
                     settings.BEHAVIOR_XGBOOST_THREADS,
                 )
@@ -162,34 +199,10 @@ class FallDetector:
                     "Fall detection model is unavailable: portable behavior "
                     f"weights could not be loaded from {self.portable_behavior_model_path}."
                 ) from exc
-        if not self.behavior_model_path.is_file():
-            raise FallModelUnavailable(
-                "Fall detection model is unavailable: behavior weights not found at "
-                f"{self.behavior_model_path} or {self.portable_behavior_model_path}"
-            )
-        try:
-            import joblib
-            model = joblib.load(self.behavior_model_path)
-            # Legacy sklearn-wrapped XGBoost fallback. Single-row live
-            # inference is faster and more predictable with one CPU thread.
-            if hasattr(model, "n_jobs"):
-                model.n_jobs = settings.BEHAVIOR_XGBOOST_THREADS
-            get_booster = getattr(model, "get_booster", None)
-            if callable(get_booster):
-                get_booster().set_param(
-                    {"device": "cpu", "nthread": settings.BEHAVIOR_XGBOOST_THREADS}
-                )
-        except Exception as exc:
-            raise FallModelUnavailable("Fall detection model is unavailable: behavior.joblib could not be loaded. Install joblib and xgboost.") from exc
-        if not hasattr(model, "predict_proba"):
-            raise FallModelUnavailable("Fall detection model is unavailable: behavior.joblib does not expose predict_proba.")
-        self.behavior_model = model
-        logger.warning(
-            "Using legacy pickled behavior classifier %s; export %s for version-stable loading.",
-            self.behavior_model_path,
-            self.portable_behavior_model_path,
+        raise FallModelUnavailable(
+            "Fall detection model is unavailable: behavior weights not found at "
+            f"{self.behavior_model_path} or {self.portable_behavior_model_path}"
         )
-        return model
 
     def classify(self, frames: list[dict[str, Any] | None]) -> dict[str, Any] | None:
         if len(frames) < self.window_size:
@@ -206,6 +219,10 @@ class FallDetector:
         double_log = {"skeleton_spread_ratio_max", "skeleton_spread_ratio_mean"}
         for name in columns:
             value = float(raw[name])
+            # Training clamps the aggregate hip-ankle feature and its 15
+            # sampled values to this physical range before fitting.
+            if name == "hip_ankle_vertical_diff_mean" or name.startswith("step_hip_ankle_"):
+                value = min(1.0, max(0.0, value))
             if name in square_root:
                 value = float(np.sqrt(max(0.0, value)))
             elif name in double_log:

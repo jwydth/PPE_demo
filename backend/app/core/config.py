@@ -85,7 +85,10 @@ class Settings(BaseSettings):
     # Pose + behavior-classifier pipeline.  The classifier was trained on
     # 60-frame COCO-pose windows and predicts others/running/falling.
     FALL_MODEL_PATH: str = "weights/pose.pt"
-    FALL_BEHAVIOR_MODEL_PATH: str = "weights/behavior.joblib"
+    # Primary classifier: 141 transformed pose/motion features ->
+    # others/running/falling. The current production artifact is an
+    # sklearn ExtraTreesClassifier.
+    FALL_BEHAVIOR_MODEL_PATH: str = "weights/best_behavior_model.joblib"
     FALL_REID_MODEL_PATH: str = "weights/reid.pt"
     FALL_PERSON_CONFIDENCE: float = 0.20
     FALL_BEHAVIOR_WINDOW_FRAMES: int = 60
@@ -117,6 +120,8 @@ class Settings(BaseSettings):
     BEHAVIOR_OPENCV_THREADS: int = 4
     BEHAVIOR_XGBOOST_THREADS: int = 1
     BEHAVIOR_HEALTH_LOG_INTERVAL_SECONDS: float = 10.0
+    # Optional legacy XGBoost artifact. It is used only when the configured
+    # primary classifier is unavailable.
     FALL_BEHAVIOR_PORTABLE_MODEL_PATH: str = "weights/behavior.ubj"
     FALL_INCIDENT_COOLDOWN_SECONDS: float = 10.0
     FALL_MODEL_NAME: str = "pose-behavior-xgboost"

@@ -574,6 +574,7 @@ async def real_video_pipeline(
             # continuously; ``viewed`` below controls preview delivery only.
             viewed = is_viewed()
             curr_fall = behavior_enabled
+
             if curr_fall and behavior_worker is None:
                 # Feature toggles arrive after the WebSocket is already open.
                 # Start the independent pose worker at that moment instead of
