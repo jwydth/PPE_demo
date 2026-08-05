@@ -19,7 +19,13 @@ class FakeCapture:
         return True
 
     def get(self, _prop):
-        return 24.0
+        import cv2
+
+        if _prop == cv2.CAP_PROP_FPS:
+            return 24.0
+        if _prop == cv2.CAP_PROP_POS_MSEC:
+            return self.index * 1000.0 / 24.0
+        return 0.0
 
     def read(self):
         if self.closed or self.index >= 200:
@@ -44,14 +50,38 @@ def test_hub_shares_one_capture_and_closes_after_last_subscriber():
 
         assert FakeCapture.opened == 1
         assert latest.hub is ordered.hub
-        assert (await latest.get()) is not None
-        assert (await ordered.get()) is not None
+        latest_packet = await latest.get()
+        ordered_packet = await ordered.get()
+        assert latest_packet is not None
+        assert ordered_packet is not None
+        assert latest_packet.stream_epoch == ordered_packet.stream_epoch
+        assert latest_packet.media_pts_ms >= 0
+        assert latest_packet.source_time_ms > 0
+        assert latest_packet.discontinuity_sequence == 0
 
         await latest.close()
         assert "camera-a" in registry.hubs
         await ordered.close()
         assert "camera-a" not in registry.hubs
         assert FakeCapture.released == 1
+
+    asyncio.run(run())
+
+
+def test_new_hub_uses_a_new_stream_epoch():
+    async def run():
+        registry = FrameHubRegistry(FakeCapture)
+        first = await registry.subscribe("camera-c", policy="latest")
+        first_packet = await first.get()
+        await first.close()
+
+        second = await registry.subscribe("camera-c", policy="latest")
+        second_packet = await second.get()
+        await second.close()
+
+        assert first_packet is not None
+        assert second_packet is not None
+        assert first_packet.stream_epoch != second_packet.stream_epoch
 
     asyncio.run(run())
 

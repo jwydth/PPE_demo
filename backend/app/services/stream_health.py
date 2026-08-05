@@ -90,6 +90,8 @@ class StreamHealth:
     behavior_queue_depth: int = 0
     behavior_dropped_frames: int = 0
     behavior_gap_events: int = 0
+    behavior_interpolated_frames: int = 0
+    behavior_unrepaired_gap_events: int = 0
     behavior_batch_size: int = 0
     sign_calls: int = 0
     sign_last_frame_index: int = -1
@@ -97,6 +99,19 @@ class StreamHealth:
     preview_sent_frames: int = 0
     preview_coalesced_frames: int = 0
     preview_gap_count: int = 0
+    hls_rebuffer_count: int = 0
+    hls_dropped_video_frames: int = 0
+    overlay_selection_mode: str = "missing"
+    annotated_composed_frames: int = 0
+    annotated_published_frames: int = 0
+    annotated_dropped_frames: int = 0
+    annotated_queue_dropped_frames: int = 0
+    annotated_deadline_misses: int = 0
+    annotated_encoder_restarts: int = 0
+    annotated_queue_depth: int = 0
+    annotated_publisher_active: bool = False
+    annotated_encoder: str | None = None
+    annotated_output_label: str | None = None
     capture_age_ms: float = 0.0
     last_error: str | None = None
     timings: dict[str, RollingSamples] = field(default_factory=dict)

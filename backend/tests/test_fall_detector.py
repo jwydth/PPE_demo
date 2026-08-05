@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from collections import deque
 
 from app.services.behavior_features import extract_window_features, feature_columns
 from app.services.fall_detector import FallDetector, FallModelUnavailable, _schema
@@ -102,3 +103,33 @@ def test_discontinuity_invalidates_temporal_windows_but_keeps_incident_cooldown(
     assert not session.probability_history
     assert session.last_incident_at[(4, "falling")] == 12.0
     assert session.sample_index == 0
+
+
+def test_pose_repair_interpolates_at_most_eight_same_track_samples():
+    session = FallDetector().create_live_session(fps=24)
+    previous = _pose_frame()
+    current = _pose_frame()
+    current["bbox"] = [78, 90, 178, 320]
+    window = deque([previous, *([None] * 8), current], maxlen=60)
+
+    repaired = session._repair_trailing_pose_gap(window, current)
+
+    assert repaired == 8
+    assert all(sample is not None for sample in window)
+    assert all(sample.get("is_synthetic") for sample in list(window)[1:-1])
+    assert list(window)[4]["bbox"][0] > previous["bbox"][0]
+
+
+def test_pose_repair_rejects_long_or_implausible_gaps():
+    session = FallDetector().create_live_session(fps=24)
+    previous = _pose_frame()
+    current = _pose_frame()
+    long_gap = deque([previous, *([None] * 9), current], maxlen=60)
+    current_far = _pose_frame()
+    current_far["bbox"] = [1000, 1000, 1100, 1230]
+    unsafe_gap = deque([previous, None, current_far], maxlen=60)
+
+    assert session._repair_trailing_pose_gap(long_gap, current) == 0
+    assert session._repair_trailing_pose_gap(unsafe_gap, current_far) == 0
+    assert any(sample is None for sample in long_gap)
+    assert any(sample is None for sample in unsafe_gap)

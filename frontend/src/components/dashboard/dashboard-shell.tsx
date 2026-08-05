@@ -30,6 +30,7 @@ import {
 } from "@/lib/ppe-api";
 import { BoundingBoxView } from "@/components/ppe/bounding-box-view";
 import { FileUpload } from "@/components/ppe/file-upload";
+import { LlHlsVideo } from "@/components/ppe/ll-hls-video";
 import {
   PPESuggestionBanner,
   SuggestionOverlayLayer,
@@ -134,10 +135,41 @@ interface CameraConfig {
 }
 
 const DEFAULT_CAMERAS: CameraConfig[] = [
-  { id: 1, name: "Production Area", rtspUrl: "rtsp://127.0.0.1:8554/stream1", zoneId: "Z01", homeZoneId: null, active: true },
-  { id: 2, name: "Warehouse Intake", rtspUrl: "rtsp://127.0.0.1:8554/stream2", zoneId: "Z02", homeZoneId: null, active: false },
+  { id: 2, name: "Production Area", rtspUrl: "rtsp://127.0.0.1:8554/stream1", zoneId: "Z01", homeZoneId: null, active: true },
+  { id: 1, name: "Warehouse Intake", rtspUrl: "rtsp://127.0.0.1:8554/stream2", zoneId: "Z02", homeZoneId: null, active: false },
   { id: 3, name: "Packing Area", rtspUrl: "rtsp://127.0.0.1:8554/stream3", zoneId: "Z03", homeZoneId: null, active: false },
 ];
+
+function normalizeCameraSourceKey(value: string): string {
+  const normalized = value.trim();
+  try {
+    const parsed = new URL(normalized);
+    if (
+      (parsed.protocol === "rtsp:" || parsed.protocol === "rtsps:") &&
+      (parsed.hostname === "localhost" || parsed.hostname === "[::1]")
+    ) {
+      parsed.hostname = "127.0.0.1";
+    }
+    return parsed.toString();
+  } catch {
+    return normalized;
+  }
+}
+
+function normalizeConfiguredCameras(cameras: CameraConfig[]): CameraConfig[] {
+  const sourceKeys = new Set<string>();
+  return cameras
+    .map((camera) => ({
+      ...camera,
+      rtspUrl: normalizeCameraSourceKey(camera.rtspUrl),
+      homeZoneId: camera.homeZoneId ?? null,
+    }))
+    .filter((camera) => {
+      if (!camera.rtspUrl || sourceKeys.has(camera.rtspUrl)) return false;
+      sourceKeys.add(camera.rtspUrl);
+      return true;
+    });
+}
 
 interface CameraPanelProps {
   cameras: CameraConfig[];
@@ -386,32 +418,14 @@ function CameraPanel({
   };
 
   const handleSaveCameraConfig = async (updatedCameras: CameraConfig[]) => {
+    const camerasToSave = normalizeConfiguredCameras(updatedCameras);
+    const currentSource = cameras.find(
+      (camera) => camera.id === activeCameraId,
+    )?.rtspUrl;
     // Identify cameras that were deleted
-    const deletedCameras = cameras.filter((c) => !updatedCameras.some((uc) => uc.id === c.id));
-
-    onCamerasUpdate(updatedCameras);
-    localStorage.setItem("ppe_demo_cameras", JSON.stringify(updatedCameras));
-    setIsConfiguringCameras(false);
-
-    // Sync all camera connections to open/close sockets as needed
-    liveStream.syncCameraConnections(updatedCameras);
-
-    const currentCam = updatedCameras.find((c) => c.id === activeCameraId);
-    if (currentCam) {
-      if (!currentCam.active) {
-        const firstActive = updatedCameras.find((c) => c.active) || updatedCameras[0];
-        if (firstActive) {
-          void handleCameraChange(firstActive.id);
-        }
-      } else {
-        void handleCameraChange(activeCameraId);
-      }
-    } else if (updatedCameras.length > 0) {
-      const firstActive = updatedCameras.find((c) => c.active) || updatedCameras[0];
-      if (firstActive) {
-        void handleCameraChange(firstActive.id);
-      }
-    }
+    const deletedCameras = cameras.filter(
+      (camera) => !camerasToSave.some((candidate) => candidate.id === camera.id),
+    );
 
     try {
       // First, handle deletions on the backend
@@ -427,7 +441,7 @@ function CameraPanel({
 
       // Then save/ensure updated cameras
       await Promise.all(
-        updatedCameras.map(async (cam) => {
+        camerasToSave.map(async (cam) => {
           const backendCamera = await ensureCamera(cam.name, cam.rtspUrl);
           await setCameraHomeZone(backendCamera.id, cam.homeZoneId);
         }),
@@ -435,12 +449,31 @@ function CameraPanel({
 
       // Re-fetch backend cameras to sync any homeZoneId changes
       const latestBackendCameras = await getCameras();
-      const reconciled = updatedCameras.map((cam) => {
-        const match = latestBackendCameras.find((bc) => bc.source_key === cam.rtspUrl);
+      const reconciled = camerasToSave.map((cam) => {
+        const match = latestBackendCameras.find(
+          (backendCamera) =>
+            normalizeCameraSourceKey(backendCamera.source_key) === cam.rtspUrl,
+        );
         return match ? { ...cam, id: match.id, homeZoneId: match.home_zone_id } : cam;
       });
       onCamerasUpdate(reconciled);
       localStorage.setItem("ppe_demo_cameras", JSON.stringify(reconciled));
+      setIsConfiguringCameras(false);
+      liveStream.syncCameraConnections(reconciled);
+
+      const retainedCamera = reconciled.find(
+        (camera) =>
+          camera.active &&
+          normalizeCameraSourceKey(camera.rtspUrl) ===
+            normalizeCameraSourceKey(currentSource ?? ""),
+      );
+      const nextCamera =
+        retainedCamera || reconciled.find((camera) => camera.active) || reconciled[0];
+      if (nextCamera) {
+        onCameraChange(nextCamera.id);
+        liveStream.setViewedCamera(nextCamera.rtspUrl);
+        void zoneDrawing.loadSavedZones(nextCamera.rtspUrl);
+      }
       window.alert("Camera configuration saved successfully.");
     } catch (err) {
       setError(
@@ -533,9 +566,11 @@ function CameraPanel({
   // Unified identifier for the current camera source: the RTSP URL for a live
   // feed, otherwise the uploaded file name. Used as the zone storage key so
   // auto-zone save/load/clear works identically for live and uploaded sources.
-  const feedAspectRatio = visibleTrackingOverlay
-    ? `${visibleTrackingOverlay.frame_width ?? 16} / ${visibleTrackingOverlay.frame_height ?? 9}`
-    : "16 / 9";
+  const feedWidth = visibleTrackingOverlay?.frame_width ?? 16;
+  const feedHeight = visibleTrackingOverlay?.frame_height ?? 9;
+  const feedAspectRatio = feedWidth > 0 && feedHeight > 0
+    ? feedWidth / feedHeight
+    : 16 / 9;
   const currentFrameIndex = Math.round(
     liveStream.currentVideoTime * (liveStream.streamData.tracking_overlay.fps || 30),
   );
@@ -1051,7 +1086,6 @@ function CameraPanel({
                       {cameras
                         .filter((c) => selectedCameraIds.includes(c.id))
                         .map((c) => {
-                          const frameUrl = liveStream.liveFrames[c.rtspUrl];
                           return (
                             <div
                               key={c.id}
@@ -1061,7 +1095,7 @@ function CameraPanel({
                               }}
                               className="group relative aspect-video overflow-hidden rounded-md border border-slate-800 bg-black cursor-pointer hover:border-slate-500 transition-all shadow-md"
                             >
-                              {c.active && frameUrl ? (
+                              {c.active ? (
                                 <>
                                   {/* Camera specific inline feature toggles */}
                                   <div className="absolute top-2 right-2 flex gap-1.5 z-10">
@@ -1112,19 +1146,20 @@ function CameraPanel({
                                     </button>
                                   </div>
 
-                                  <img
-                                    src={frameUrl}
-                                    alt={c.name}
-                                    className="absolute inset-0 h-full w-full object-contain animate-fadeIn"
-                                  />
-                                  {/* Zones Overlay */}
-                                  {(cameraFeatureMap[c.id]?.["zone_monitoring"] ?? false) && cameraZones[c.rtspUrl] && (
-                                    <svg
-                                      className="pointer-events-none absolute inset-0 h-full w-full"
-                                      viewBox="0 0 1 1"
-                                      preserveAspectRatio="none"
-                                    >
-                                      {cameraZones[c.rtspUrl].map((zone) => {
+                                  <LlHlsVideo
+                                    source={c.rtspUrl}
+                                    annotated
+                                    className="absolute inset-0 h-full w-full object-contain"
+                                    onTimeline={(timeline) => liveStream.handleHlsTimeline(c.rtspUrl, timeline)}
+                                    onPlaybackMetrics={(metrics) => liveStream.handlePlaybackMetrics(c.rtspUrl, metrics)}
+                                  >
+                                    {(cameraFeatureMap[c.id]?.["zone_monitoring"] ?? false) && cameraZones[c.rtspUrl] && (
+                                      <svg
+                                        className="pointer-events-none absolute inset-0 h-full w-full"
+                                        viewBox="0 0 1 1"
+                                        preserveAspectRatio="none"
+                                      >
+                                        {cameraZones[c.rtspUrl].map((zone) => {
                                         const pathData = zone.points.length > 0
                                           ? `M ${zone.points[0].x} ${zone.points[0].y} ` +
                                             zone.points.map((p, i) => {
@@ -1136,68 +1171,20 @@ function CameraPanel({
                                             }).join(" ") + " Z"
                                           : "";
 
-                                        return (
-                                          <path
-                                            key={zone.id}
-                                            d={pathData}
-                                            fill={`${zoneColors[zone.type]}33`}
-                                            stroke={zoneColors[zone.type]}
-                                            strokeWidth={0.004}
-                                            className="pointer-events-none"
-                                          />
-                                        );
-                                      })}
-                                    </svg>
-                                  )}
-
-                                  {/* Tracking Overlay Layer (PPE / Zone Violations) */}
-                                  {liveStream.cameraOverlays[c.rtspUrl] && (
-                                    (() => {
-                                      const overlayData = liveStream.cameraOverlays[c.rtspUrl];
-                                      const isPpeEnabled = cameraFeatureMap[c.id]?.["ppe_detection"] ?? true;
-                                      const isZoneEnabled = cameraFeatureMap[c.id]?.["zone_monitoring"] ?? false;
-                                      // Filter frames based on global models enabled
-                                      const filteredFrames = overlayData.frames.map((frame) => {
-                                        const missing = isPpeEnabled ? frame.missing_equipment : [];
-                                        const incursionType = isZoneEnabled ? frame.zone_type : null;
-                                        const incursionName = isZoneEnabled ? frame.zone_name : null;
-                                        const compliant = isPpeEnabled ? frame.compliant : true;
-                                        
-                                        return {
-                                          ...frame,
-                                          missing_equipment: missing,
-                                          zone_type: incursionType,
-                                          zone_name: incursionName,
-                                          compliant: compliant,
-                                        };
-                                      }).filter((frame) => {
-                                        return frame.missing_equipment.length > 0 || frame.zone_type !== null || isPpeEnabled;
-                                      });
-
-                                      const syntheticOverlay = {
-                                        fps: 30,
-                                        stride: 1,
-                                        frame_width: overlayData.frameWidth,
-                                        frame_height: overlayData.frameHeight,
-                                        frames: filteredFrames.map((f) => ({ ...f, frame_index: 0 })),
-                                      };
-
-                                      return (
-                                        <TrackingOverlayLayer
-                                          overlay={syntheticOverlay}
-                                          currentTime={0}
-                                          behaviorDetections={
-                                            (cameraFeatureMap[c.id]?.["behavior_detection"] ?? cameraFeatureMap[c.id]?.["fall_detection"] ?? false)
-                                              ? overlayData.fallDetections
-                                              : []
-                                          }
-                                          behaviorEnabled={
-                                            cameraFeatureMap[c.id]?.["behavior_detection"] ?? cameraFeatureMap[c.id]?.["fall_detection"] ?? false
-                                          }
-                                        />
-                                      );
-                                    })()
-                                  )}
+                                          return (
+                                            <path
+                                              key={zone.id}
+                                              d={pathData}
+                                              fill={`${zoneColors[zone.type]}33`}
+                                              stroke={zoneColors[zone.type]}
+                                              strokeWidth={0.004}
+                                              className="pointer-events-none"
+                                            />
+                                          );
+                                        })}
+                                      </svg>
+                                    )}
+                                  </LlHlsVideo>
 
                                 </>
                               ) : (
@@ -1233,19 +1220,28 @@ function CameraPanel({
                 <div className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_340px]">
                   <div>
                     <div
-                      ref={(el) => zoneDrawing.setSurfaceElement(el)}
+                      ref={liveStream.isLive ? undefined : zoneDrawing.setSurfaceElement}
                       onMouseMove={zoneDrawing.handleMouseMove}
                       onMouseUp={zoneDrawing.handleMouseUp}
                       onMouseLeave={zoneDrawing.handleMouseUp}
                       className="relative aspect-video overflow-hidden rounded-md border border-slate-800 bg-black"
                       style={{ aspectRatio: feedAspectRatio }}
                     >
-                      {liveStream.isLive && liveStream.streamData.live_frame ? (
-                        <img
-                          src={liveStream.streamData.live_frame}
-                          alt="Live stream"
+                      {liveStream.isLive ? (
+                        <LlHlsVideo
+                          source={liveStream.liveUrl}
+                          annotated
+                          aspectRatio={feedAspectRatio}
                           className="absolute inset-0 h-full w-full object-contain"
-                        />
+                          onTimeline={(timeline) => liveStream.handleHlsTimeline(liveStream.liveUrl, timeline)}
+                          onPlaybackMetrics={(metrics) => liveStream.handlePlaybackMetrics(liveStream.liveUrl, metrics)}
+                          onVideoElement={liveStream.setVideoElement}
+                          onSurfaceElement={zoneDrawing.setSurfaceElement}
+                        >
+                          {currentZoneEnabled || zoneDrawing.isDrawing || zoneDrawing.pendingAutoZoneIds.size > 0 ? (
+                            <ZoneOverlaySvg zoneDrawing={zoneDrawing} zoneColors={zoneColors} />
+                          ) : null}
+                        </LlHlsVideo>
                       ) : upload.videoUrl ? (
                         <video
                           ref={(el) => liveStream.setVideoElement(el)}
@@ -1266,16 +1262,20 @@ function CameraPanel({
                           <Loader2 className="size-8 animate-spin" />
                         </div>
                       )}
-                      {currentZoneEnabled || zoneDrawing.isDrawing || zoneDrawing.pendingAutoZoneIds.size > 0 ? (
+                      {!liveStream.isLive && (currentZoneEnabled || zoneDrawing.isDrawing || zoneDrawing.pendingAutoZoneIds.size > 0) ? (
                         <ZoneOverlaySvg zoneDrawing={zoneDrawing} zoneColors={zoneColors} />
                       ) : null}
-                      {!zoneDrawing.isDrawing ? (
+                      {!zoneDrawing.isDrawing && !liveStream.isLive ? (
                         <TrackingOverlayLayer
                           overlay={visibleTrackingOverlay}
                           currentTime={liveStream.currentVideoTime}
                           behaviorDetections={currentFallEnabled ? liveStream.streamData.fall_detections : []}
                           behaviorEnabled={currentFallEnabled}
                           currentFrameIndex={currentFrameIndex}
+                          currentSourceTimeMs={liveStream.currentSourceTimeMs}
+                          onPresentation={(selection) =>
+                            liveStream.handleOverlayPresentation(liveStream.liveUrl, selection)
+                          }
                         />
                       ) : null}
                       <SuggestionOverlayLayer
@@ -1530,7 +1530,7 @@ export function DashboardShell() {
     },
     [router, searchParams],
   );
-  const [activeCameraId, setActiveCameraId] = useState<number>(1);
+  const [activeCameraId, setActiveCameraId] = useState<number>(0);
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
   const [physicalZones, setPhysicalZones] = useState<PhysicalZone[]>([]);
   // Same hook and default range/zone (7D, all zones) as the Incident
@@ -1539,58 +1539,54 @@ export function DashboardShell() {
   const { kpis } = useSafetyKpis();
 
   useEffect(() => {
+    let cancelled = false;
     const stored = localStorage.getItem("ppe_demo_cameras");
     let loaded: CameraConfig[] = DEFAULT_CAMERAS;
     if (stored) {
       try {
         loaded = JSON.parse(stored);
-      } catch (e) {
+      } catch {
         loaded = DEFAULT_CAMERAS;
       }
     } else {
       localStorage.setItem("ppe_demo_cameras", JSON.stringify(DEFAULT_CAMERAS));
     }
-    // Backfill old configs and discard duplicate camera records left by older
-    // localStorage versions. Duplicate sources reconcile to the same database
-    // ID and otherwise cause React's duplicate-key warning.
-    const sourceKeys = new Set<string>();
-    const cameraIds = new Set<number>();
-    loaded = loaded
-      .map((c) => ({ ...c, homeZoneId: c.homeZoneId ?? null }))
-      .filter((camera) => {
-        if (sourceKeys.has(camera.rtspUrl) || cameraIds.has(camera.id)) return false;
-        sourceKeys.add(camera.rtspUrl);
-        cameraIds.add(camera.id);
-        return true;
-      });
-    localStorage.setItem("ppe_demo_cameras", JSON.stringify(loaded));
-    setCameras(loaded);
-    const active = loaded.find((c) => c.active) || loaded[0];
-    setActiveCameraId(active.id);
+    loaded = normalizeConfiguredCameras(loaded);
 
     void getPhysicalZones().then(setPhysicalZones).catch(() => {});
 
-    // Reconcile home-zone assignment from the backend (source of truth), so
-    // it survives a reload even though the rest of the camera config is
-    // still cached in localStorage only.
-    void getCameras()
-      .then((backendCameras) => {
-        setCameras((prev) => {
-          const reconciled = prev.map((cam) => {
-            const match = backendCameras.find((bc) => bc.source_key === cam.rtspUrl);
-            return match ? { ...cam, id: match.id, homeZoneId: match.home_zone_id } : cam;
-          });
-          localStorage.setItem("ppe_demo_cameras", JSON.stringify(reconciled));
-          
-          // Sync activeCameraId to match the reconciled database camera ID
-          const active = reconciled.find((c) => c.active) || reconciled[0];
-          if (active) {
-            setActiveCameraId(active.id);
-          }
-          return reconciled;
-        });
+    // Resolve every source to its database camera before CameraPanel mounts.
+    // Feature requests and WebSocket settings can therefore never use a stale
+    // localStorage ID during the asynchronous startup window.
+    void Promise.all(
+      loaded.map(async (camera) => {
+        const backendCamera = await ensureCamera(camera.name, camera.rtspUrl);
+        return {
+          ...camera,
+          id: backendCamera.id,
+          homeZoneId: backendCamera.home_zone_id,
+        };
+      }),
+    )
+      .then((reconciled) => {
+        if (cancelled) return;
+        localStorage.setItem("ppe_demo_cameras", JSON.stringify(reconciled));
+        setCameras(reconciled);
+        const active = reconciled.find((camera) => camera.active) || reconciled[0];
+        setActiveCameraId(active?.id ?? 0);
       })
-      .catch(() => {});
+      .catch((error) => {
+        if (cancelled) return;
+        console.error("Could not reconcile camera IDs with the backend", error);
+        localStorage.setItem("ppe_demo_cameras", JSON.stringify(loaded));
+        setCameras(loaded);
+        const active = loaded.find((camera) => camera.active) || loaded[0];
+        setActiveCameraId(active?.id ?? 0);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
   const cameraCountsByZone = useMemo(() => {
     const counts: Record<number, number> = {};

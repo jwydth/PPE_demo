@@ -14,15 +14,16 @@ The current local development stack uses:
 
 Start the local project in this order:
 
-1. Infrastructure: PostgreSQL and MinIO
-2. Streaming: MediaMTX
+1. Infrastructure: PostgreSQL, MinIO, and MediaMTX
+2. Streaming: LL-HLS readiness
 3. Streaming: FFmpeg RTSP stream
 4. Backend: FastAPI
 5. Frontend: Next.js
 
 ## Infrastructure Setup
 
-Run these commands from PowerShell to start local PostgreSQL and MinIO.
+Run these commands from PowerShell to start local PostgreSQL, MinIO, and the
+configured MediaMTX LL-HLS server.
 
 ```powershell
 cd C:\path\to\PPE_demo
@@ -36,18 +37,21 @@ Wait until `postgres` shows `healthy`.
 
 Run the streaming setup before starting the backend and frontend.
 
-### Install MediaMTX
+### MediaMTX LL-HLS
 
-MediaMTX is the local RTSP server used by the real-time streaming feature.
+Docker Compose starts MediaMTX with [`mediamtx.yml`](mediamtx.yml). It accepts
+RTSP publishers on port `8554` and serves LL-HLS on port `8888`.
 
-1. Open the [MediaMTX releases page](https://github.com/bluenviron/mediamtx/releases).
-2. Download the Windows standalone binary `.zip` file from the release assets.
-   The file name should look similar to `mediamtx_v1.19.1_windows_amd64.zip`.
-3. Extract the `.zip` file.
-4. Open the extracted `mediamtx.exe` file.
-5. If Windows blocks it, select **More info**, then **Run anyway**.
+Use either Docker Compose or the standalone `mediamtx.exe`, never both. The
+normal project command is:
 
-Keep MediaMTX running while you use the streaming feature.
+```powershell
+docker compose up -d mediamtx
+```
+
+If port `8888` or `8554` is already in use, stop the old standalone MediaMTX
+process before starting the container. The standalone executable is only an
+alternative for machines that do not use Docker.
 
 ### Install FFmpeg
 
@@ -65,14 +69,21 @@ ffmpeg -version
 
 ### Start the RTSP stream
 
-Open a terminal in the folder that contains your video file, configure and run the FFmpeg command below.
-Make sure to configure the command with the attributes below before running:
-+ Replace `mp_.mp4` with the actual video filename.
-+ Keep `-r 24` when behavior detection is enabled. The behavior classifier was
-  trained on 60 consecutive samples at 24 FPS.
+Use the checked-in publisher script. It normalizes the source to CFR 24 FPS,
+H.264, GOP 24, and no B-frames so LL-HLS emits one-second independently
+decodable segments and the behavior timeline remains at its trained cadence.
 
-```powershell\
-ffmpeg -re -stream_loop -1 -i mp_.mp4 -r 24 -c:v libx264 -preset ultrafast -tune zerolatency -profile:v baseline -level 3.0 -g 24 -bf 0 -flags +global_header -f rtsp -rtsp_transport tcp rtsp://localhost:8554/mystream
+```powershell
+.\scripts\publish-rtsp.ps1 -InputPath C:\videos\camera1.mp4 -StreamName stream1
+```
+
+The publisher defaults to 24 FPS, a maximum width of 1920 pixels, CRF 23,
+an 8 Mbps peak rate, and a 16 Mbit rate-control buffer. These limits prevent
+high-resolution IDR bursts from overflowing MediaMTX reader queues. Override
+them only when the source or network requires it, for example:
+
+```powershell
+.\scripts\publish-rtsp.ps1 -InputPath C:\videos\camera1.mp4 -StreamName stream1 -MaxWidth 1280 -MaxRate 6M -RateControlBuffer 12M
 ```
 
 This command keeps running and loops the video into MediaMTX. Leave this
@@ -84,6 +95,26 @@ frontend connects to:
 ```text
 rtsp://localhost:8554/mystream
 ```
+
+The original, unannotated LL-HLS playlist is:
+
+```text
+http://localhost:8888/mystream/index.m3u8
+```
+
+When the dashboard opens the camera, the backend runs the asynchronous AI
+workers, delays source frames by three seconds, burns the available Pose,
+Behavior, PPE, and Sign results into each frame, and publishes:
+
+```text
+rtsp://localhost:8554/mystream_annotated
+http://localhost:8888/mystream_annotated/index.m3u8
+```
+
+The dashboard plays only this annotated LL-HLS output. It does not compose a
+second browser-side bounding-box layer, so video, geometry, and labels are
+encoded on the same frame clock. It is normal for the annotated playlist to
+return 404 briefly before the camera WebSocket has started its compositor.
 
 ## Backend Setup
 
@@ -197,15 +228,17 @@ for development.
 
 ### Multi-stream behavior detection
 
-Live network sources use one decoded capture per camera. PPE/zone preview uses
-`VIDEO_FRAME_STRIDE` and latest-only delivery, while behavior always consumes
-ordered source frames at `FALL_LIVE_FRAME_STRIDE=1`. Never set the behavior
-stride to 2: a 60-sample window would change from 2.5 seconds to 5 seconds and
-would no longer match the trained classifier.
+Live network sources use one decoded capture per camera. Pose/Behavior consumes
+ordered source frames at `FALL_LIVE_FRAME_STRIDE=1`; PPE and Sign use
+independent latest-only cadences. Never set the Behavior stride to 2: a
+60-sample window would change from 2.5 seconds to 5 seconds and would no longer
+match the trained classifier.
 
 The default two-stream profile uses YOLO26s-pose at 448 pixels, finite CUDA
-micro-batches, per-camera BoT-SORT state, batched CUDA ReID refreshed every two
-frames, fixed-camera GMC disabled, and CPU XGBoost with one thread. The ordered
+micro-batches, one authoritative per-camera Pose/BoT-SORT/ReID tracker, batched
+CUDA ReID, fixed-camera GMC disabled, and the production CPU ExtraTrees
+classifier. Live PPE uses detection only and maps its semantic result onto the
+Pose track by IoU; it does not create another ByteTrack instance. The ordered
 queue is bounded at 180 frames; overflow is reported as a discontinuity and
 invalidates the current 60-frame window instead of silently classifying a
 non-consecutive sequence. At 1280x720, a completely full queue can retain
@@ -218,6 +251,24 @@ Useful `.env` controls are documented in `backend/.env.example`, including
 thread budgets. Restart the FastAPI process after changing them. Use
 `GET /health/streams` to compare queue depth and pose/ReID/XGBoost/JPEG/WebSocket
 timings without exposing RTSP credentials.
+
+The server-side annotated stream is controlled by the `ANNOTATED_*` settings.
+Defaults are a three-second presentation delay, an eight-frame PPE label TTL, a
+three-second Sign TTL, automatic NVENC selection with libx264 fallback, and the
+`_annotated` MediaMTX path suffix. Its health fields include publication rate,
+queue depth/drop count, deadline misses, encoder restarts, and compose/publish
+latencies.
+
+Run a repeatable annotated-stream benchmark after opening the dashboard:
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe scripts\benchmark_llhls.py `
+  --sources rtsp://127.0.0.1:8554/stream1 rtsp://127.0.0.1:8554/stream2 `
+  --hls-path-suffix _annotated `
+  --warmup 10 --duration 30 `
+  --output benchmarks/annotated-llhls.json
+```
 
 ### Email Reports
 

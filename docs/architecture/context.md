@@ -91,6 +91,83 @@ The application detects PPE compliance (helmets and vests) and monitors configur
 - **Resilient Camera ID Synchronization:**
     - Programmed on-mount and save-configuration handlers to map local-storage camera lists with the backend database, preventing stale IDs from causing 404s after database resets.
 
+## Session Updates (August 2026 — Current Multi-Camera Architecture)
+
+This section records the current implemented state after the performance, streaming, synchronization, UX, identity, and transport work completed on August 5, 2026. Where an experiment was later reverted, that is stated explicitly so this document does not describe inactive code as production behavior.
+
+### Behavior pipeline and model scheduling
+
+- Live sources are captured once per camera through the shared frame-hub path. Ordered Behavior input is preserved at the canonical 24 FPS timeline; PPE and Sign consume independent subscriptions and do not block or wait for Behavior.
+- Pose/Behavior uses ordered 60-frame windows with a 12-sample prediction cadence. Pose gaps may be repaired before feature extraction by same-track interpolation for at most eight consecutive frames. Gaps longer than eight frames, epoch changes, low-confidence endpoints, or implausible center motion are not fabricated.
+- Multi-camera Pose inference uses bounded micro-batching. CUDA Pose/ReID work is isolated from CPU tracker updates, tracker updates for different cameras can run in parallel, and each camera remains ordered internally.
+- GPU admission uses deadline aging instead of permanent strict priority. Behavior, PPE, and Sign retain priorities, but lower-priority work cannot starve indefinitely.
+- The current primary Behavior classifier is `weights/best_behavior_model.joblib`, an `ExtraTreesClassifier` running on CPU. XGBoost/UBJ remains only a legacy fallback and must not be reported as the active production model.
+- Live model cadence is intentionally asymmetric: Behavior/Pose targets the ordered 24 FPS source timeline, PPE targets approximately 8 FPS nominally (about 6 FPS under the verified full two-camera workload), and Sign targets 1 FPS on a phase that does not overlap the nominal PPE frame.
+- PPE, Sign, and Behavior are independent model paths. Zone monitoring shares person detection/tracking with PPE and therefore keeps the PPE detector active when Zone is enabled even if PPE compliance checking is disabled.
+
+### Performance instrumentation and root-cause findings
+
+- `/health/streams` now exposes rolling 60-second timing distributions instead of misleading last-value-only measurements. Each stage reports `last`, `mean`, `p50`, `p95`, `p99`, `max`, and sample count where applicable.
+- Health data separates capture cadence, PPE output, Sign output, Behavior output, scheduler wait, batch formation, GPU-lock wait, Pose batch/per-frame time, ReID/tracking, post-processing, classifier, JPEG, WebSocket, metadata delivery age, annotated composition/publication, HLS telemetry, and overlay skew.
+- PPE loss, Behavior queue depth/drops/gaps, Pose interpolation, preview generation/sending/coalescing, HLS rebuffering, browser dropped frames, annotated queue depth, deadline misses, and encoder restarts are observable.
+- `backend/scripts/benchmark_streams.py` provides the controlled inference matrix; `backend/scripts/benchmark_llhls.py` validates playlist continuity, metadata transport, and health snapshots. Raw benchmark results are retained under `backend/benchmarks/`.
+- The original dashboard stutter was not primarily JPEG or WebSocket cost. A standalone two-camera OpenCV capture test reproduced periodic roughly 746 ms delivery gaps while average throughput stayed near 24 FPS. `ffplay` concealed the burstiness with a playback buffer; the old latest-JPEG dashboard did not.
+- Narrowing the GPU critical section removed avoidable PPE blocking from CPU tracker work. In focused validation, both Behavior streams sustained approximately 24 FPS with zero Behavior drops/gaps while PPE preview no longer collapsed to the earlier 5–7.5 FPS range.
+
+### Annotated LL-HLS presentation path
+
+- MediaMTX provides the buffered HLS transport. Source publishers enforce H.264/yuv420p at 24 FPS, one-second GOP/keyint, no B-frames, RTSP over TCP, bounded bitrate, and no upscaling above the configured maximum width.
+- The current dashboard consumes a server-composed annotated stream rather than drawing the AI person overlay as an independent browser layer. Frames are buffered in source order, AI results are applied to their matching source frame, and FFmpeg publishes the composed result to the `_annotated` MediaMTX path.
+- The annotated compositor delay is three seconds. A two-second delay was insufficient for the first 60-frame Behavior window, which needs about 2.5 seconds of source samples before inference and post-processing. The three-second deadline leaves approximately 500 ms of processing margin.
+- PPE boxes may be matched/held only within bounded TTL rules. Behavior geometry and labels follow timestamped confirmed results; short missing Pose spans are repaired before Behavior feature extraction rather than invented only at render time.
+- The earlier experiment that sent original RTSP directly to HLS and aligned a separate browser AI overlay by wall-clock time was reverted. It produced unstable phase errors because independent RTSP readers did not share a trustworthy content timestamp.
+- `metadata_only=true` remains supported on `/ws/stream`: it skips JPEG payload generation while preserving timestamped AI/control events. Timeline fields include stream epoch, frame index, media PTS, source UTC time, inference completion time, and discontinuity sequence.
+- Timeline selection rejects future predictions. A result can be rendered only when its source time is at or before the displayed/composed frame time. Geometry interpolation requires valid same-track endpoints and is limited to eight frames; a one-sided stale box is held for only a very short bounded interval.
+
+### Unified labels and feature-toggle behavior
+
+- Model switches control both work and presentation. Disabling Behavior stops Pose/ReID and clears its rendered state; disabling Sign stops Sign; disabling PPE suppresses PPE compliance work unless Zone still requires the shared person detector; disabling Zone removes zone semantics.
+- When all models are disabled, the independent video publisher remains active but no AI bounding box or label is burned into the video.
+- The live label system is violation-oriented and shared across models. Normal people receive one green `Compliant` label. `Behavior: Others`, PPE-compliant/unknown text, Behavior confidence scores, track IDs, and Pose skeletons are not rendered.
+- Any active PPE, Zone, Running, or Falling violation makes the complete person box and label panel red and lists the specific canonical violations together, for example `PPE: Missing Safety Helmet`, `Zone: Restricted zone - Line A`, and `Behavior: Falling`.
+- Annotated-stream pixel tests cover all-off output, unified compliant styling, simultaneous violations, canonical text, red rendering, and absence of skeleton pixels.
+
+### Dashboard playback, fullscreen, and zone overlay
+
+- `LlHlsVideo` is used in single-camera and matrix views. It owns HLS lifecycle, safe playback recovery, telemetry, and native fullscreen/minimize controls without replacing the underlying video element.
+- Expected Chromium `AbortError` and autoplay `NotAllowedError` rejections from `video.play()` are consumed explicitly. Resume attempts are gated by document visibility and fullscreen ownership so background matrix tiles do not fight browser power-saving behavior.
+- User-defined zone polygons are children of the fullscreen presentation surface, so they remain visible when native fullscreen is entered. The fullscreen button does not trigger matrix tile navigation.
+- Video, zone SVG, and controls share one ratio-locked inner stage. Normal and fullscreen modes therefore use the same normalized coordinate rectangle; fullscreen black bars remain outside that stage.
+- Zone drawing measures the actual visible presentation surface through `onSurfaceElement`, so pointer-to-zone conversion remains correct before, during, and after fullscreen transitions.
+
+### Camera identity and persisted incident mapping
+
+- `source_key`, not a guessed numeric ID or stream suffix, is the stable camera identity. The frontend resolves configured RTSP sources through `POST /cameras` before mounting camera-dependent feature controls and persists the returned database ID/home-zone ID.
+- Equivalent loopback RTSP hosts are canonicalized: `localhost` and `::1` become `127.0.0.1` at frontend registration and backend Camera/PPE/Zone/Behavior persistence boundaries.
+- Legacy orphan camera rows for the loopback aliases were removed only after verifying they had no feature configurations, zone views, PPE violations, zone violations, or Behavior incidents.
+- The verified registry mapping is camera 1 = stream2, camera 2 = stream1, and camera 3 = stream3. Existing PPE, Zone, and Behavior records were checked for zero `camera_id`/`source_key` mismatches.
+
+### RTSP/H.264 stability and resource use
+
+- MediaMTX `writeQueueSize` was increased from 512 to 2048 while retaining TCP-only RTSP transport. This removed the observed `reader is too slow, discarding ... frames` warnings that had broken H.264 reference chains and produced CABAC/macroblock/missing-reference decoder errors.
+- `publish-rtsp.ps1` now validates and applies maximum width, CRF, peak bitrate, and rate-control buffer settings. Defaults are 1920 pixels, CRF 23, 8 Mbps, and 16 Mbit; smaller sources are never upscaled.
+- Stream1 is published at 1920x1086/24 FPS and stream2 remains 832x480/24 FPS. Post-change decoder checks completed without H.264 errors.
+- Live verification measured approximately 24.2 FPS capture and annotated output for both cameras, annotated queue depth near 71 frames, zero annotated frame drops, and no stream `last_error`. Reducing stream1 lowered backend private working set by approximately 1.70 GB in the measured run.
+
+### WebSocket lifecycle status and reverted handover experiment
+
+- The current WebSocket route retains the established per-source lock/supersede behavior: a newer connection cancels the prior connection, the prior generator is closed before its lock is released, and the replacement connection starts its own stream generator.
+- Browser page reload necessarily closes and recreates the WebSocket. Consequently, with the current code, a page reload can still tear down and restart that camera's backend generator/pipeline.
+- A per-camera five-second session-grace implementation was prototyped to keep the generator alive across browser reloads, together with lifecycle tests and shutdown cleanup. At the user's request, all seven files from that change were fully reverted. There is currently no `stream_sessions.py`, no `STREAM_DISCONNECT_GRACE_SECONDS`, and no reload-handover session registry in production code.
+- Existing `metadata_only`, playback telemetry, source timeline metrics, lock teardown, and supersede logic were preserved during the revert. The restored streaming timeline tests pass.
+
+### Verification record and known limitations
+
+- Focused suites for Behavior, cadence, timeline, health, annotated rendering, camera identity, fullscreen integration, and transport changes passed at their respective implementation checkpoints. Production Next.js builds and Python compilation passed after the integrated changes.
+- Full backend runs still contain the previously documented unrelated/environment-sensitive failures: report-recipient allowlist assumptions, stale auto-zone polygon/async-generator expectations, and older incident diagnostics contracts.
+- No controllable browser session was available for automated fullscreen screenshots or browser-only LL-HLS decoded-FPS/rebuffer/skew acceptance. These values are emitted to `/health/streams` when a real dashboard is open and still require final representative visual validation.
+- The working tree intentionally contains the accumulated implementation changes described above. They must not be discarded with a broad reset when making follow-up fixes.
+
 ## Folder Structure
 
 ### Backend (`/backend`)

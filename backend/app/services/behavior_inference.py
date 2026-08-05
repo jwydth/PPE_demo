@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import time
 from dataclasses import dataclass, replace
@@ -13,7 +14,7 @@ import numpy as np
 
 from app.core.config import settings
 from app.services.fall_detector import FallDetector
-from app.services.inference_coordination import gpu_inference_lock
+from app.services.inference_coordination import gpu_inference_lock, inference_priority
 from app.services.stream_health import observe_stream_timing
 
 logger = logging.getLogger(__name__)
@@ -250,6 +251,10 @@ class BehaviorInferenceScheduler:
         self._start_waiters: set[asyncio.Future] = set()
         self._start_release_task: asyncio.Task[None] | None = None
         self._closing = False
+        self._tracking_executor = ThreadPoolExecutor(
+            max_workers=max(2, min(4, settings.BEHAVIOR_TORCH_THREADS)),
+            thread_name_prefix="behavior-tracker",
+        )
 
     @property
     def camera_keys(self) -> set[str]:
@@ -340,6 +345,7 @@ class BehaviorInferenceScheduler:
         if self._shared_reid is not None:
             await asyncio.to_thread(self._shared_reid.close)
             self._shared_reid = None
+        self._tracking_executor.shutdown(wait=True, cancel_futures=True)
         predictor = getattr(self.detector.model, "predictor", None)
         dataset = getattr(predictor, "dataset", None)
         close = getattr(dataset, "close", None)
@@ -453,7 +459,7 @@ class BehaviorInferenceScheduler:
         requests: list[_InferenceRequest],
     ) -> tuple[list[Any], float, float, list[float]]:
         lock_requested_at = time.perf_counter()
-        with gpu_inference_lock:
+        with inference_priority(gpu_inference_lock, 0):
             gpu_lock_wait_ms = (time.perf_counter() - lock_requested_at) * 1000.0
             results, pose_ms = self._predict_pose_batch_locked(requests)
 
@@ -476,10 +482,16 @@ class BehaviorInferenceScheduler:
         requests: list[_InferenceRequest],
     ) -> tuple[list[Any], float]:
         model = self.detector._ensure_model()
+        images = [request.image for request in requests]
+        real_count = len(images)
+        if self.detector.device.startswith("cuda") and images:
+            images.extend(
+                [images[-1]] * (settings.BEHAVIOR_BATCH_MAX_SIZE - real_count)
+            )
         pose_started = time.perf_counter()
         try:
             results = model.predict(
-                [request.image for request in requests],
+                images,
                 conf=settings.FALL_PERSON_CONFIDENCE,
                 imgsz=settings.BEHAVIOR_POSE_IMGSZ,
                 device=self.detector.device,
@@ -500,7 +512,7 @@ class BehaviorInferenceScheduler:
                 ) from exc
             raise
         pose_ms = (time.perf_counter() - pose_started) * 1000.0
-        return results, pose_ms
+        return list(results[:real_count]), pose_ms
 
     def _track_batch(
         self,
@@ -528,7 +540,7 @@ class BehaviorInferenceScheduler:
             ]
             if reid_indices:
                 lock_requested_at = time.perf_counter()
-                with gpu_inference_lock:
+                with inference_priority(gpu_inference_lock, 0):
                     reid_lock_wait_ms = (
                         time.perf_counter() - lock_requested_at
                     ) * 1000.0
@@ -542,18 +554,37 @@ class BehaviorInferenceScheduler:
                     reid_ms = (time.perf_counter() - reid_started) * 1000.0
                 for index, embeddings in zip(reid_indices, encoded, strict=True):
                     embeddings_by_result[index] = embeddings
-        for result, embeddings, tracker in zip(
-            results, embeddings_by_result, trackers, strict=True
-        ):
-            tracking_started = time.perf_counter()
-            if self._tracker_factory is None:
-                tracked_results.append(tracker.update(result, embeddings))
-            else:
-                tracked_results.append(tracker.update(result))
-            tracking_times.append(
-                (reid_ms if embeddings is not None else 0.0)
-                + (time.perf_counter() - tracking_started) * 1000.0
-            )
+        tracked_by_index: list[Any | None] = [None] * len(results)
+        timing_by_index = [0.0] * len(results)
+        indices_by_camera: dict[str, list[int]] = {}
+        for index, request in enumerate(requests):
+            indices_by_camera.setdefault(request.camera_key, []).append(index)
+
+        def update_camera(indices: list[int]) -> None:
+            for index in indices:
+                result = results[index]
+                embeddings = embeddings_by_result[index]
+                tracker = trackers[index]
+                tracking_started = time.perf_counter()
+                if self._tracker_factory is None:
+                    tracked_by_index[index] = tracker.update(result, embeddings)
+                else:
+                    tracked_by_index[index] = tracker.update(result)
+                timing_by_index[index] = (
+                    (reid_ms if embeddings is not None else 0.0)
+                    + (time.perf_counter() - tracking_started) * 1000.0
+                )
+
+        futures = [
+            self._tracking_executor.submit(update_camera, indices)
+            for indices in indices_by_camera.values()
+        ]
+        for future in futures:
+            future.result()
+        tracked_results = [result for result in tracked_by_index if result is not None]
+        if len(tracked_results) != len(results):
+            raise RuntimeError("Behavior tracker did not return every batch result")
+        tracking_times.extend(timing_by_index)
         return tracked_results, reid_lock_wait_ms, tracking_times
 
     def _create_tracker(self) -> Any:

@@ -12,9 +12,11 @@ def test_behavior_runtime_defaults_preserve_temporal_contract():
     assert configured.FALL_BEHAVIOR_CANONICAL_FPS == 24
     assert configured.BEHAVIOR_GMC_METHOD == "none"
     assert configured.BEHAVIOR_POSE_IMGSZ == 448
-    assert configured.BEHAVIOR_REID_INTERVAL_FRAMES == 2
+    assert configured.BEHAVIOR_REID_INTERVAL_FRAMES == 4
     assert configured.BEHAVIOR_LIVE_WARMUP_FRAMES == 3
-    assert configured.BEHAVIOR_CAMERA_BURST_SIZE == 4
+    assert configured.BEHAVIOR_BATCH_MAX_SIZE == 4
+    assert configured.BEHAVIOR_CAMERA_BURST_SIZE == 2
+    assert configured.ANNOTATED_STREAM_DELAY_SECONDS == 3.0
 
 
 def test_fixed_camera_forces_gmc_off():

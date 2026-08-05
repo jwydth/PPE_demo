@@ -14,6 +14,7 @@ from app.repositories.camera_zone_view_repository import CameraZoneViewRepositor
 from app.repositories.zone_violation_repository import ZoneViolationRepository
 from app.schemas.violation import ZoneViolation
 from app.services import ServiceNotFoundError, ServiceValidationError
+from app.services.camera_identity import normalize_camera_source_key
 from app.storage.evidence_storage import EvidenceStorage, get_evidence_storage
 
 
@@ -51,7 +52,7 @@ class ZoneViolationService:
     ) -> ZoneViolation:
         storage = self._require_storage()
         stored_object = storage.upload_zone_snapshot(local_snapshot_path)
-        source_key = _require_text(video_name, "video_name")
+        source_key = normalize_camera_source_key(_require_text(video_name, "video_name"))
         context = self._zone_context(
             camera_zone_view_id=camera_zone_view_id,
             zone_id=zone_id,
@@ -96,7 +97,7 @@ class ZoneViolationService:
         status: str = "OPEN",
         severity: str | None = None,
     ) -> ZoneViolation:
-        source_key = _require_text(video_name, "video_name")
+        source_key = normalize_camera_source_key(_require_text(video_name, "video_name"))
         context = self._zone_context(
             camera_zone_view_id=camera_zone_view_id,
             zone_id=zone_id,

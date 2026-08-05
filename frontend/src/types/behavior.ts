@@ -83,4 +83,9 @@ export interface FallLiveDetection {
   features: Record<string, number>;
   keypoints?: number[][] | null;
   incident_id?: number | null;
+  stream_epoch?: string;
+  media_pts_ms?: number;
+  source_time_ms?: number;
+  inference_completed_ms?: number;
+  discontinuity_sequence?: number;
 }

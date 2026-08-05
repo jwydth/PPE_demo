@@ -28,6 +28,7 @@ from app.schemas.fall_detection import (
     BehaviorIncidentSubjectRead,
 )
 from app.services import ServiceNotFoundError, ServiceValidationError
+from app.services.camera_identity import normalize_camera_source_key
 from app.storage.evidence_storage import EvidenceStorage, get_evidence_storage
 
 logger = logging.getLogger(__name__)
@@ -77,14 +78,15 @@ class BehaviorIncidentService:
         ended_at: str | datetime | None = None,
     ) -> BehaviorIncidentBundle:
         occurred_at = _parse_timestamp(timestamp)
-        resolved_camera_id = self._resolve_camera_id(camera_id, video_name)
+        source_key = _normalized_source_key(video_name)
+        resolved_camera_id = self._resolve_camera_id(camera_id, source_key)
         storage = self._require_storage()
         stored_object = storage.upload_behavior_snapshot(local_snapshot_path)
 
         incident = self.repository.create(
             BehaviorIncident(
                 camera_id=_optional_positive_id(resolved_camera_id, "camera_id"),
-                source_key=_optional_text(video_name),
+                source_key=source_key,
                 behavior_type=behavior_type.value,
                 status=BehaviorIncidentStatus.NEW.value,
                 severity=severity.value,
@@ -382,6 +384,11 @@ def _optional_text(value: str | None) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def _normalized_source_key(value: str | None) -> str | None:
+    normalized = _optional_text(value)
+    return normalize_camera_source_key(normalized) if normalized is not None else None
 
 
 def get_behavior_incident_service(

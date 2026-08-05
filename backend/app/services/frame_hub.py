@@ -13,6 +13,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Literal
 
@@ -34,6 +35,10 @@ class FramePacket:
     media_timestamp: float
     captured_monotonic: float
     image: np.ndarray
+    stream_epoch: str
+    media_pts_ms: float
+    source_time_ms: float
+    discontinuity_sequence: int = 0
     gap_before: bool = False
     dropped_before: int = 0
 
@@ -135,6 +140,7 @@ class CameraFrameHub:
         self.registry = registry
         self.loop = loop
         self.capture_factory = capture_factory
+        self.stream_epoch = uuid.uuid4().hex
         self.health = FrameHubHealth(source=source)
         self._subscribers: set[FrameSubscription] = set()
         self._ready = asyncio.Event()
@@ -193,17 +199,52 @@ class CameraFrameHub:
             self.health.fps = fps if fps > 0 else 30.0
             self.loop.call_soon_threadsafe(self._ready.set)
             frame_index = 0
+            first_media_pts_ms: float | None = None
+            last_media_pts_ms = -1.0
+            discontinuity_sequence = 0
             while not self._stop.is_set():
                 ok, image = capture.read()
                 if not ok or image is None:
                     break
+                captured_monotonic = time.monotonic()
+                source_time_ms = time.time() * 1000.0
+                raw_media_pts_ms = float(capture.get(cv2.CAP_PROP_POS_MSEC) or 0.0)
+                if raw_media_pts_ms > 0.0:
+                    if first_media_pts_ms is None:
+                        first_media_pts_ms = raw_media_pts_ms
+                    media_pts_ms = raw_media_pts_ms - first_media_pts_ms
+                else:
+                    media_pts_ms = frame_index * 1000.0 / self.health.fps
+
+                expected_step_ms = 1000.0 / self.health.fps
+                source_discontinuity = (
+                    last_media_pts_ms >= 0.0
+                    and (
+                        media_pts_ms <= last_media_pts_ms - expected_step_ms
+                        or media_pts_ms - last_media_pts_ms > expected_step_ms * 12
+                    )
+                )
+                if source_discontinuity:
+                    discontinuity_sequence += 1
+                    self.stream_epoch = uuid.uuid4().hex
+                    first_media_pts_ms = raw_media_pts_ms if raw_media_pts_ms > 0.0 else None
+                    media_pts_ms = 0.0
+                elif last_media_pts_ms >= 0.0 and media_pts_ms <= last_media_pts_ms:
+                    media_pts_ms = last_media_pts_ms + expected_step_ms
+
                 packet = FramePacket(
                     source=self.source,
                     frame_index=frame_index,
-                    media_timestamp=frame_index / self.health.fps,
-                    captured_monotonic=time.monotonic(),
+                    media_timestamp=media_pts_ms / 1000.0,
+                    captured_monotonic=captured_monotonic,
                     image=image,
+                    stream_epoch=self.stream_epoch,
+                    media_pts_ms=media_pts_ms,
+                    source_time_ms=source_time_ms,
+                    discontinuity_sequence=discontinuity_sequence,
+                    gap_before=source_discontinuity,
                 )
+                last_media_pts_ms = media_pts_ms
                 self.health.captured_frames += 1
                 self.health.last_frame_monotonic = packet.captured_monotonic
                 mark_stream_event(self.source, "capture")

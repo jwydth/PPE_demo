@@ -282,6 +282,7 @@ class FallLiveSession:
         self.last_frame_index: int | None = None
         self.last_feature_ms = 0.0
         self.last_classifier_ms = 0.0
+        self.last_pose_repaired_samples = 0
 
     def mark_discontinuity(
         self,
@@ -307,6 +308,7 @@ class FallLiveSession:
         self.last_frame_index = None
         self.last_feature_ms = 0.0
         self.last_classifier_ms = 0.0
+        self.last_pose_repaired_samples = 0
         self.timestamp_origin = timestamp_seconds
         self.last_canonical_frame = -1
         self.sample_index = 0
@@ -378,6 +380,7 @@ class FallLiveSession:
         # previous non-zero value made rolling health samples misleading.
         self.last_feature_ms = 0.0
         self.last_classifier_ms = 0.0
+        self.last_pose_repaired_samples = 0
         detections = _pose_detections(result)
         for track_id, window in self.windows.items():
             window.append(None)
@@ -389,6 +392,10 @@ class FallLiveSession:
                 window[-1] = detection["frame"]
             else:
                 window.append(detection["frame"])
+            self.last_pose_repaired_samples += self._repair_trailing_pose_gap(
+                window,
+                detection["frame"],
+            )
             self.missing_samples_by_track[track_id] = 0
             # Match the labeling pipeline's 12-frame window stride and its
             # three-window probability smoothing. Between window boundaries,
@@ -482,6 +489,31 @@ class FallLiveSession:
         self.last_summary, self.last_detections, self.last_frame_index = _summary(payloads, [item.id for item in persisted]).model_dump(), live_payloads, frame_index
         return {"summary": self.last_summary, "detections": live_payloads, "incidents": [item.model_dump() for item in persisted], "frame_index": frame_index}
 
+    def _repair_trailing_pose_gap(
+        self,
+        window: deque[dict[str, Any] | None],
+        current: dict[str, Any],
+    ) -> int:
+        """Interpolate a short same-track gap after its closing endpoint arrives."""
+        samples = list(window)
+        right = len(samples) - 1
+        left = right - 1
+        while left >= 0 and samples[left] is None:
+            left -= 1
+        gap = right - left - 1
+        if gap == 0 or gap > settings.BEHAVIOR_POSE_REPAIR_MAX_GAP or left < 0:
+            return 0
+
+        previous = samples[left]
+        if previous is None or not _pose_repair_is_safe(previous, current):
+            return 0
+        for offset in range(1, gap + 1):
+            alpha = offset / (gap + 1)
+            samples[left + offset] = _interpolate_pose_frame(previous, current, alpha)
+        window.clear()
+        window.extend(samples)
+        return gap
+
     def payload_for_frame(self, frame_index: int, *, max_age_frames: int) -> dict[str, Any]:
         if self.last_summary is None or self.last_frame_index is None:
             return {"summary": None, "detections": [], "incidents": [], "frame_index": frame_index}
@@ -505,6 +537,62 @@ def _pose_detections(result: Any, fallback_track_ids: bool = False) -> list[dict
         record = {"bbox": [float(value) for value in box], "keypoints": [[value[0], value[1]] for value in keypoints], "keypoint_scores": [value[2] for value in keypoints], "person_confidence": float(confidence)}
         detections.append({"track_id": int(track_id), "bbox": record["bbox"], "keypoints": keypoints, "person_confidence": float(confidence), "frame": record})
     return detections
+
+
+def _pose_repair_is_safe(previous: dict[str, Any], current: dict[str, Any]) -> bool:
+    minimum = settings.BEHAVIOR_POSE_REPAIR_MIN_CONFIDENCE
+    for frame in (previous, current):
+        scores = [float(value) for value in frame.get("keypoint_scores", [])]
+        if not scores or sum(scores) / len(scores) < minimum:
+            return False
+
+    previous_box = [float(value) for value in previous["bbox"]]
+    current_box = [float(value) for value in current["bbox"]]
+    previous_center = (
+        (previous_box[0] + previous_box[2]) / 2.0,
+        (previous_box[1] + previous_box[3]) / 2.0,
+    )
+    current_center = (
+        (current_box[0] + current_box[2]) / 2.0,
+        (current_box[1] + current_box[3]) / 2.0,
+    )
+    width = max(1.0, previous_box[2] - previous_box[0])
+    height = max(1.0, previous_box[3] - previous_box[1])
+    shift_ratio = np.hypot(
+        current_center[0] - previous_center[0],
+        current_center[1] - previous_center[1],
+    ) / np.hypot(width, height)
+    return shift_ratio <= settings.BEHAVIOR_POSE_REPAIR_MAX_CENTER_SHIFT_RATIO
+
+
+def _interpolate_pose_frame(
+    previous: dict[str, Any],
+    current: dict[str, Any],
+    alpha: float,
+) -> dict[str, Any]:
+    def values(left, right):
+        return [
+            float(first) + (float(second) - float(first)) * alpha
+            for first, second in zip(left, right, strict=True)
+        ]
+
+    return {
+        "bbox": values(previous["bbox"], current["bbox"]),
+        "keypoints": [
+            values(first, second)
+            for first, second in zip(
+                previous["keypoints"],
+                current["keypoints"],
+                strict=True,
+            )
+        ],
+        "keypoint_scores": values(
+            previous["keypoint_scores"],
+            current["keypoint_scores"],
+        ),
+        "is_synthetic": True,
+        "interpolation_alpha": alpha,
+    }
 
 
 def _payload(item: dict[str, Any], incident_id: int | None = None) -> dict[str, Any]:

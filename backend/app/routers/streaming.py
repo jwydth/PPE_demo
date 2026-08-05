@@ -12,6 +12,7 @@ from app.services.stream_health import (
     increment_stream_health,
     mark_stream_event,
     observe_stream_timing,
+    update_stream_health,
 )
 from app.storage.local_paths import UPLOAD_DIR, ensure_upload_dir
 
@@ -41,12 +42,20 @@ async def stream_video_ws(
     enable_zone: bool = Query(True),
     enable_fall: bool = Query(False),
     enable_sign: bool = Query(True),
+    metadata_only: bool = Query(False),
 ):
     global _current_cancel
     conn_id = next(_conn_counter)
     await websocket.accept()
     ensure_upload_dir()
-    logger.info(f"[conn {conn_id}] WS accepted (ppe={enable_ppe}, zone={enable_zone}, fall={enable_fall})")
+    logger.info(
+        "[conn %s] WS accepted (ppe=%s, zone=%s, fall=%s, metadata_only=%s)",
+        conn_id,
+        enable_ppe,
+        enable_zone,
+        enable_fall,
+        metadata_only,
+    )
     
     # Dynamic settings state
     settings_state = {
@@ -54,6 +63,7 @@ async def stream_video_ws(
         "enable_zone": enable_zone,
         "enable_fall": enable_fall,
         "enable_sign": enable_sign,
+        "metadata_only": metadata_only,
         "dismissed_signatures": [],
         "dismissed_ppe_signatures": [],
         "reload_zones": False,
@@ -162,6 +172,36 @@ async def stream_video_ws(
             elif data.get("event") == "reload_zones":
                 settings_state["reload_zones"] = True
                 logger.info(f"[conn {conn_id}] [SIGNAL] Zone reload requested by client")
+            elif data.get("event") == "playback_metrics":
+                metrics = data.get("data", {})
+                update_stream_health(
+                    video_name,
+                    hls_rebuffer_count=max(0, int(metrics.get("rebuffer_count", 0))),
+                    hls_dropped_video_frames=max(
+                        0,
+                        int(metrics.get("dropped_video_frames", 0)),
+                    ),
+                    overlay_selection_mode=(
+                        metrics.get("overlay_selection_mode")
+                        if metrics.get("overlay_selection_mode")
+                        in {"exact", "interpolated", "held", "missing"}
+                        else "missing"
+                    ),
+                )
+                for metric_name, timing_name in (
+                    ("live_delay_ms", "hls_live_delay"),
+                    ("overlay_skew_ms", "overlay_video_skew"),
+                ):
+                    value = metrics.get(metric_name)
+                    if isinstance(value, (int, float)) and value >= 0:
+                        observe_stream_timing(video_name, timing_name, float(value))
+                signed_skew = metrics.get("rendered_overlay_signed_skew_ms")
+                if isinstance(signed_skew, (int, float)):
+                    observe_stream_timing(
+                        video_name,
+                        "rendered_overlay_signed_skew",
+                        float(signed_skew),
+                    )
 
     settings_task = asyncio.create_task(listen_for_settings())
 
@@ -231,7 +271,21 @@ async def stream_video_ws(
         await websocket.send_text(event.model_dump_json())
         websocket_ms = (time.perf_counter() - send_started) * 1000.0
         observe_stream_timing(video_name, "websocket_send", websocket_ms)
-        if event.event == "frame":
+        if event.source_time_ms is not None:
+            now_ms = time.time() * 1000.0
+            observe_stream_timing(
+                video_name,
+                "metadata_delivery_age",
+                max(0.0, now_ms - event.source_time_ms),
+            )
+            if event.inference_completed_ms is not None:
+                observe_stream_timing(
+                    video_name,
+                    "inference_ready_age",
+                    max(0.0, event.inference_completed_ms - event.source_time_ms),
+                )
+            mark_stream_event(video_name, "metadata_sent")
+        if event.event == "frame" and event.image_bytes is not None:
             increment_stream_health(video_name, preview_sent_frames=1)
             mark_stream_event(video_name, "preview_sent")
 

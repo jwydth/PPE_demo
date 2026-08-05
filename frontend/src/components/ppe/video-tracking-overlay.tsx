@@ -7,6 +7,10 @@ import { FallLiveDetection } from "@/types/behavior";
 import { PPESuggestion, ZoneSuggestion } from "@/types/zone";
 import { countLabel } from "@/lib/format";
 import { ChipActionButton, DetectionChip } from "@/components/ppe/detection-chip";
+import {
+  selectOverlayAtTimeWithDiagnostics,
+  type OverlaySelection,
+} from "@/lib/stream-timeline";
 
 export function TrackingOverlayLayer({
   overlay,
@@ -14,25 +18,48 @@ export function TrackingOverlayLayer({
   behaviorDetections = [],
   behaviorEnabled = false,
   currentFrameIndex,
-  behaviorTtlFrames = 10,
+  currentSourceTimeMs,
+  behaviorTtlFrames = 8,
+  onPresentation,
 }: {
   overlay?: TrackingOverlay;
   currentTime: number;
   behaviorDetections?: FallLiveDetection[];
   behaviorEnabled?: boolean;
   currentFrameIndex?: number;
+  currentSourceTimeMs?: number | null;
   behaviorTtlFrames?: number;
+  onPresentation?: (selection: OverlaySelection) => void;
 }) {
-  const currentBoxes = useCurrentBoxes(overlay, currentTime);
+  const selection = useCurrentBoxes(overlay, currentTime, currentSourceTimeMs);
+  const currentBoxes = selection.frames;
   const mergedBoxes = mergeBehaviorDetections(
     currentBoxes,
     behaviorDetections,
     behaviorEnabled,
     currentFrameIndex,
     behaviorTtlFrames,
+    currentSourceTimeMs,
+  );
+  const renderedSelection = useMemo(
+    () => describeRenderedSelection(mergedBoxes, currentSourceTimeMs, selection),
+    [currentSourceTimeMs, mergedBoxes, selection],
   );
   const frameWidth = overlay?.frame_width || 16;
   const frameHeight = overlay?.frame_height || 9;
+  const aiDelayed = useMemo(() => {
+    if (currentSourceTimeMs == null || !overlay?.frames.length) return false;
+    const nearestDelta = Math.min(
+      ...overlay.frames
+        .filter((frame) => frame.source_time_ms !== undefined)
+        .map((frame) => Math.abs((frame.source_time_ms ?? 0) - currentSourceTimeMs)),
+    );
+    return Number.isFinite(nearestDelta) && nearestDelta > 8 * 1000 / (overlay.fps || 24);
+  }, [currentSourceTimeMs, overlay]);
+
+  useEffect(() => {
+    onPresentation?.(renderedSelection);
+  }, [onPresentation, renderedSelection]);
 
   if (!overlay) return null;
 
@@ -52,7 +79,7 @@ export function TrackingOverlayLayer({
         </svg>
       ) : null}
       <div className="pointer-events-none absolute left-3 top-3 rounded bg-black/65 px-2 py-1 text-xs font-semibold text-white ring-1 ring-white/10">
-        Tracking {countLabel(mergedBoxes.length, "worker")}
+        {aiDelayed ? "AI delayed" : `Tracking ${countLabel(mergedBoxes.length, "worker")}`}
       </div>
     </>
   );
@@ -68,7 +95,7 @@ export function VideoTrackingOverlay({
   const videoRef = useRef<HTMLVideoElement>(null);
   const animationRef = useRef<number | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
-  const currentBoxes = useCurrentBoxes(overlay, currentTime);
+  const currentBoxes = useCurrentBoxes(overlay, currentTime).frames;
   const frameWidth = overlay?.frame_width || 16;
   const frameHeight = overlay?.frame_height || 9;
 
@@ -128,7 +155,11 @@ export function VideoTrackingOverlay({
   );
 }
 
-function useCurrentBoxes(overlay: TrackingOverlay | undefined, currentTime: number) {
+function useCurrentBoxes(
+  overlay: TrackingOverlay | undefined,
+  currentTime: number,
+  currentSourceTimeMs?: number | null,
+) {
   const sortedFrameIndexes = useMemo(() => {
     if (!overlay?.frames.length) return [];
     return Array.from(new Set(overlay.frames.map((frame) => frame.frame_index))).sort(
@@ -143,15 +174,32 @@ function useCurrentBoxes(overlay: TrackingOverlay | undefined, currentTime: numb
     return grouped;
   }, [overlay]);
   const currentBoxes = useMemo(() => {
-    if (!overlay || sortedFrameIndexes.length === 0) return [];
+    if (!overlay || sortedFrameIndexes.length === 0) {
+      return { frames: [], mode: "missing", signedSkewMs: null } satisfies OverlaySelection;
+    }
+    if (currentSourceTimeMs !== undefined) {
+      return selectOverlayAtTimeWithDiagnostics(
+        overlay.frames,
+        currentSourceTimeMs ?? null,
+        overlay.fps || 24,
+      );
+    }
     const currentFrame = Math.round(currentTime * overlay.fps);
     const nearestFrame = findNearestFrame(sortedFrameIndexes, currentFrame);
-    if (nearestFrame === null) return [];
+    if (nearestFrame === null) {
+      return { frames: [], mode: "missing", signedSkewMs: null } satisfies OverlaySelection;
+    }
 
     const tolerance = Math.max(overlay.stride || 1, 1) * 30; // Increased tolerance for slow inference
-    if (Math.abs(nearestFrame - currentFrame) > tolerance) return [];
-    return framesByIndex.get(nearestFrame) ?? [];
-  }, [currentTime, framesByIndex, overlay, sortedFrameIndexes]);
+    if (Math.abs(nearestFrame - currentFrame) > tolerance) {
+      return { frames: [], mode: "missing", signedSkewMs: null } satisfies OverlaySelection;
+    }
+    return {
+      frames: framesByIndex.get(nearestFrame) ?? [],
+      mode: "exact",
+      signedSkewMs: null,
+    } satisfies OverlaySelection;
+  }, [currentSourceTimeMs, currentTime, framesByIndex, overlay, sortedFrameIndexes]);
   return currentBoxes;
 }
 
@@ -161,11 +209,17 @@ function mergeBehaviorDetections(
   behaviorEnabled: boolean,
   currentFrameIndex: number | undefined,
   ttlFrames: number,
+  currentSourceTimeMs?: number | null,
 ): TrackingOverlayFrame[] {
   const merged = frames.map((frame) => ({ ...frame }));
   const visible = detections
-    .filter((detection) => isVisibleBehaviorDetection(detection, currentFrameIndex, ttlFrames))
-    .sort(compareBehaviorPriority);
+    .filter((detection) => isVisibleBehaviorDetection(
+      detection,
+      currentFrameIndex,
+      ttlFrames,
+      currentSourceTimeMs,
+    ))
+    .sort(compareBehaviorRecency);
 
   for (const detection of visible) {
     const matchedIndex = findBehaviorMatch(merged, detection);
@@ -173,10 +227,11 @@ function mergeBehaviorDetections(
       status: detection.status,
       score: detection.score,
       track_id: detection.track_id,
+      source_time_ms: detection.source_time_ms,
     };
     if (matchedIndex >= 0) {
       const matched = merged[matchedIndex];
-      if (!matched.behavior || behaviorPriority(behavior.status) > behaviorPriority(matched.behavior.status)) {
+      if (!matched.behavior) {
         merged[matchedIndex] = { ...matched, behavior };
       }
       continue;
@@ -191,6 +246,11 @@ function mergeBehaviorDetections(
       missing_equipment: [],
       status: "unknown",
       behavior,
+      stream_epoch: detection.stream_epoch,
+      media_pts_ms: detection.media_pts_ms,
+      source_time_ms: detection.source_time_ms,
+      inference_completed_ms: detection.inference_completed_ms,
+      discontinuity_sequence: detection.discontinuity_sequence,
     });
   }
   return behaviorEnabled
@@ -205,10 +265,15 @@ function isVisibleBehaviorDetection(
   detection: FallLiveDetection,
   currentFrameIndex: number | undefined,
   ttlFrames: number,
+  currentSourceTimeMs?: number | null,
 ) {
   const { x1, y1, x2, y2 } = detection.bbox ?? {};
   if (![x1, y1, x2, y2].every(Number.isFinite) || x2 <= x1 || y2 <= y1) return false;
   if (detection.is_stale || (detection.age_frames !== undefined && detection.age_frames > ttlFrames)) return false;
+  if (currentSourceTimeMs != null && detection.source_time_ms !== undefined) {
+    const ageMs = currentSourceTimeMs - detection.source_time_ms;
+    return ageMs >= 0 && ageMs <= ttlFrames * 1000 / 24;
+  }
   return detection.frame_index === undefined || currentFrameIndex === undefined
     ? true
     : Math.abs(currentFrameIndex - detection.frame_index) <= ttlFrames;
@@ -239,10 +304,33 @@ function boxIou(a: TrackingOverlayFrame["bbox"], b: FallLiveDetection["bbox"]) {
   return union > 0 ? overlap / union : 0;
 }
 
-function compareBehaviorPriority(a: FallLiveDetection, b: FallLiveDetection) {
-  return behaviorPriority(b.status)
-    - behaviorPriority(a.status)
+function compareBehaviorRecency(a: FallLiveDetection, b: FallLiveDetection) {
+  const aTime = a.source_time_ms ?? a.frame_index ?? 0;
+  const bTime = b.source_time_ms ?? b.frame_index ?? 0;
+  return bTime - aTime
+    || behaviorPriority(b.status) - behaviorPriority(a.status)
     || b.score - a.score;
+}
+
+function describeRenderedSelection(
+  frames: TrackingOverlayFrame[],
+  currentSourceTimeMs: number | null | undefined,
+  geometrySelection: OverlaySelection,
+): OverlaySelection {
+  if (currentSourceTimeMs == null || frames.length === 0) return geometrySelection;
+  const sourceTimes = frames.flatMap((frame) => [
+    frame.source_time_ms,
+    frame.behavior?.source_time_ms,
+  ]).filter((value): value is number => typeof value === "number");
+  if (sourceTimes.length === 0) return geometrySelection;
+  const signedSkewMs = sourceTimes
+    .map((sourceTimeMs) => sourceTimeMs - currentSourceTimeMs)
+    .reduce((worst, current) => Math.abs(current) > Math.abs(worst) ? current : worst, 0);
+  return {
+    frames: geometrySelection.frames,
+    mode: Math.abs(signedSkewMs) > 0.5 ? "held" : geometrySelection.mode,
+    signedSkewMs,
+  };
 }
 
 function behaviorPriority(status: NonNullable<TrackingOverlayFrame["behavior"]>["status"]) {
@@ -313,7 +401,7 @@ function TrackingBoxes({
                   key={label}
                   x={panelX + frameWidth * 0.008}
                   dy={labelIndex === 0 ? 0 : lineHeight}
-                  fill={labelColor(label, color)}
+                  fill={color}
                 >
                   {label}
                 </tspan>
@@ -329,7 +417,7 @@ function TrackingBoxes({
 function trackingLabels(frame: TrackingOverlayFrame): string[] {
   const labels: string[] = [];
   if (frame.missing_equipment.length > 0) {
-    labels.push(`PPE: ${frame.missing_equipment.map(formatEquipmentLabel).join(", ")}`);
+    labels.push(`PPE: ${ppeViolationLabel(frame.missing_equipment)}`);
   }
   if (frame.zone_type) {
     const zoneLabel =
@@ -340,31 +428,15 @@ function trackingLabels(frame: TrackingOverlayFrame): string[] {
         : "Walkway violation";
     labels.push(`Zone: ${frame.zone_name ? `${zoneLabel} - ${frame.zone_name}` : zoneLabel}`);
   }
-  if (frame.behavior) {
+  if (frame.behavior?.status === "running" || frame.behavior?.status === "falling") {
     const behaviorLabel =
-      frame.behavior.status === "unknown"
-        ? "Normal"
-        : `${frame.behavior.status[0].toUpperCase()}${frame.behavior.status.slice(1)}`;
-    labels.push(
-      `Behavior: ${behaviorLabel} ${Math.round(frame.behavior.score * 100)}%`,
-    );
+      frame.behavior.status[0].toUpperCase() + frame.behavior.status.slice(1);
+    labels.push(`Behavior: ${behaviorLabel}`);
   }
   if (labels.length === 0) {
-    labels.push(frame.status === "unknown" ? unknownStatusLabel(frame) : "Compliant");
+    labels.push(frame.status === "violation" ? "Violation" : "Compliant");
   }
-  labels.push(`${formatFrameRole(frame)} ${frame.track_id ?? frame.person_id ?? "-"}`);
   return labels;
-}
-
-function unknownStatusLabel(frame: TrackingOverlayFrame): string {
-  if (frame.role === "worker" || frame.role === "janitor") return "PPE status pending";
-  return "Role unknown";
-}
-
-function formatFrameRole(frame: TrackingOverlayFrame): string {
-  if (frame.role === "worker") return "Worker";
-  if (frame.role === "janitor") return "Janitor";
-  return "Person";
 }
 
 function formatEquipmentLabel(label: string): string {
@@ -372,32 +444,31 @@ function formatEquipmentLabel(label: string): string {
   return label;
 }
 
-function trackingColor(frame: TrackingOverlayFrame): string {
-  if (frame.missing_equipment.length > 0 || frame.status === "violation" || !frame.compliant) {
-    return "#ef4444";
-  }
-  if (frame.behavior?.status === "falling") return "#ef4444";
-  if (frame.behavior?.status === "running") return "#3b82f6";
-  if (frame.behavior?.status === "unknown") return "#84cc16";
-  if (frame.status === "unknown") return "#a1a1aa";
-  return "#84cc16";
+function ppeViolationLabel(missingEquipment: string[]): string {
+  const normalized = new Set(missingEquipment.map((item) => item.trim().toLowerCase()));
+  const hasHelmet = ["helmet", "hardhat", "safety helmet"].some((item) => normalized.has(item));
+  const hasVest = ["vest", "safety vest"].some((item) => normalized.has(item));
+  const hasCoverall = normalized.has("cleaning coverall");
+  const hasUniform = normalized.has("role uniform");
+  if (hasHelmet && hasVest) return "Missing Helmet and Vest";
+  if (hasHelmet && hasCoverall) return "Missing Helmet and Cleaning Coverall";
+  if (hasHelmet && hasUniform) return "Missing Helmet and Role Uniform";
+  if (hasHelmet) return "Missing Safety Helmet";
+  if (hasVest) return "Missing Safety Vest";
+  if (hasCoverall) return "Missing Cleaning Coverall";
+  if (hasUniform) return "Missing Role Uniform";
+  return `Missing ${missingEquipment.map(formatEquipmentLabel).join(" and ")}`;
 }
 
-function labelColor(label: string, fallback: string): string {
-  if (label.startsWith("PPE:")) return "#fca5a5";
-  if (label.startsWith("Zone:")) return fallback;
-  if (label.startsWith("Behavior:")) {
-    return label.includes("Falling") ? "#fca5a5" : label.includes("Running") ? "#93c5fd" : "#bbf7d0";
+function trackingColor(frame: TrackingOverlayFrame): string {
+  if (frame.missing_equipment.length > 0 || frame.status === "violation") {
+    return "#ef4444";
   }
-  if (
-    label.startsWith("Track") ||
-    label.startsWith("Worker") ||
-    label.startsWith("Janitor") ||
-    label.startsWith("Person")
-  ) {
-    return "#cbd5e1";
+  if (frame.zone_type) return "#ef4444";
+  if (frame.behavior?.status === "falling" || frame.behavior?.status === "running") {
+    return "#ef4444";
   }
-  return fallback;
+  return "#84cc16";
 }
 
 const SIGN_HUMAN_NAMES: Record<string, string> = {

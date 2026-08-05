@@ -1,0 +1,585 @@
+{
+  "generated_at": "2026-08-05T09:35:56.310439+00:00",
+  "duration_seconds": 20.158,
+  "streams": [
+    {
+      "source": "rtsp://127.0.0.1:8554/stream1",
+      "playlist_update_hz": 3.919,
+      "playlist_update_interval_ms": {
+        "mean": 255.086,
+        "p50": 212.224,
+        "p95": 666.608,
+        "max": 851.501,
+        "samples": 78
+      },
+      "playlist_request_ms": {
+        "mean": 1.431,
+        "p50": 1.345,
+        "p95": 1.871,
+        "max": 4.406,
+        "samples": 96
+      },
+      "playlist_errors": [],
+      "metadata_events": {
+        "start": 1,
+        "frame": 113,
+        "sign_prediction": 18,
+        "ping": 1
+      },
+      "metadata_delivery_age_ms": {
+        "mean": 135.683,
+        "p50": 65.988,
+        "p95": 549.403,
+        "max": 1107.121,
+        "samples": 131
+      },
+      "metadata_errors": []
+    },
+    {
+      "source": "rtsp://127.0.0.1:8554/stream2",
+      "playlist_update_hz": 3.869,
+      "playlist_update_interval_ms": {
+        "mean": 255.779,
+        "p50": 213.359,
+        "p95": 664.052,
+        "max": 863.407,
+        "samples": 77
+      },
+      "playlist_request_ms": {
+        "mean": 1.489,
+        "p50": 1.404,
+        "p95": 1.872,
+        "max": 4.924,
+        "samples": 96
+      },
+      "playlist_errors": [],
+      "metadata_events": {
+        "start": 1,
+        "frame": 103,
+        "sign_prediction": 17,
+        "violation": 1,
+        "zone_suggestion": 1,
+        "behavior_incident": 1,
+        "ping": 1,
+        "ppe_suggestion": 1
+      },
+      "metadata_delivery_age_ms": {
+        "mean": 143.403,
+        "p50": 69.315,
+        "p95": 565.658,
+        "max": 1100.45,
+        "samples": 124
+      },
+      "metadata_errors": []
+    }
+  ],
+  "health": {
+    "stream_count": 2,
+    "streams": [
+      {
+        "source_id": "38f5502db981",
+        "source_label": "rtsp://127.0.0.1:8554/stream2",
+        "source_fps": 24.0,
+        "captured_frames": 409,
+        "ppe_processed_frames": 104,
+        "ppe_dropped_frames": 163,
+        "behavior_processed_frames": 336,
+        "behavior_queue_depth": 3,
+        "behavior_dropped_frames": 0,
+        "behavior_gap_events": 0,
+        "behavior_interpolated_frames": 112,
+        "behavior_unrepaired_gap_events": 0,
+        "behavior_batch_size": 4,
+        "sign_calls": 17,
+        "sign_last_frame_index": 397,
+        "preview_generated_frames": 0,
+        "preview_sent_frames": 103,
+        "preview_coalesced_frames": 0,
+        "preview_gap_count": 11,
+        "hls_rebuffer_count": 0,
+        "hls_dropped_video_frames": 0,
+        "capture_age_ms": 0.0,
+        "last_error": null,
+        "updated_age_seconds": 0.201,
+        "timings": {
+          "behavior_batch_formation": {
+            "last_ms": 12.893,
+            "mean_ms": 10.004,
+            "p50_ms": 10.042,
+            "p95_ms": 17.279,
+            "p99_ms": 18.461,
+            "max_ms": 19.469,
+            "samples": 174
+          },
+          "behavior_classifier": {
+            "last_ms": 22.229,
+            "mean_ms": 100.132,
+            "p50_ms": 22.805,
+            "p95_ms": 827.656,
+            "p99_ms": 916.884,
+            "max_ms": 916.884,
+            "samples": 23
+          },
+          "behavior_end_to_end": {
+            "last_ms": 39.308,
+            "mean_ms": 68.026,
+            "p50_ms": 40.141,
+            "p95_ms": 164.157,
+            "p99_ms": 702.964,
+            "max_ms": 757.808,
+            "samples": 341
+          },
+          "behavior_feature_extraction": {
+            "last_ms": 1.484,
+            "mean_ms": 1.437,
+            "p50_ms": 1.413,
+            "p95_ms": 1.62,
+            "p99_ms": 1.748,
+            "max_ms": 1.782,
+            "samples": 23
+          },
+          "behavior_gpu_lock_wait": {
+            "last_ms": 14.27,
+            "mean_ms": 8.675,
+            "p50_ms": 4.378,
+            "p95_ms": 27.481,
+            "p99_ms": 67.52,
+            "max_ms": 106.047,
+            "samples": 174
+          },
+          "behavior_output_interval": {
+            "last_ms": 1.876,
+            "mean_ms": 39.79,
+            "p50_ms": 28.239,
+            "p95_ms": 145.726,
+            "p99_ms": 480.465,
+            "max_ms": 994.639,
+            "samples": 335
+          },
+          "behavior_pose_batch": {
+            "last_ms": 12.643,
+            "mean_ms": 28.53,
+            "p50_ms": 12.639,
+            "p95_ms": 22.496,
+            "p99_ms": 534.735,
+            "max_ms": 537.198,
+            "samples": 174
+          },
+          "behavior_pose_per_frame": {
+            "last_ms": 3.161,
+            "mean_ms": 8.736,
+            "p50_ms": 3.262,
+            "p95_ms": 7.607,
+            "p99_ms": 145.748,
+            "max_ms": 268.599,
+            "samples": 174
+          },
+          "behavior_postprocess": {
+            "last_ms": 1.521,
+            "mean_ms": 6.627,
+            "p50_ms": 1.053,
+            "p95_ms": 45.168,
+            "p99_ms": 50.031,
+            "max_ms": 942.574,
+            "samples": 336
+          },
+          "behavior_scheduler_wait": {
+            "last_ms": 10.081,
+            "mean_ms": 13.272,
+            "p50_ms": 9.807,
+            "p95_ms": 35.045,
+            "p99_ms": 56.475,
+            "max_ms": 214.406,
+            "samples": 341
+          },
+          "behavior_tracking": {
+            "last_ms": 0.55,
+            "mean_ms": 16.198,
+            "p50_ms": 2.504,
+            "p95_ms": 117.742,
+            "p99_ms": 123.131,
+            "max_ms": 124.564,
+            "samples": 341
+          },
+          "capture_interval": {
+            "last_ms": 45.783,
+            "mean_ms": 40.452,
+            "p50_ms": 44.719,
+            "p95_ms": 49.418,
+            "p99_ms": 354.491,
+            "max_ms": 727.817,
+            "samples": 420
+          },
+          "inference_ready_age": {
+            "last_ms": 85.044,
+            "mean_ms": 119.498,
+            "p50_ms": 66.269,
+            "p95_ms": 525.844,
+            "p99_ms": 626.723,
+            "max_ms": 632.071,
+            "samples": 124
+          },
+          "metadata_delivery_age": {
+            "last_ms": 85.61,
+            "mean_ms": 143.194,
+            "p50_ms": 69.005,
+            "p95_ms": 565.539,
+            "p99_ms": 1048.643,
+            "max_ms": 1100.449,
+            "samples": 124
+          },
+          "metadata_sent_interval": {
+            "last_ms": 189.744,
+            "mean_ms": 136.883,
+            "p50_ms": 111.003,
+            "p95_ms": 573.471,
+            "p99_ms": 851.189,
+            "max_ms": 890.004,
+            "samples": 123
+          },
+          "ppe_compute": {
+            "last_ms": 15.127,
+            "mean_ms": 23.875,
+            "p50_ms": 18.884,
+            "p95_ms": 63.322,
+            "p99_ms": 81.211,
+            "max_ms": 118.511,
+            "samples": 104
+          },
+          "ppe_end_to_end": {
+            "last_ms": 27.149,
+            "mean_ms": 82.797,
+            "p50_ms": 50.579,
+            "p95_ms": 185.172,
+            "p99_ms": 554.5,
+            "max_ms": 566.04,
+            "samples": 104
+          },
+          "ppe_gpu_lock_wait": {
+            "last_ms": 11.564,
+            "mean_ms": 58.368,
+            "p50_ms": 22.173,
+            "p95_ms": 154.483,
+            "p99_ms": 516.904,
+            "max_ms": 537.156,
+            "samples": 104
+          },
+          "ppe_output_interval": {
+            "last_ms": 52.424,
+            "mean_ms": 163.973,
+            "p50_ms": 124.237,
+            "p95_ms": 576.794,
+            "p99_ms": 872.369,
+            "max_ms": 889.982,
+            "samples": 103
+          },
+          "preview_sent_interval": {
+            "last_ms": 189.743,
+            "mean_ms": 165.065,
+            "p50_ms": 124.308,
+            "p95_ms": 576.809,
+            "p99_ms": 874.024,
+            "max_ms": 890.003,
+            "samples": 102
+          },
+          "sign_compute": {
+            "last_ms": 63.168,
+            "mean_ms": 20.334,
+            "p50_ms": 16.168,
+            "p95_ms": 40.307,
+            "p99_ms": 58.596,
+            "max_ms": 63.168,
+            "samples": 17
+          },
+          "sign_end_to_end": {
+            "last_ms": 287.571,
+            "mean_ms": 261.749,
+            "p50_ms": 190.578,
+            "p95_ms": 629.022,
+            "p99_ms": 631.146,
+            "max_ms": 631.677,
+            "samples": 17
+          },
+          "sign_gpu_lock_wait": {
+            "last_ms": 223.878,
+            "mean_ms": 240.801,
+            "p50_ms": 158.612,
+            "p95_ms": 614.096,
+            "p99_ms": 616.747,
+            "max_ms": 617.41,
+            "samples": 17
+          },
+          "sign_output_interval": {
+            "last_ms": 1152.492,
+            "mean_ms": 1009.355,
+            "p50_ms": 1005.665,
+            "p95_ms": 1278.412,
+            "p99_ms": 1550.985,
+            "max_ms": 1619.128,
+            "samples": 16
+          },
+          "websocket_send": {
+            "last_ms": 0.392,
+            "mean_ms": 0.26,
+            "p50_ms": 0.244,
+            "p95_ms": 0.455,
+            "p99_ms": 0.679,
+            "max_ms": 0.759,
+            "samples": 125
+          }
+        },
+        "rates_fps": {
+          "behavior_output": 25.132,
+          "capture": 24.721,
+          "metadata_sent": 7.305,
+          "ppe_output": 6.099,
+          "preview_sent": 6.058,
+          "sign_output": 0.991
+        }
+      },
+      {
+        "source_id": "6cc8670472da",
+        "source_label": "rtsp://127.0.0.1:8554/stream1",
+        "source_fps": 24.0,
+        "captured_frames": 457,
+        "ppe_processed_frames": 114,
+        "ppe_dropped_frames": 188,
+        "behavior_processed_frames": 350,
+        "behavior_queue_depth": 1,
+        "behavior_dropped_frames": 0,
+        "behavior_gap_events": 0,
+        "behavior_interpolated_frames": 23,
+        "behavior_unrepaired_gap_events": 0,
+        "behavior_batch_size": 1,
+        "sign_calls": 18,
+        "sign_last_frame_index": 436,
+        "preview_generated_frames": 0,
+        "preview_sent_frames": 113,
+        "preview_coalesced_frames": 0,
+        "preview_gap_count": 15,
+        "hls_rebuffer_count": 0,
+        "hls_dropped_video_frames": 0,
+        "capture_age_ms": 0.0,
+        "last_error": null,
+        "updated_age_seconds": 0.123,
+        "timings": {
+          "behavior_batch_formation": {
+            "last_ms": 13.679,
+            "mean_ms": 10.814,
+            "p50_ms": 10.821,
+            "p95_ms": 18.165,
+            "p99_ms": 18.803,
+            "max_ms": 55.844,
+            "samples": 193
+          },
+          "behavior_end_to_end": {
+            "last_ms": 26.177,
+            "mean_ms": 72.599,
+            "p50_ms": 42.857,
+            "p95_ms": 157.113,
+            "p99_ms": 692.864,
+            "max_ms": 758.306,
+            "samples": 354
+          },
+          "behavior_gpu_lock_wait": {
+            "last_ms": 0.015,
+            "mean_ms": 11.499,
+            "p50_ms": 5.274,
+            "p95_ms": 44.936,
+            "p99_ms": 75.022,
+            "max_ms": 106.047,
+            "samples": 193
+          },
+          "behavior_output_interval": {
+            "last_ms": 22.17,
+            "mean_ms": 41.728,
+            "p50_ms": 26.788,
+            "p95_ms": 148.402,
+            "p99_ms": 574.783,
+            "max_ms": 714.274,
+            "samples": 349
+          },
+          "behavior_pose_batch": {
+            "last_ms": 11.862,
+            "mean_ms": 32.073,
+            "p50_ms": 12.847,
+            "p95_ms": 45.97,
+            "p99_ms": 534.137,
+            "max_ms": 537.198,
+            "samples": 193
+          },
+          "behavior_pose_per_frame": {
+            "last_ms": 11.862,
+            "mean_ms": 12.729,
+            "p50_ms": 3.317,
+            "p95_ms": 23.971,
+            "p99_ms": 184.156,
+            "max_ms": 526.91,
+            "samples": 193
+          },
+          "behavior_postprocess": {
+            "last_ms": 0.0,
+            "mean_ms": 0.711,
+            "p50_ms": 0.655,
+            "p95_ms": 1.28,
+            "p99_ms": 2.273,
+            "max_ms": 22.766,
+            "samples": 350
+          },
+          "behavior_scheduler_wait": {
+            "last_ms": 13.705,
+            "mean_ms": 11.052,
+            "p50_ms": 10.683,
+            "p95_ms": 18.352,
+            "p99_ms": 36.602,
+            "max_ms": 55.862,
+            "samples": 354
+          },
+          "behavior_tracking": {
+            "last_ms": 0.297,
+            "mean_ms": 4.012,
+            "p50_ms": 0.694,
+            "p95_ms": 9.745,
+            "p99_ms": 114.852,
+            "max_ms": 116.751,
+            "samples": 354
+          },
+          "capture_interval": {
+            "last_ms": 46.732,
+            "mean_ms": 40.551,
+            "p50_ms": 44.774,
+            "p95_ms": 49.316,
+            "p99_ms": 347.393,
+            "max_ms": 740.905,
+            "samples": 458
+          },
+          "inference_ready_age": {
+            "last_ms": 55.163,
+            "mean_ms": 110.644,
+            "p50_ms": 65.185,
+            "p95_ms": 521.546,
+            "p99_ms": 570.662,
+            "max_ms": 604.127,
+            "samples": 131
+          },
+          "metadata_delivery_age": {
+            "last_ms": 55.496,
+            "mean_ms": 135.554,
+            "p50_ms": 65.918,
+            "p95_ms": 549.313,
+            "p99_ms": 971.502,
+            "max_ms": 1106.908,
+            "samples": 131
+          },
+          "metadata_sent_interval": {
+            "last_ms": 52.656,
+            "mean_ms": 140.616,
+            "p50_ms": 116.257,
+            "p95_ms": 549.23,
+            "p99_ms": 794.087,
+            "max_ms": 894.62,
+            "samples": 130
+          },
+          "ppe_compute": {
+            "last_ms": 14.442,
+            "mean_ms": 20.316,
+            "p50_ms": 16.314,
+            "p95_ms": 55.085,
+            "p99_ms": 66.138,
+            "max_ms": 80.807,
+            "samples": 114
+          },
+          "ppe_end_to_end": {
+            "last_ms": 25.263,
+            "mean_ms": 81.873,
+            "p50_ms": 48.486,
+            "p95_ms": 271.604,
+            "p99_ms": 574.964,
+            "max_ms": 594.624,
+            "samples": 114
+          },
+          "ppe_gpu_lock_wait": {
+            "last_ms": 10.522,
+            "mean_ms": 60.37,
+            "p50_ms": 27.176,
+            "p95_ms": 210.26,
+            "p99_ms": 560.788,
+            "max_ms": 576.098,
+            "samples": 114
+          },
+          "ppe_output_interval": {
+            "last_ms": 90.391,
+            "mean_ms": 162.576,
+            "p50_ms": 122.963,
+            "p95_ms": 558.46,
+            "p99_ms": 837.936,
+            "max_ms": 894.309,
+            "samples": 113
+          },
+          "preview_sent_interval": {
+            "last_ms": 52.656,
+            "mean_ms": 163.215,
+            "p50_ms": 123.102,
+            "p95_ms": 558.739,
+            "p99_ms": 840.773,
+            "max_ms": 894.877,
+            "samples": 112
+          },
+          "sign_compute": {
+            "last_ms": 17.026,
+            "mean_ms": 20.621,
+            "p50_ms": 16.013,
+            "p95_ms": 39.608,
+            "p99_ms": 58.961,
+            "max_ms": 63.8,
+            "samples": 18
+          },
+          "sign_end_to_end": {
+            "last_ms": 264.022,
+            "mean_ms": 215.112,
+            "p50_ms": 157.846,
+            "p95_ms": 535.483,
+            "p99_ms": 535.495,
+            "max_ms": 535.498,
+            "samples": 18
+          },
+          "sign_gpu_lock_wait": {
+            "last_ms": 246.571,
+            "mean_ms": 193.911,
+            "p50_ms": 136.733,
+            "p95_ms": 522.488,
+            "p99_ms": 522.717,
+            "max_ms": 522.774,
+            "samples": 18
+          },
+          "sign_output_interval": {
+            "last_ms": 1047.914,
+            "mean_ms": 1014.972,
+            "p50_ms": 1040.007,
+            "p95_ms": 1585.243,
+            "p99_ms": 1607.261,
+            "max_ms": 1612.765,
+            "samples": 17
+          },
+          "websocket_send": {
+            "last_ms": 0.176,
+            "mean_ms": 0.187,
+            "p50_ms": 0.173,
+            "p95_ms": 0.303,
+            "p99_ms": 0.41,
+            "max_ms": 0.471,
+            "samples": 132
+          }
+        },
+        "rates_fps": {
+          "behavior_output": 23.964,
+          "capture": 24.661,
+          "metadata_sent": 7.112,
+          "ppe_output": 6.151,
+          "preview_sent": 6.127,
+          "sign_output": 0.985
+        }
+      }
+    ]
+  }
+}

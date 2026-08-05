@@ -35,10 +35,12 @@ from app.schemas.detection import (
 from app.schemas.streaming import StreamEvent
 from app.schemas.violation import ViolationReport
 from app.services.auto_zone import SignPPERegistry, SignZoneRegistry, extract_signs
+from app.services.annotated_stream import AnnotatedStateStore, AnnotatedStreamPublisher
 from app.services.behavior_stream import BehaviorStreamWorker
-from app.services.inference_coordination import gpu_inference_lock
+from app.services.inference_coordination import gpu_inference_lock, inference_priority
+from app.services.model_cadence import CadenceGate, ModelCadence
 from app.services.fall_detector import FallDetector, FallModelUnavailable
-from app.services.frame_hub import FrameSubscription, frame_hubs
+from app.services.frame_hub import FramePacket, FrameSubscription, frame_hubs
 from app.services.stream_health import (
     increment_stream_health,
     mark_stream_event,
@@ -76,6 +78,32 @@ from app.services.ppe.worker_tracking import WorkerState, _update_worker_status
 
 logger = logging.getLogger(__name__)
 _fall_detector = FallDetector()
+
+
+def _stream_event(
+    event: str,
+    data,
+    *,
+    packet: FramePacket | None = None,
+    frame_index: int | None = None,
+    has_image: bool = False,
+    image_bytes: bytes | None = None,
+) -> StreamEvent:
+    """Build a stream event on the same timeline as its source frame."""
+    return StreamEvent(
+        event=event,
+        frame_index=packet.frame_index if packet is not None else frame_index,
+        stream_epoch=packet.stream_epoch if packet is not None else None,
+        media_pts_ms=packet.media_pts_ms if packet is not None else None,
+        source_time_ms=packet.source_time_ms if packet is not None else None,
+        inference_completed_ms=time.time() * 1000.0 if packet is not None else None,
+        discontinuity_sequence=(
+            packet.discontinuity_sequence if packet is not None else None
+        ),
+        data=data,
+        has_image=has_image,
+        image_bytes=image_bytes,
+    )
 
 # Sentinel camera_zone_view_id used for the virtual "no walkway defined" zone.
 # Uses a negative value so it can never collide with real database IDs.
@@ -350,12 +378,19 @@ async def real_video_pipeline(
         ("rtsp://", "rtmp://", "http://", "https://")
     )
     ppe_subscription: FrameSubscription | None = None
+    sign_task: asyncio.Task[None] | None = None
+    sign_events: asyncio.Queue[StreamEvent] = asyncio.Queue(maxsize=32)
     if is_live_source:
         ppe_subscription = await frame_hubs.subscribe(source_str, policy="latest")
         fps, total_frames = ppe_subscription.hub.health.fps, 0
     else:
         fps, total_frames = await asyncio.to_thread(_video_metadata, video_path)
     is_stream = is_live_source or total_frames <= 0
+    render_store = (
+        AnnotatedStateStore(fps=fps)
+        if is_live_source and settings.ANNOTATED_STREAM_ENABLED
+        else None
+    )
     start_wall_time = time.perf_counter()
     cases: list[ViolationCase] = []
     workers: list[WorkerState] = []
@@ -469,6 +504,15 @@ async def real_video_pipeline(
         logger.info(f"[PIPELINE] '{video_name}' waited {acquire_ms:.0f}ms for a free pooled model instance")
     try:
         behavior_worker: BehaviorStreamWorker | None = None
+        annotated_publisher: AnnotatedStreamPublisher | None = None
+        if render_store is not None:
+            annotated_publisher = AnnotatedStreamPublisher(
+                source=source_str,
+                fps=fps,
+                store=render_store,
+                feature_flags=get_flags,
+            )
+            annotated_publisher.start()
         if behavior_separate:
             # Defer behavior startup until the first PPE inference below has
             # initialized this camera's CUDA tracker. Starting both model
@@ -481,10 +525,18 @@ async def real_video_pipeline(
         if model_instance is not None:
             _prepare_pooled_model_instance(model_instance)
         tracker_path = _resolve_video_tracker(settings.VIDEO_TRACKER)
+        ppe_cadence = ModelCadence(fps, settings.LIVE_PPE_TARGET_FPS)
+        sign_cadence = ModelCadence(
+            fps,
+            settings.LIVE_SIGN_TARGET_FPS,
+            phase=settings.LIVE_SIGN_PHASE_FRAME,
+        )
+        ppe_gate = CadenceGate(ppe_cadence)
+        sign_gate = CadenceGate(sign_cadence)
         confidence, classes, model_stride = (
             settings.CONFIDENCE_THRESHOLD,
             [0, 1, 2, 3],
-            stride,
+            ppe_cadence.interval_frames if ppe_subscription is not None else stride,
         )
         inference_device = detector.device
         half = bool(settings.INFERENCE_HALF) and str(detector.device).startswith("cuda")
@@ -510,15 +562,13 @@ async def real_video_pipeline(
 
         def infer_live_frame(image: np.ndarray):
             lock_requested_at = time.perf_counter()
-            with gpu_inference_lock:
+            with inference_priority(gpu_inference_lock, 1):
                 lock_wait_ms = (time.perf_counter() - lock_requested_at) * 1000.0
                 compute_started = time.perf_counter()
-                tracked = model_instance.track(
+                detected = model_instance.predict(
                     source=image,
                     stream=False,
-                    persist=True,
                     conf=confidence,
-                    tracker=tracker_path,
                     classes=classes,
                     device=inference_device,
                     half=half,
@@ -526,11 +576,11 @@ async def real_video_pipeline(
                     verbose=False,
                 )
                 compute_ms = (time.perf_counter() - compute_started) * 1000.0
-            return (tracked[0] if tracked else None), lock_wait_ms, compute_ms
+            return (detected[0] if detected else None), lock_wait_ms, compute_ms
 
         def infer_signs(image: np.ndarray):
             lock_requested_at = time.perf_counter()
-            with gpu_inference_lock:
+            with inference_priority(gpu_inference_lock, 2):
                 lock_wait_ms = (time.perf_counter() - lock_requested_at) * 1000.0
                 compute_started = time.perf_counter()
                 results = detector.sign_model.predict(
@@ -543,14 +593,152 @@ async def real_video_pipeline(
                 compute_ms = (time.perf_counter() - compute_started) * 1000.0
             return results, lock_wait_ms, compute_ms
 
+        async def run_live_sign_worker() -> None:
+            subscription = await frame_hubs.subscribe(
+                source_str,
+                policy="latest",
+                queue_size=1,
+            )
+            try:
+                while True:
+                    sign_packet = await subscription.get()
+                    if sign_packet is None:
+                        return
+                    if not get_flags()[3] or not sign_gate.accept(sign_packet.frame_index):
+                        continue
+
+                    if settings_state:
+                        dismissed_signatures = settings_state.get("dismissed_signatures", [])
+                        settings_state["dismissed_signatures"] = []
+                        for signature in dismissed_signatures:
+                            sign_registry.dismiss(signature)
+                        dismissed_ppe_signatures = settings_state.get(
+                            "dismissed_ppe_signatures", []
+                        )
+                        settings_state["dismissed_ppe_signatures"] = []
+                        for signature in dismissed_ppe_signatures:
+                            ppe_sign_registry.dismiss(signature)
+
+                    sign_end_to_end_started = time.perf_counter()
+                    sign_results, sign_lock_wait_ms, sign_compute_ms = await asyncio.to_thread(
+                        infer_signs,
+                        sign_packet.image,
+                    )
+                    sign_end_to_end_ms = (
+                        time.perf_counter() - sign_end_to_end_started
+                    ) * 1000.0
+                    increment_stream_health(source_str, sign_calls=1)
+                    update_stream_health(
+                        source_str,
+                        sign_last_frame_index=sign_packet.frame_index,
+                    )
+                    mark_stream_event(source_str, "sign_output")
+                    observe_stream_timing(source_str, "sign_gpu_lock_wait", sign_lock_wait_ms)
+                    observe_stream_timing(source_str, "sign_compute", sign_compute_ms)
+                    observe_stream_timing(source_str, "sign_end_to_end", sign_end_to_end_ms)
+
+                    signs = extract_signs(sign_results[0]) if sign_results else []
+                    if render_store is not None:
+                        render_store.update_signs(sign_packet, signs)
+                    await sign_events.put(
+                        _stream_event(
+                            "sign_prediction",
+                            {"detections": signs},
+                            packet=sign_packet,
+                        )
+                    )
+                    frame_height, frame_width = sign_packet.image.shape[:2]
+                    for suggestion in sign_registry.update(
+                        signs,
+                        frame_width,
+                        frame_height,
+                        sign_packet.frame_index,
+                        fps,
+                    ):
+                        await sign_events.put(
+                            _stream_event(
+                                "zone_suggestion",
+                                suggestion.model_dump(),
+                                packet=sign_packet,
+                            )
+                        )
+                    for suggestion in ppe_sign_registry.update(
+                        signs,
+                        frame_width,
+                        frame_height,
+                        sign_packet.frame_index,
+                    ):
+                        await sign_events.put(
+                            _stream_event(
+                                "ppe_suggestion",
+                                suggestion.model_dump(),
+                                packet=sign_packet,
+                            )
+                        )
+            finally:
+                await subscription.close()
+
+        if ppe_subscription is not None and detector.sign_model is not None:
+            sign_task = asyncio.create_task(run_live_sign_worker())
+
+        async def sync_behavior_worker(enabled: bool) -> None:
+            nonlocal behavior_worker, behavior_separate
+            nonlocal last_fall_payload, fall_unavailable_message
+            if enabled and behavior_worker is None:
+                behavior_worker = BehaviorStreamWorker(
+                    source=source_str,
+                    source_name=video_name,
+                    fps=fps,
+                    detector=_fall_detector,
+                    render_store=render_store,
+                )
+                behavior_worker.start()
+                behavior_separate = True
+                logger.info(
+                    "[BEHAVIOR] '%s' enabled: started direct pose/ReID worker",
+                    video_name,
+                )
+            elif not enabled and behavior_worker is not None:
+                await behavior_worker.stop()
+                behavior_worker = None
+                behavior_separate = False
+                last_fall_payload = None
+                fall_unavailable_message = None
+                logger.info(
+                    "[BEHAVIOR] '%s' disabled: stopped direct pose/ReID worker",
+                    video_name,
+                )
+
         processed_frames = 0
         while True:
             source_frame_index: int | None = None
+            packet: FramePacket | None = None
             if ppe_subscription is not None:
                 packet = await ppe_subscription.get()
                 if packet is None:
                     break
-                if packet.frame_index % model_stride != 0:
+                control_flags = get_flags()
+                if not (control_flags[0] or control_flags[1]):
+                    await sync_behavior_worker(control_flags[2])
+                    if behavior_worker is not None:
+                        (
+                            last_fall_payload,
+                            fall_unavailable_message,
+                            pending_incidents,
+                        ) = behavior_worker.snapshot()
+                        for incident in pending_incidents:
+                            yield _stream_event(
+                                "behavior_incident",
+                                incident,
+                                packet=packet,
+                                frame_index=packet.frame_index,
+                            )
+                    while not sign_events.empty():
+                        yield sign_events.get_nowait()
+                    continue
+                if not control_flags[2]:
+                    await sync_behavior_worker(False)
+                if not ppe_gate.accept(packet.frame_index):
                     continue
                 source_frame_index = packet.frame_index
                 end_to_end_started = time.perf_counter()
@@ -603,24 +791,7 @@ async def real_video_pipeline(
             viewed = is_viewed()
             curr_fall = behavior_enabled
 
-            if curr_fall and behavior_worker is None:
-                # Feature toggles arrive after the WebSocket is already open.
-                # Start the independent pose worker at that moment instead of
-                # requiring a reconnect before Behavioral can produce events.
-                behavior_worker = BehaviorStreamWorker(
-                    source=source_str, source_name=video_name, fps=fps,
-                    detector=_fall_detector,
-                )
-                behavior_worker.start()
-                behavior_separate = True
-                logger.info("[BEHAVIOR] '%s' enabled: started direct pose/ReID worker", video_name)
-            elif not curr_fall and behavior_worker is not None:
-                await behavior_worker.stop()
-                behavior_worker = None
-                behavior_separate = False
-                last_fall_payload = None
-                fall_unavailable_message = None
-                logger.info("[BEHAVIOR] '%s' disabled: stopped direct pose/ReID worker", video_name)
+            await sync_behavior_worker(curr_fall)
 
             # Detect zone being toggled ON mid-stream and retroactively check foot history
             zone_just_enabled = curr_zone and not prev_zone_enabled
@@ -654,7 +825,7 @@ async def real_video_pipeline(
                         zv = record_zone_violation(worker, zone, result.orig_img.copy(), matched_person, video_name, frame_index, _save_violation_snapshot)
                         if zv:
                             retroactively_reported_workers.add(id(worker))
-                            yield StreamEvent(event="zone_violation", frame_index=frame_index, data=zv.model_dump())
+                            yield _stream_event("zone_violation", zv.model_dump(), packet=packet, frame_index=frame_index)
                 # Reset zone state for workers that just had a retroactive violation saved so
                 # their ongoing live presence is treated as a fresh entry from this point forward.
                 for worker in workers:
@@ -669,12 +840,17 @@ async def real_video_pipeline(
             persons, helmets, vests, cleaning_coveralls = _extract_result_boxes(result)
 
             response = _build_response(persons, helmets, vests, cleaning_coveralls, 0.0)
+            if render_store is not None and packet is not None:
+                for person in response.persons:
+                    pose_track_id = render_store.match_pose_track(packet, person.bbox)
+                    if pose_track_id is not None:
+                        person.track_id = pose_track_id
             frame = result.orig_img.copy()
             frame_height, frame_width = frame.shape[:2]
             if curr_fall and behavior_separate:
                 last_fall_payload, fall_unavailable_message, pending_incidents = behavior_worker.snapshot() if behavior_worker else (None, None, [])
                 for incident in pending_incidents:
-                    yield StreamEvent(event="behavior_incident", frame_index=frame_index, data=incident)
+                    yield _stream_event("behavior_incident", incident, packet=packet, frame_index=frame_index)
             elif curr_fall:
                 fall_ttl_frames = max(1, settings.FALL_LIVE_FRAME_STRIDE * 2)
                 if fall_unavailable_message is None and fall_live_session is None:
@@ -707,7 +883,7 @@ async def real_video_pipeline(
                                 timestamp_seconds=frame_index / max(fps, 1.0),
                             )
                         for incident in last_fall_payload.get("incidents", []):
-                            yield StreamEvent(event="behavior_incident", frame_index=frame_index, data=incident)
+                            yield _stream_event("behavior_incident", incident, packet=packet, frame_index=frame_index)
                     except FallModelUnavailable as exc:
                         fall_unavailable_message = str(exc)
                         last_fall_payload = {
@@ -812,7 +988,7 @@ async def real_video_pipeline(
                                     zv = record_zone_violation(worker, zone, frame, person, video_name, frame_index, _save_violation_snapshot)
                                     logger.info(f"[ZONE] record_zone_violation returned: {zv}")
                                     if zv:
-                                        yield StreamEvent(event="zone_violation", frame_index=frame_index, data=zv.model_dump())
+                                        yield _stream_event("zone_violation", zv.model_dump(), packet=packet, frame_index=frame_index)
                         else:
                             # Janitors are immune to slippery zone violations
                             if zone.zone_type == "SLIPPERY" and worker.role == "janitor":
@@ -827,7 +1003,7 @@ async def real_video_pipeline(
                                     zv = record_zone_violation(worker, zone, frame, person, video_name, frame_index, _save_violation_snapshot)
                                     logger.info(f"[ZONE] record_zone_violation returned: {zv}")
                                     if zv:
-                                        yield StreamEvent(event="zone_violation", frame_index=frame_index, data=zv.model_dump())
+                                        yield _stream_event("zone_violation", zv.model_dump(), packet=packet, frame_index=frame_index)
                             else:
                                 # Worker exited the restricted zone — reset so re-entry triggers a new incident
                                 worker.reported_zones.discard(cv_id)
@@ -864,9 +1040,9 @@ async def real_video_pipeline(
                     old_case_count = len(cases)
                     _record_violation_case(cases=cases, frame=frame, person=person, worker=worker, missing=missing_to_report, video_name=video_name, frame_index=frame_index, worker_match_reason=decision.get("worker_match_reason", "unknown"), confirmed_aspect_ratios=confirmed_aspect_ratios)
                     if len(cases) > old_case_count:
-                        yield StreamEvent(event="violation", frame_index=frame_index, data=cases[-1].report.model_dump())
+                        yield _stream_event("violation", cases[-1].report.model_dump(), packet=packet, frame_index=frame_index)
 
-            if sign_enabled and detector.sign_model is not None and frame_width and frame_height and frame_index % settings.SIGN_PASS_FRAME_INTERVAL == 0:
+            if ppe_subscription is None and sign_enabled and detector.sign_model is not None and frame_width and frame_height and frame_index % settings.SIGN_PASS_FRAME_INTERVAL == 0:
                 if settings_state:
                     pending_zone = settings_state.get("dismissed_signatures", [])
                     if pending_zone:
@@ -895,11 +1071,18 @@ async def real_video_pipeline(
                 if sign_results:
                     signs = extract_signs(sign_results[0])
                     for suggestion in sign_registry.update(signs, frame_width, frame_height, frame_index, fps):
-                        yield StreamEvent(event="zone_suggestion", frame_index=frame_index, data=suggestion.model_dump())
+                        yield _stream_event("zone_suggestion", suggestion.model_dump(), packet=packet, frame_index=frame_index)
                     for suggestion in ppe_sign_registry.update(signs, frame_width, frame_height, frame_index):
-                        yield StreamEvent(event="ppe_suggestion", frame_index=frame_index, data=suggestion.model_dump())
+                        yield _stream_event("ppe_suggestion", suggestion.model_dump(), packet=packet, frame_index=frame_index)
 
-            has_image = is_stream and viewed
+            while not sign_events.empty():
+                yield sign_events.get_nowait()
+
+            if render_store is not None and packet is not None:
+                render_store.update_ppe(packet, current_frame_overlay)
+
+            metadata_only = bool(settings_state and settings_state.get("metadata_only"))
+            has_image = is_stream and viewed and not metadata_only
             # Offload the resize+encode (cv2, CPU-bound) to a thread instead of
             # running it inline on the event loop — same reasoning as the main
             # inference and sign-model calls above (PERF_PLAN.md Tier 7): keeps
@@ -914,10 +1097,9 @@ async def real_video_pipeline(
                 increment_stream_health(source_str, preview_generated_frames=1)
                 mark_stream_event(source_str, "preview_generated")
                 observe_stream_timing(source_str, "jpeg_encode", jpeg_ms)
-            yield StreamEvent(
-                event="frame",
-                frame_index=frame_index,
-                data={
+            yield _stream_event(
+                "frame",
+                {
                     "frames": [f.model_dump() for f in current_frame_overlay] if viewed else [],
                     "processed_frames": processed_frames,
                     "frame_width": frame_width,
@@ -925,7 +1107,14 @@ async def real_video_pipeline(
                     "fall_summary": last_fall_payload.get("summary") if curr_fall and last_fall_payload and viewed else None,
                     "fall_detections": last_fall_payload.get("detections") if curr_fall and last_fall_payload and viewed else [],
                     "fall_unavailable": fall_unavailable_message if curr_fall and viewed else None,
+                    "behavior_timeline": (
+                        last_fall_payload.get("timeline")
+                        if curr_fall and last_fall_payload and viewed
+                        else None
+                    ),
                 },
+                packet=packet,
+                frame_index=frame_index,
                 has_image=has_image,
                 image_bytes=image_bytes,
             )
@@ -942,8 +1131,16 @@ async def real_video_pipeline(
         yield StreamEvent(event="end", data={})
 
     finally:
+        if sign_task is not None:
+            sign_task.cancel()
+            try:
+                await sign_task
+            except asyncio.CancelledError:
+                pass
         if "behavior_worker" in locals() and behavior_worker is not None:
             await behavior_worker.stop()
+        if "annotated_publisher" in locals() and annotated_publisher is not None:
+            await annotated_publisher.stop()
         if ppe_subscription is not None:
             await ppe_subscription.close()
         if pooled_model and model_instance is not None:

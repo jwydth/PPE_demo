@@ -104,8 +104,15 @@ export interface TrackingOverlayFrame {
     status: "unknown" | "others" | "running" | "falling";
     score: number;
     track_id?: number;
+    source_time_ms?: number;
   };
   status: Category | "unknown";
+  stream_epoch?: string;
+  media_pts_ms?: number;
+  source_time_ms?: number;
+  inference_completed_ms?: number;
+  discontinuity_sequence?: number;
+  is_synthetic?: boolean;
 }
 
 export interface TrackingOverlay {

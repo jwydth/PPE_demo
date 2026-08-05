@@ -189,6 +189,28 @@ def test_camera_service_get_or_create_camera_updates_name_if_different():
     repository.update.assert_called_once_with(existing_camera)
 
 
+def test_camera_service_normalizes_loopback_rtsp_alias():
+    repository = Mock()
+    factory_repository = Mock()
+    repository.get_by_source_key.return_value = None
+    repository.create.side_effect = lambda camera: _persist_camera(camera)
+    factory_repository.get_or_create_default_factory.return_value = Factory(
+        id=1,
+        name="Default Factory",
+    )
+    service = CameraService(repository, factory_repository, Mock())
+
+    result = service.get_or_create_camera(
+        name="Line 1",
+        source_key="rtsp://localhost:8554/stream1",
+    )
+
+    repository.get_by_source_key.assert_called_once_with(
+        "rtsp://127.0.0.1:8554/stream1"
+    )
+    assert result.source_key == "rtsp://127.0.0.1:8554/stream1"
+
+
 def _persist_camera(camera: Camera) -> Camera:
     camera.id = 1
     return camera

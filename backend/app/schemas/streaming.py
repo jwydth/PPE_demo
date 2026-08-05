@@ -10,6 +10,7 @@ class StreamEvent(BaseModel):
         "zone_violation",
         "zone_suggestion",
         "ppe_suggestion",
+        "sign_prediction",
         "behavior_incident",
         "summary",
         "error",
@@ -17,6 +18,11 @@ class StreamEvent(BaseModel):
         "end",
     ]
     frame_index: Optional[int] = None
+    stream_epoch: Optional[str] = None
+    media_pts_ms: Optional[float] = None
+    source_time_ms: Optional[float] = None
+    inference_completed_ms: Optional[float] = None
+    discontinuity_sequence: Optional[int] = None
     data: Any
     # True when a raw-JPEG binary WS frame for this event was (or is about to
     # be) sent on the same connection — see `image_bytes` below and

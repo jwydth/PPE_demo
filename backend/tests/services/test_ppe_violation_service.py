@@ -194,7 +194,7 @@ def test_persist_violation_creates_camera_when_not_found():
 
     camera_repo.create.assert_called_once()
     created_camera_arg = camera_repo.create.call_args.args[0]
-    assert created_camera_arg.source_key == "rtsp://localhost:8554/mystream"
+    assert created_camera_arg.source_key == "rtsp://127.0.0.1:8554/mystream"
     assert created_camera_arg.factory_id == 1
 
     violation_row = repository.create.call_args.args[0]

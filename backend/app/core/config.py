@@ -32,6 +32,19 @@ class Settings(BaseSettings):
     # for the two to be considered associated (0.0 – 1.0)
     PPE_OVERLAP_THRESHOLD: float = 0.3
     VIDEO_FRAME_STRIDE: int = 1
+    LIVE_PPE_TARGET_FPS: float = 8.0
+    # Server-composed live output. AI remains asynchronous; the compositor
+    # releases each buffered source frame at its presentation deadline.
+    ANNOTATED_STREAM_ENABLED: bool = True
+    ANNOTATED_STREAM_DELAY_SECONDS: float = 3.0
+    ANNOTATED_STREAM_QUEUE_SIZE: int = 180
+    ANNOTATED_PPE_TTL_FRAMES: int = 8
+    ANNOTATED_SIGN_TTL_SECONDS: float = 3.0
+    ANNOTATED_PPE_MATCH_IOU: float = 0.20
+    ANNOTATED_RTSP_BASE_URL: str = "rtsp://127.0.0.1:8554"
+    ANNOTATED_PATH_SUFFIX: str = "_annotated"
+    ANNOTATED_FFMPEG_PATH: str = "ffmpeg"
+    ANNOTATED_ENCODER: str = "auto"
     VIDEO_TRACKER: str = "bytetrack.yaml"
     VIDEO_CASE_IOU_THRESHOLD: float = 0.2
     VIDEO_CASE_CENTER_DISTANCE_RATIO: float = 0.75
@@ -66,6 +79,8 @@ class Settings(BaseSettings):
     SIGN_CLASS_PPE_TRIGGER: set[int] = {0, 1}
     AUTO_ZONE_BUFFER_RATIO: float = 0.25
     SIGN_PASS_FRAME_INTERVAL: int = 15
+    LIVE_SIGN_TARGET_FPS: float = 1.0
+    LIVE_SIGN_PHASE_FRAME: int = 13
     AUTO_ZONE_CONFIRM_FRAMES: int = 3
     AUTO_PPE_CONFIRM_FRAMES: int = 1
     AUTO_ZONE_DEDUPE_GRID: float = 0.05
@@ -105,14 +120,17 @@ class Settings(BaseSettings):
     # never subsampled; batching only combines one ready frame per camera into
     # a single finite CUDA forward pass.
     BEHAVIOR_ORDERED_QUEUE_SIZE: int = 180
-    BEHAVIOR_BATCH_MAX_SIZE: int = 8
-    BEHAVIOR_CAMERA_BURST_SIZE: int = 4
+    BEHAVIOR_BATCH_MAX_SIZE: int = 4
+    BEHAVIOR_CAMERA_BURST_SIZE: int = 2
     BEHAVIOR_BATCH_WAIT_MS: float = 4.0
     BEHAVIOR_POSE_IMGSZ: int = 448
     BEHAVIOR_FIXED_CAMERA: bool = True
     BEHAVIOR_GMC_METHOD: str = "none"
     BEHAVIOR_REID_HALF: bool = True
-    BEHAVIOR_REID_INTERVAL_FRAMES: int = 2
+    BEHAVIOR_REID_INTERVAL_FRAMES: int = 4
+    BEHAVIOR_POSE_REPAIR_MAX_GAP: int = 8
+    BEHAVIOR_POSE_REPAIR_MIN_CONFIDENCE: float = 0.10
+    BEHAVIOR_POSE_REPAIR_MAX_CENTER_SHIFT_RATIO: float = 1.50
     BEHAVIOR_LIVE_WARMUP_FRAMES: int = 3
     BEHAVIOR_START_COHORT_WAIT_MS: float = 1200.0
     BEHAVIOR_TORCH_THREADS: int = 4
@@ -193,7 +211,10 @@ class Settings(BaseSettings):
             "BEHAVIOR_OPENCV_THREADS": self.BEHAVIOR_OPENCV_THREADS,
             "BEHAVIOR_XGBOOST_THREADS": self.BEHAVIOR_XGBOOST_THREADS,
             "BEHAVIOR_REID_INTERVAL_FRAMES": self.BEHAVIOR_REID_INTERVAL_FRAMES,
+            "BEHAVIOR_POSE_REPAIR_MAX_GAP": self.BEHAVIOR_POSE_REPAIR_MAX_GAP,
             "BEHAVIOR_LIVE_WARMUP_FRAMES": self.BEHAVIOR_LIVE_WARMUP_FRAMES,
+            "ANNOTATED_STREAM_QUEUE_SIZE": self.ANNOTATED_STREAM_QUEUE_SIZE,
+            "ANNOTATED_PPE_TTL_FRAMES": self.ANNOTATED_PPE_TTL_FRAMES,
         }
         invalid = [name for name, value in positive_ints.items() if value < 1]
         if invalid:
@@ -213,6 +234,30 @@ class Settings(BaseSettings):
             raise ValueError("BEHAVIOR_START_COHORT_WAIT_MS cannot be negative.")
         if self.BEHAVIOR_HEALTH_LOG_INTERVAL_SECONDS <= 0:
             raise ValueError("BEHAVIOR_HEALTH_LOG_INTERVAL_SECONDS must be positive.")
+        if self.LIVE_PPE_TARGET_FPS <= 0 or self.LIVE_SIGN_TARGET_FPS <= 0:
+            raise ValueError("Live model target FPS values must be positive.")
+        if self.ANNOTATED_STREAM_DELAY_SECONDS < 0:
+            raise ValueError("ANNOTATED_STREAM_DELAY_SECONDS cannot be negative.")
+        if self.ANNOTATED_SIGN_TTL_SECONDS <= 0:
+            raise ValueError("ANNOTATED_SIGN_TTL_SECONDS must be positive.")
+        if not 0 <= self.ANNOTATED_PPE_MATCH_IOU <= 1:
+            raise ValueError("ANNOTATED_PPE_MATCH_IOU must be between 0 and 1.")
+        if self.ANNOTATED_ENCODER not in {"auto", "h264_nvenc", "libx264"}:
+            raise ValueError(
+                "ANNOTATED_ENCODER must be auto, h264_nvenc, or libx264."
+            )
+        if not self.ANNOTATED_PATH_SUFFIX or "/" in self.ANNOTATED_PATH_SUFFIX:
+            raise ValueError("ANNOTATED_PATH_SUFFIX must be a non-empty path suffix.")
+        if self.LIVE_SIGN_PHASE_FRAME < 0:
+            raise ValueError("LIVE_SIGN_PHASE_FRAME cannot be negative.")
+        if not 0 <= self.BEHAVIOR_POSE_REPAIR_MIN_CONFIDENCE <= 1:
+            raise ValueError(
+                "BEHAVIOR_POSE_REPAIR_MIN_CONFIDENCE must be between 0 and 1."
+            )
+        if self.BEHAVIOR_POSE_REPAIR_MAX_CENTER_SHIFT_RATIO <= 0:
+            raise ValueError(
+                "BEHAVIOR_POSE_REPAIR_MAX_CENTER_SHIFT_RATIO must be positive."
+            )
         allowed_gmc = {"none", "orb", "sift", "ecc", "sparseOptFlow"}
         if self.BEHAVIOR_GMC_METHOD not in allowed_gmc:
             raise ValueError(

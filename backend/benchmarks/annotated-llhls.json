@@ -1,0 +1,656 @@
+{
+  "generated_at": "2026-08-05T12:08:56.957491+00:00",
+  "duration_seconds": 20.009,
+  "streams": [
+    {
+      "source": "rtsp://127.0.0.1:8554/stream1",
+      "playlist_update_hz": 4.098,
+      "playlist_update_interval_ms": {
+        "mean": 247.501,
+        "p50": 215.349,
+        "p95": 426.078,
+        "max": 854.345,
+        "samples": 81
+      },
+      "playlist_request_ms": {
+        "mean": 2.457,
+        "p50": 2.34,
+        "p95": 3.237,
+        "max": 3.866,
+        "samples": 95
+      },
+      "playlist_errors": [],
+      "metadata_events": {
+        "sign_prediction": 21,
+        "frame": 144,
+        "ping": 1
+      },
+      "metadata_delivery_age_ms": {
+        "mean": 100.416,
+        "p50": 64.408,
+        "p95": 277.314,
+        "max": 897.664,
+        "samples": 165
+      },
+      "metadata_errors": []
+    },
+    {
+      "source": "rtsp://127.0.0.1:8554/stream2",
+      "playlist_update_hz": 4.148,
+      "playlist_update_interval_ms": {
+        "mean": 244.483,
+        "p50": 215.049,
+        "p95": 249.919,
+        "max": 865.853,
+        "samples": 82
+      },
+      "playlist_request_ms": {
+        "mean": 2.473,
+        "p50": 2.48,
+        "p95": 3.448,
+        "max": 4.746,
+        "samples": 95
+      },
+      "playlist_errors": [],
+      "metadata_events": {
+        "frame": 142,
+        "sign_prediction": 21,
+        "behavior_incident": 1,
+        "ping": 1
+      },
+      "metadata_delivery_age_ms": {
+        "mean": 128.448,
+        "p50": 76.201,
+        "p95": 322.821,
+        "max": 1211.173,
+        "samples": 164
+      },
+      "metadata_errors": []
+    }
+  ],
+  "health": {
+    "stream_count": 2,
+    "streams": [
+      {
+        "source_id": "38f5502db981",
+        "source_label": "rtsp://127.0.0.1:8554/stream2",
+        "source_fps": 24.0,
+        "captured_frames": 817,
+        "ppe_processed_frames": 213,
+        "ppe_dropped_frames": 337,
+        "behavior_processed_frames": 719,
+        "behavior_queue_depth": 21,
+        "behavior_dropped_frames": 0,
+        "behavior_gap_events": 0,
+        "behavior_interpolated_frames": 85,
+        "behavior_unrepaired_gap_events": 0,
+        "behavior_batch_size": 4,
+        "sign_calls": 21,
+        "sign_last_frame_index": 837,
+        "preview_generated_frames": 0,
+        "preview_sent_frames": 0,
+        "preview_coalesced_frames": 0,
+        "preview_gap_count": 0,
+        "hls_rebuffer_count": 0,
+        "hls_dropped_video_frames": 0,
+        "overlay_selection_mode": "missing",
+        "annotated_composed_frames": 486,
+        "annotated_published_frames": 486,
+        "annotated_dropped_frames": 0,
+        "annotated_queue_dropped_frames": 0,
+        "annotated_deadline_misses": 0,
+        "annotated_encoder_restarts": 0,
+        "annotated_queue_depth": 48,
+        "annotated_publisher_active": true,
+        "annotated_encoder": "h264_nvenc",
+        "annotated_output_label": "stream2_annotated",
+        "capture_age_ms": 0.0,
+        "last_error": null,
+        "updated_age_seconds": 0.008,
+        "timings": {
+          "annotated_compose": {
+            "last_ms": 0.856,
+            "mean_ms": 1.054,
+            "p50_ms": 0.796,
+            "p95_ms": 2.719,
+            "p99_ms": 4.447,
+            "max_ms": 6.42,
+            "samples": 486
+          },
+          "annotated_deadline_late": {
+            "last_ms": 0.285,
+            "mean_ms": 6.324,
+            "p50_ms": 5.151,
+            "p95_ms": 12.429,
+            "p99_ms": 36.063,
+            "max_ms": 38.161,
+            "samples": 486
+          },
+          "annotated_output_interval": {
+            "last_ms": 30.463,
+            "mean_ms": 41.643,
+            "p50_ms": 41.366,
+            "p95_ms": 56.638,
+            "p99_ms": 67.054,
+            "max_ms": 732.67,
+            "samples": 485
+          },
+          "annotated_publish_write": {
+            "last_ms": 0.888,
+            "mean_ms": 0.911,
+            "p50_ms": 0.745,
+            "p95_ms": 1.642,
+            "p99_ms": 2.602,
+            "max_ms": 14.036,
+            "samples": 486
+          },
+          "behavior_batch_formation": {
+            "last_ms": 10.595,
+            "mean_ms": 10.445,
+            "p50_ms": 10.022,
+            "p95_ms": 17.931,
+            "p99_ms": 19.148,
+            "max_ms": 20.211,
+            "samples": 305
+          },
+          "behavior_classifier": {
+            "last_ms": 37.188,
+            "mean_ms": 32.773,
+            "p50_ms": 32.586,
+            "p95_ms": 38.213,
+            "p99_ms": 42.673,
+            "max_ms": 43.413,
+            "samples": 51
+          },
+          "behavior_end_to_end": {
+            "last_ms": 50.572,
+            "mean_ms": 57.894,
+            "p50_ms": 45.433,
+            "p95_ms": 126.441,
+            "p99_ms": 225.824,
+            "max_ms": 254.757,
+            "samples": 610
+          },
+          "behavior_feature_extraction": {
+            "last_ms": 2.022,
+            "mean_ms": 1.741,
+            "p50_ms": 1.739,
+            "p95_ms": 1.92,
+            "p99_ms": 2.016,
+            "max_ms": 2.022,
+            "samples": 51
+          },
+          "behavior_gpu_lock_wait": {
+            "last_ms": 9.054,
+            "mean_ms": 11.082,
+            "p50_ms": 6.259,
+            "p95_ms": 38.766,
+            "p99_ms": 56.918,
+            "max_ms": 86.619,
+            "samples": 305
+          },
+          "behavior_output_interval": {
+            "last_ms": 1.404,
+            "mean_ms": 33.222,
+            "p50_ms": 34.069,
+            "p95_ms": 96.922,
+            "p99_ms": 187.021,
+            "max_ms": 257.91,
+            "samples": 609
+          },
+          "behavior_pose_batch": {
+            "last_ms": 21.858,
+            "mean_ms": 17.704,
+            "p50_ms": 17.406,
+            "p95_ms": 21.847,
+            "p99_ms": 24.468,
+            "max_ms": 28.03,
+            "samples": 305
+          },
+          "behavior_pose_per_frame": {
+            "last_ms": 5.464,
+            "mean_ms": 4.842,
+            "p50_ms": 4.566,
+            "p95_ms": 7.183,
+            "p99_ms": 8.989,
+            "max_ms": 10.327,
+            "samples": 305
+          },
+          "behavior_postprocess": {
+            "last_ms": 1.101,
+            "mean_ms": 3.775,
+            "p50_ms": 1.309,
+            "p95_ms": 33.404,
+            "p99_ms": 39.833,
+            "max_ms": 90.153,
+            "samples": 610
+          },
+          "behavior_scheduler_wait": {
+            "last_ms": 6.882,
+            "mean_ms": 16.071,
+            "p50_ms": 10.661,
+            "p95_ms": 63.157,
+            "p99_ms": 73.869,
+            "max_ms": 198.169,
+            "samples": 610
+          },
+          "behavior_tracking": {
+            "last_ms": 10.006,
+            "mean_ms": 10.238,
+            "p50_ms": 7.46,
+            "p95_ms": 14.552,
+            "p99_ms": 149.394,
+            "max_ms": 157.682,
+            "samples": 610
+          },
+          "capture_interval": {
+            "last_ms": 31.339,
+            "mean_ms": 41.642,
+            "p50_ms": 45.103,
+            "p95_ms": 48.484,
+            "p99_ms": 62.011,
+            "max_ms": 736.535,
+            "samples": 485
+          },
+          "inference_ready_age": {
+            "last_ms": 56.274,
+            "mean_ms": 96.102,
+            "p50_ms": 73.971,
+            "p95_ms": 229.958,
+            "p99_ms": 530.505,
+            "max_ms": 535.305,
+            "samples": 163
+          },
+          "metadata_delivery_age": {
+            "last_ms": 56.701,
+            "mean_ms": 127.853,
+            "p50_ms": 75.538,
+            "p95_ms": 324.343,
+            "p99_ms": 1192.625,
+            "max_ms": 1211.102,
+            "samples": 163
+          },
+          "metadata_sent_interval": {
+            "last_ms": 148.901,
+            "mean_ms": 123.831,
+            "p50_ms": 117.121,
+            "p95_ms": 230.219,
+            "p99_ms": 752.067,
+            "max_ms": 757.608,
+            "samples": 162
+          },
+          "ppe_compute": {
+            "last_ms": 28.884,
+            "mean_ms": 27.366,
+            "p50_ms": 24.91,
+            "p95_ms": 56.387,
+            "p99_ms": 62.38,
+            "max_ms": 77.12,
+            "samples": 142
+          },
+          "ppe_end_to_end": {
+            "last_ms": 54.91,
+            "mean_ms": 71.364,
+            "p50_ms": 67.724,
+            "p95_ms": 133.708,
+            "p99_ms": 190.082,
+            "max_ms": 208.29,
+            "samples": 142
+          },
+          "ppe_gpu_lock_wait": {
+            "last_ms": 25.416,
+            "mean_ms": 43.393,
+            "p50_ms": 43.462,
+            "p95_ms": 113.456,
+            "p99_ms": 162.573,
+            "max_ms": 181.777,
+            "samples": 142
+          },
+          "ppe_output_interval": {
+            "last_ms": 149.304,
+            "mean_ms": 142.277,
+            "p50_ms": 123.564,
+            "p95_ms": 231.705,
+            "p99_ms": 753.033,
+            "max_ms": 757.644,
+            "samples": 141
+          },
+          "sign_compute": {
+            "last_ms": 19.576,
+            "mean_ms": 29.014,
+            "p50_ms": 23.108,
+            "p95_ms": 59.928,
+            "p99_ms": 66.726,
+            "max_ms": 68.426,
+            "samples": 21
+          },
+          "sign_end_to_end": {
+            "last_ms": 20.455,
+            "mean_ms": 201.53,
+            "p50_ms": 125.315,
+            "p95_ms": 534.266,
+            "p99_ms": 534.742,
+            "max_ms": 534.861,
+            "samples": 21
+          },
+          "sign_gpu_lock_wait": {
+            "last_ms": 0.019,
+            "mean_ms": 171.933,
+            "p50_ms": 99.45,
+            "p95_ms": 503.256,
+            "p99_ms": 508.609,
+            "max_ms": 509.948,
+            "samples": 21
+          },
+          "sign_output_interval": {
+            "last_ms": 1006.613,
+            "mean_ms": 994.278,
+            "p50_ms": 990.946,
+            "p95_ms": 1489.84,
+            "p99_ms": 1545.17,
+            "max_ms": 1559.003,
+            "samples": 20
+          },
+          "websocket_send": {
+            "last_ms": 0.327,
+            "mean_ms": 0.342,
+            "p50_ms": 0.313,
+            "p95_ms": 0.559,
+            "p99_ms": 0.932,
+            "max_ms": 1.245,
+            "samples": 163
+          }
+        },
+        "rates_fps": {
+          "annotated_output": 24.013,
+          "behavior_output": 30.101,
+          "capture": 24.014,
+          "metadata_sent": 8.076,
+          "ppe_output": 7.029,
+          "sign_output": 1.006
+        }
+      },
+      {
+        "source_id": "6cc8670472da",
+        "source_label": "rtsp://127.0.0.1:8554/stream1",
+        "source_fps": 24.0,
+        "captured_frames": 865,
+        "ppe_processed_frames": 224,
+        "ppe_dropped_frames": 306,
+        "behavior_processed_frames": 739,
+        "behavior_queue_depth": 1,
+        "behavior_dropped_frames": 0,
+        "behavior_gap_events": 0,
+        "behavior_interpolated_frames": 0,
+        "behavior_unrepaired_gap_events": 0,
+        "behavior_batch_size": 4,
+        "sign_calls": 20,
+        "sign_last_frame_index": 854,
+        "preview_generated_frames": 0,
+        "preview_sent_frames": 0,
+        "preview_coalesced_frames": 0,
+        "preview_gap_count": 0,
+        "hls_rebuffer_count": 0,
+        "hls_dropped_video_frames": 0,
+        "overlay_selection_mode": "missing",
+        "annotated_composed_frames": 486,
+        "annotated_published_frames": 486,
+        "annotated_dropped_frames": 0,
+        "annotated_queue_dropped_frames": 0,
+        "annotated_deadline_misses": 0,
+        "annotated_encoder_restarts": 0,
+        "annotated_queue_depth": 48,
+        "annotated_publisher_active": true,
+        "annotated_encoder": "h264_nvenc",
+        "annotated_output_label": "stream1_annotated",
+        "capture_age_ms": 0.0,
+        "last_error": null,
+        "updated_age_seconds": 0.01,
+        "timings": {
+          "annotated_compose": {
+            "last_ms": 1.155,
+            "mean_ms": 0.943,
+            "p50_ms": 0.716,
+            "p95_ms": 2.129,
+            "p99_ms": 4.205,
+            "max_ms": 15.041,
+            "samples": 486
+          },
+          "annotated_deadline_late": {
+            "last_ms": 0.19,
+            "mean_ms": 6.14,
+            "p50_ms": 5.565,
+            "p95_ms": 13.593,
+            "p99_ms": 17.322,
+            "max_ms": 19.346,
+            "samples": 486
+          },
+          "annotated_output_interval": {
+            "last_ms": 34.858,
+            "mean_ms": 41.677,
+            "p50_ms": 42.592,
+            "p95_ms": 54.349,
+            "p99_ms": 67.552,
+            "max_ms": 727.314,
+            "samples": 485
+          },
+          "annotated_publish_write": {
+            "last_ms": 0.951,
+            "mean_ms": 0.928,
+            "p50_ms": 0.758,
+            "p95_ms": 1.7,
+            "p99_ms": 2.715,
+            "max_ms": 10.801,
+            "samples": 486
+          },
+          "behavior_batch_formation": {
+            "last_ms": 10.595,
+            "mean_ms": 10.378,
+            "p50_ms": 9.948,
+            "p95_ms": 17.965,
+            "p99_ms": 19.323,
+            "max_ms": 20.252,
+            "samples": 341
+          },
+          "behavior_end_to_end": {
+            "last_ms": 54.299,
+            "mean_ms": 54.939,
+            "p50_ms": 46.948,
+            "p95_ms": 97.109,
+            "p99_ms": 191.502,
+            "max_ms": 217.943,
+            "samples": 608
+          },
+          "behavior_gpu_lock_wait": {
+            "last_ms": 9.054,
+            "mean_ms": 14.571,
+            "p50_ms": 7.541,
+            "p95_ms": 57.047,
+            "p99_ms": 70.37,
+            "max_ms": 86.619,
+            "samples": 341
+          },
+          "behavior_output_interval": {
+            "last_ms": 0.774,
+            "mean_ms": 33.329,
+            "p50_ms": 35.381,
+            "p95_ms": 87.075,
+            "p99_ms": 189.863,
+            "max_ms": 393.516,
+            "samples": 607
+          },
+          "behavior_pose_batch": {
+            "last_ms": 21.858,
+            "mean_ms": 18.253,
+            "p50_ms": 17.446,
+            "p95_ms": 24.241,
+            "p99_ms": 38.837,
+            "max_ms": 42.223,
+            "samples": 341
+          },
+          "behavior_pose_per_frame": {
+            "last_ms": 5.464,
+            "mean_ms": 5.975,
+            "p50_ms": 4.693,
+            "p95_ms": 15.818,
+            "p99_ms": 20.714,
+            "max_ms": 42.223,
+            "samples": 341
+          },
+          "behavior_postprocess": {
+            "last_ms": 0.404,
+            "mean_ms": 1.079,
+            "p50_ms": 0.823,
+            "p95_ms": 2.275,
+            "p99_ms": 5.7,
+            "max_ms": 25.057,
+            "samples": 608
+          },
+          "behavior_scheduler_wait": {
+            "last_ms": 10.609,
+            "mean_ms": 10.079,
+            "p50_ms": 9.616,
+            "p95_ms": 17.436,
+            "p99_ms": 19.577,
+            "max_ms": 35.241,
+            "samples": 608
+          },
+          "behavior_tracking": {
+            "last_ms": 9.502,
+            "mean_ms": 6.924,
+            "p50_ms": 1.219,
+            "p95_ms": 13.559,
+            "p99_ms": 148.489,
+            "max_ms": 156.5,
+            "samples": 608
+          },
+          "capture_interval": {
+            "last_ms": 47.324,
+            "mean_ms": 41.675,
+            "p50_ms": 45.616,
+            "p95_ms": 48.703,
+            "p99_ms": 61.851,
+            "max_ms": 742.7,
+            "samples": 485
+          },
+          "inference_ready_age": {
+            "last_ms": 74.29,
+            "mean_ms": 76.763,
+            "p50_ms": 60.915,
+            "p95_ms": 190.049,
+            "p99_ms": 272.015,
+            "max_ms": 529.912,
+            "samples": 164
+          },
+          "metadata_delivery_age": {
+            "last_ms": 74.755,
+            "mean_ms": 98.677,
+            "p50_ms": 63.861,
+            "p95_ms": 253.309,
+            "p99_ms": 876.699,
+            "max_ms": 897.559,
+            "samples": 164
+          },
+          "metadata_sent_interval": {
+            "last_ms": 126.399,
+            "mean_ms": 123.511,
+            "p50_ms": 114.018,
+            "p95_ms": 215.713,
+            "p99_ms": 790.323,
+            "max_ms": 830.258,
+            "samples": 163
+          },
+          "ppe_compute": {
+            "last_ms": 18.235,
+            "mean_ms": 27.216,
+            "p50_ms": 24.469,
+            "p95_ms": 56.193,
+            "p99_ms": 61.91,
+            "max_ms": 62.671,
+            "samples": 143
+          },
+          "ppe_end_to_end": {
+            "last_ms": 73.094,
+            "mean_ms": 61.642,
+            "p50_ms": 54.715,
+            "p95_ms": 128.63,
+            "p99_ms": 186.255,
+            "max_ms": 205.367,
+            "samples": 143
+          },
+          "ppe_gpu_lock_wait": {
+            "last_ms": 54.341,
+            "mean_ms": 33.813,
+            "p50_ms": 25.498,
+            "p95_ms": 106.337,
+            "p99_ms": 164.424,
+            "max_ms": 178.63,
+            "samples": 143
+          },
+          "ppe_output_interval": {
+            "last_ms": 126.356,
+            "mean_ms": 141.775,
+            "p50_ms": 118.826,
+            "p95_ms": 216.965,
+            "p99_ms": 797.602,
+            "max_ms": 830.227,
+            "samples": 142
+          },
+          "sign_compute": {
+            "last_ms": 16.722,
+            "mean_ms": 21.342,
+            "p50_ms": 20.98,
+            "p95_ms": 26.205,
+            "p99_ms": 28.282,
+            "max_ms": 28.801,
+            "samples": 20
+          },
+          "sign_end_to_end": {
+            "last_ms": 69.082,
+            "mean_ms": 137.86,
+            "p50_ms": 133.099,
+            "p95_ms": 268.99,
+            "p99_ms": 274.965,
+            "max_ms": 276.458,
+            "samples": 20
+          },
+          "sign_gpu_lock_wait": {
+            "last_ms": 51.827,
+            "mean_ms": 115.97,
+            "p50_ms": 108.703,
+            "p95_ms": 245.787,
+            "p99_ms": 256.972,
+            "max_ms": 259.769,
+            "samples": 20
+          },
+          "sign_output_interval": {
+            "last_ms": 871.385,
+            "mean_ms": 1005.041,
+            "p50_ms": 1077.411,
+            "p95_ms": 1656.276,
+            "p99_ms": 1724.058,
+            "max_ms": 1741.003,
+            "samples": 19
+          },
+          "websocket_send": {
+            "last_ms": 0.366,
+            "mean_ms": 0.277,
+            "p50_ms": 0.253,
+            "p95_ms": 0.482,
+            "p99_ms": 0.76,
+            "max_ms": 1.248,
+            "samples": 164
+          }
+        },
+        "rates_fps": {
+          "annotated_output": 23.994,
+          "behavior_output": 30.004,
+          "capture": 23.995,
+          "metadata_sent": 8.096,
+          "ppe_output": 7.053,
+          "sign_output": 0.995
+        }
+      }
+    ]
+  }
+}
