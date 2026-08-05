@@ -660,6 +660,16 @@ function CameraPanel({
     ? liveStream.streamData.summary
     : upload.videoResult?.summary;
 
+  const connectedCameraNames = cameras
+    .filter((c) => c.active && liveStream.liveFrames[c.rtspUrl])
+    .map((c) => c.name);
+
+  const viewedCameraName = cameras.find((c) => c.rtspUrl === liveStream.liveUrl)?.name;
+
+  const displayedCameraNames = viewMode === "single"
+    ? (viewedCameraName ? [viewedCameraName] : [])
+    : connectedCameraNames;
+
   return (
     <section className="h-fit overflow-hidden rounded-md border border-slate-300 bg-slate-950 shadow-md">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
@@ -669,7 +679,9 @@ function CameraPanel({
           </p>
           <p className="text-xs text-slate-400">
             {liveStream.isLive
-              ? `Connected to ${liveStream.liveUrl}`
+              ? displayedCameraNames.length > 0
+                ? `Connected to ${displayedCameraNames.join(", ")}`
+                : "Connecting…"
               : "Upload a photo or CCTV clip, then choose which detection models run on this camera"}
           </p>
         </div>
@@ -940,7 +952,11 @@ function CameraPanel({
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="min-w-0">
                 <p className="truncate text-sm font-semibold text-white">
-                  {liveStream.isLive ? liveStream.liveUrl : upload.file?.name}
+                  {liveStream.isLive
+                    ? displayedCameraNames.length > 0
+                      ? displayedCameraNames.join(", ")
+                      : "Connecting…"
+                    : upload.file?.name}
                 </p>
                 <p className="text-xs text-slate-400">
                   {liveStream.isLive ? "Live RTSP stream" : isVideo ? "Video feed simulation" : "Image frame simulation"}
