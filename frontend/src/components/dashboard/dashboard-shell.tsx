@@ -1,6 +1,8 @@
 "use client";
 
 import {
+  ChevronLeft,
+  ChevronRight,
   Loader2,
   Maximize2,
   RefreshCw,
@@ -870,7 +872,13 @@ function CameraPanel({
                           }}
                           className="rounded border border-slate-700 bg-slate-950 px-1 py-1 text-xs text-white outline-none focus:border-slate-500 cursor-pointer"
                         >
-                          <option value="">Unassigned</option>
+                          {/* Not a real choice — every camera should belong to a zone.
+                              Disabled placeholder only so cameras that predate this
+                              requirement still render their true (unset) state instead
+                              of silently snapping to whichever zone renders first. */}
+                          <option value="" disabled>
+                            No zone assigned
+                          </option>
                           {physicalZones.map((zone) => (
                             <option key={zone.id} value={zone.id}>
                               {zone.name}
@@ -1511,6 +1519,23 @@ function MetricMini({ label, value }: { label: string; value: string }) {
 }
 
 const SAFETY_EVENTS_QUERY_KEY = ["safety-events"] as const;
+const INCIDENTS_PAGE_SIZE = 6;
+
+/** Page numbers to render around `current`, with "…" gap markers — first
+ * and last page always shown so long lists don't need to be scrolled
+ * through one button at a time. */
+function getPageWindow(current: number, total: number): (number | "…")[] {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  const pages = [...new Set([1, total, current - 1, current, current + 1])]
+    .filter((p) => p >= 1 && p <= total)
+    .sort((a, b) => a - b);
+  const windowed: (number | "…")[] = [];
+  pages.forEach((p, i) => {
+    if (i > 0 && p - pages[i - 1] > 1) windowed.push("…");
+    windowed.push(p);
+  });
+  return windowed;
+}
 
 function IncidentPanel() {
   const queryClient = useQueryClient();
@@ -1525,6 +1550,16 @@ function IncidentPanel() {
     category: IncidentCategory;
     id: number;
   } | null>(null);
+  const [page, setPage] = useState(1);
+  const totalPages = Math.max(1, Math.ceil(events.length / INCIDENTS_PAGE_SIZE));
+  // Clamp during render (not an effect) if the page count shrinks out from
+  // under the current page — e.g. after deleting the last item on the last page.
+  const currentPage = Math.min(page, totalPages);
+  if (currentPage !== page) setPage(currentPage);
+  const pageEvents = events.slice(
+    (currentPage - 1) * INCIDENTS_PAGE_SIZE,
+    currentPage * INCIDENTS_PAGE_SIZE,
+  );
 
   // isFetching (not isPending) so the spinner also shows on the manual
   // refresh button click below, matching the previous setLoading(true)-on-
@@ -1601,7 +1636,7 @@ function IncidentPanel() {
         <EmptyState text="No incidents have been recorded yet." />
       ) : null}
       <div className="grid gap-2">
-        {events.slice(0, 6).map((event, index) => (
+        {pageEvents.map((event, index) => (
           <IncidentCard
             key={`${event.id ?? index}-${event.timestamp}`}
             event={event}
@@ -1610,6 +1645,52 @@ function IncidentPanel() {
           />
         ))}
       </div>
+      {totalPages > 1 ? (
+        <div className="mt-3 flex items-center justify-between gap-2 border-t border-slate-200 pt-3">
+          <p className="text-xs text-slate-500">
+            Page {currentPage} of {totalPages} · {events.length} incident{events.length === 1 ? "" : "s"}
+          </p>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={currentPage === 1}
+              aria-label="Previous page"
+              className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-500 transition hover:border-slate-300 hover:text-slate-950 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <ChevronLeft className="size-3.5" aria-hidden="true" />
+            </button>
+            {getPageWindow(currentPage, totalPages).map((p, i) =>
+              p === "…" ? (
+                <span key={`ellipsis-${i}`} className="px-1 text-xs text-slate-400">
+                  …
+                </span>
+              ) : (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => setPage(p)}
+                  aria-current={p === currentPage ? "page" : undefined}
+                  className={`min-w-[1.75rem] rounded-md px-2 py-1 text-xs font-semibold transition ${
+                    p === currentPage ? "bg-slate-950 text-lime-200" : "text-slate-500 hover:bg-slate-100"
+                  }`}
+                >
+                  {p}
+                </button>
+              ),
+            )}
+            <button
+              type="button"
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              disabled={currentPage === totalPages}
+              aria-label="Next page"
+              className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-500 transition hover:border-slate-300 hover:text-slate-950 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <ChevronRight className="size-3.5" aria-hidden="true" />
+            </button>
+          </div>
+        </div>
+      ) : null}
       {selectedIncident ? (
         <IncidentDetailModal
           key={`${selectedIncident.category}-${selectedIncident.id}`}

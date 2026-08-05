@@ -247,6 +247,15 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
     () => Object.fromEntries(zoneMeta.map((z) => [zoneKey(z.id), z])),
     [zoneMeta],
   );
+  // "Unassigned" (zone_id null) isn't a real zone to scope a report to — the
+  // "All zones" option already covers those incidents, so only list real zones.
+  const reportZoneOptions = useMemo(
+    () =>
+      zoneMeta
+        .filter((z) => z.id !== null)
+        .map((z) => ({ id: z.id as number, name: z.name })),
+    [zoneMeta],
+  );
   const selectedZoneMeta = selectedZone != null ? zoneLookup[zoneKey(selectedZone)] : undefined;
   const activeZoneKeys = useMemo(
     () => new Set((summary?.active_zone_ids ?? []).map(zoneKey)),
@@ -906,8 +915,13 @@ export function AnalyticsDashboard({ embedded = false }: { embedded?: boolean } 
         onClose={() => setExportOpen(false)}
         range={timeRange}
         zoneId={selectedZone}
+        zoneOptions={reportZoneOptions}
       />
-      <ScheduleReportDialog open={scheduleOpen} onClose={() => setScheduleOpen(false)} />
+      <ScheduleReportDialog
+        open={scheduleOpen}
+        onClose={() => setScheduleOpen(false)}
+        zoneOptions={reportZoneOptions}
+      />
     </div>
   );
 }

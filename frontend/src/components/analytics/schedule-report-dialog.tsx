@@ -5,9 +5,15 @@ import { useEffect, useState } from "react";
 import { getReportSchedule, updateReportSchedule } from "@/lib/ppe-api";
 import { ReportScheduleRequest, ReportScheduleResponse, ScheduleFrequency } from "@/types/report";
 
+interface ZoneOption {
+  id: number;
+  name: string;
+}
+
 interface ScheduleReportDialogProps {
   open: boolean;
   onClose: () => void;
+  zoneOptions: ZoneOption[];
 }
 
 const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
@@ -24,7 +30,7 @@ function formatDateTime(iso: string): string {
   return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
 }
 
-export function ScheduleReportDialog({ open, onClose }: ScheduleReportDialogProps) {
+export function ScheduleReportDialog({ open, onClose, zoneOptions }: ScheduleReportDialogProps) {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [current, setCurrent] = useState<ReportScheduleResponse | null>(null);
@@ -33,6 +39,7 @@ export function ScheduleReportDialog({ open, onClose }: ScheduleReportDialogProp
   const [dayOfWeek, setDayOfWeek] = useState(0);
   const [dayOfMonth, setDayOfMonth] = useState(1);
   const [time, setTime] = useState("07:00");
+  const [zoneId, setZoneId] = useState<number | null>(null);
   const [recipientsInput, setRecipientsInput] = useState("");
   const [recipients, setRecipients] = useState<string[]>([]);
   const [includeSnapshots, setIncludeSnapshots] = useState(true);
@@ -51,6 +58,7 @@ export function ScheduleReportDialog({ open, onClose }: ScheduleReportDialogProp
         setDayOfWeek(schedule.day_of_week ?? 0);
         setDayOfMonth(schedule.day_of_month ?? 1);
         setTime(`${pad(schedule.hour)}:${pad(schedule.minute)}`);
+        setZoneId(schedule.zone_id);
         setRecipients(schedule.recipients);
         setIncludeSnapshots(schedule.include_snapshots);
         setLoadError("");
@@ -102,6 +110,7 @@ export function ScheduleReportDialog({ open, onClose }: ScheduleReportDialogProp
       day_of_month: frequency === "monthly" ? dayOfMonth : null,
       hour: Number(hourStr) || 0,
       minute: Number(minuteStr) || 0,
+      zone_id: zoneId,
       recipients: finalRecipients,
       include_snapshots: includeSnapshots,
     };
@@ -248,6 +257,24 @@ export function ScheduleReportDialog({ open, onClose }: ScheduleReportDialogProp
 
               {frequency !== "off" ? (
                 <>
+                  <div>
+                    <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      Zone
+                    </label>
+                    <select
+                      value={zoneId ?? ""}
+                      onChange={(e) => setZoneId(e.target.value ? Number(e.target.value) : null)}
+                      className="w-full rounded-md border border-slate-200 px-2 py-1.5 text-xs outline-none focus:border-slate-400"
+                    >
+                      <option value="">All zones</option>
+                      {zoneOptions.map((z) => (
+                        <option key={z.id} value={z.id}>
+                          {z.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
                   <div>
                     <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
                       Recipients

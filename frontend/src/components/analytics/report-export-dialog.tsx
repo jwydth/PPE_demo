@@ -6,16 +6,33 @@ import { downloadIncidentReportPdf, emailIncidentReport, getReportPreview } from
 import { AnalyticsRangeParam } from "@/types/analytics";
 import { ReportPreview } from "@/types/report";
 
+interface ZoneOption {
+  id: number;
+  name: string;
+}
+
 interface ReportExportDialogProps {
   open: boolean;
   onClose: () => void;
   range: AnalyticsRangeParam;
   zoneId: number | null;
+  zoneOptions: ZoneOption[];
 }
 
 type SendState = "idle" | "sending" | "success" | "error";
 
-export function ReportExportDialog({ open, onClose, range, zoneId }: ReportExportDialogProps) {
+export function ReportExportDialog({ open, onClose, range, zoneId, zoneOptions }: ReportExportDialogProps) {
+  const [selectedZoneId, setSelectedZoneId] = useState<number | null>(zoneId);
+  // Re-sync to whichever zone is selected on the dashboard each time the
+  // dialog opens, but leave it alone while open — the user can pick a
+  // different zone for this export without it snapping back mid-edit.
+  // (Adjusting state during render on a prop change, per React's guidance,
+  // rather than in an effect — no extra render/flash of the stale value.)
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open) setSelectedZoneId(zoneId);
+  }
   const [preview, setPreview] = useState<ReportPreview | null>(null);
   const [previewError, setPreviewError] = useState("");
   const [includeSnapshots, setIncludeSnapshots] = useState(true);
@@ -34,7 +51,7 @@ export function ReportExportDialog({ open, onClose, range, zoneId }: ReportExpor
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
-    getReportPreview(range, zoneId)
+    getReportPreview(range, selectedZoneId)
       .then((result) => {
         if (cancelled) return;
         setPreview(result);
@@ -48,7 +65,7 @@ export function ReportExportDialog({ open, onClose, range, zoneId }: ReportExpor
     return () => {
       cancelled = true;
     };
-  }, [open, range, zoneId]);
+  }, [open, range, selectedZoneId]);
 
   if (!open) return null;
 
@@ -84,7 +101,7 @@ export function ReportExportDialog({ open, onClose, range, zoneId }: ReportExpor
     setDownloading(true);
     setDownloadError("");
     try {
-      await downloadIncidentReportPdf(range, zoneId, includeSnapshots);
+      await downloadIncidentReportPdf(range, selectedZoneId, includeSnapshots);
     } catch (err) {
       setDownloadError(err instanceof Error ? err.message : "Could not generate the PDF report");
     } finally {
@@ -109,7 +126,7 @@ export function ReportExportDialog({ open, onClose, range, zoneId }: ReportExpor
       const result = await emailIncidentReport({
         recipients: finalRecipients,
         range,
-        zone_id: zoneId,
+        zone_id: selectedZoneId,
         subject: subject.trim() || null,
         message: message.trim() || null,
         include_snapshots: includeSnapshots,
@@ -125,7 +142,11 @@ export function ReportExportDialog({ open, onClose, range, zoneId }: ReportExpor
     }
   };
 
-  const zoneScopeLabel = preview ? preview.zone_scope_label : zoneId != null ? `Zone #${zoneId}` : "All zones";
+  const zoneScopeLabel = preview
+    ? preview.zone_scope_label
+    : selectedZoneId != null
+      ? (zoneOptions.find((z) => z.id === selectedZoneId)?.name ?? `Zone #${selectedZoneId}`)
+      : "All zones";
 
   return (
     <div
@@ -180,6 +201,24 @@ export function ReportExportDialog({ open, onClose, range, zoneId }: ReportExpor
               </ul>
             </div>
           )}
+
+          <div>
+            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+              Zone
+            </label>
+            <select
+              value={selectedZoneId ?? ""}
+              onChange={(e) => setSelectedZoneId(e.target.value ? Number(e.target.value) : null)}
+              className="w-full rounded-md border border-slate-200 px-2 py-1.5 text-xs outline-none focus:border-slate-400"
+            >
+              <option value="">All zones</option>
+              {zoneOptions.map((z) => (
+                <option key={z.id} value={z.id}>
+                  {z.name}
+                </option>
+              ))}
+            </select>
+          </div>
 
           <label className="flex items-center gap-2 text-xs font-medium text-slate-700">
             <input

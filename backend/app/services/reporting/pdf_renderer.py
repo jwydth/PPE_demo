@@ -15,7 +15,6 @@ from PIL import Image as PILImage
 from reportlab.graphics.charts.barcharts import VerticalBarChart
 from reportlab.graphics.charts.legends import Legend
 from reportlab.graphics.charts.linecharts import HorizontalLineChart
-from reportlab.graphics.charts.piecharts import Pie
 from reportlab.graphics.shapes import Drawing
 from reportlab.graphics.widgets.markers import makeMarker
 from reportlab.lib import colors
@@ -27,8 +26,10 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.pdfmetrics import registerFontFamily
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
+    CondPageBreak,
     Flowable,
     Image as RLImage,
+    KeepTogether,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -51,21 +52,22 @@ _PAGE_SIZE = A4
 _MARGIN = 18 * mm
 _CONTENT_WIDTH = _PAGE_SIZE[0] - 2 * _MARGIN
 
+# Semantic severity scale — the ONLY place red/orange/amber/green appear.
+# Every severity reference in the report (KPI cards, table text, the
+# severity bar) draws from this single mapping so the meaning stays fixed.
 SEVERITY_COLORS = {
-    "Critical": "#ef4444",
-    "High": "#f97316",
-    "Medium": "#f59e0b",
-    "Low": "#10b981",
+    "Critical": "#dc2626",
+    "High": "#ea580c",
+    "Medium": "#d97706",
+    "Low": "#16a34a",
 }
 _SEVERITY_ORDER = ("Critical", "High", "Medium", "Low")
-ZONE_PALETTE = [
-    "#0ea5e9", "#8b5cf6", "#f59e0b", "#f43f5e",
-    "#14b8a6", "#eab308", "#6366f1", "#ec4899",
-]
-UNASSIGNED_COLOR = "#94a3b8"
 INK = "#0f172a"
 ACCENT = "#bef264"       # bright lime — header text / eyebrow, tuned for contrast on INK
-BRAND = "#0ea5e9"        # sky blue — section accent bars, primary chart series
+BRAND = "#0ea5e9"        # sky blue — the single neutral color for every non-severity
+                         # chart (zone counts, trend line, period comparison); a
+                         # second series within the same chart is a tint of BRAND,
+                         # never a new hue, so color always means the same thing
 MUTED = "#64748b"
 RULE = "#e2e8f0"
 CARD_BG = "#f8fafc"
@@ -75,6 +77,13 @@ _POSITIVE = "#16a34a"    # fewer incidents than prior period
 _NEGATIVE = "#dc2626"    # more incidents than prior period
 
 _BOLD_MARKER = re.compile(r"\*\*(.+?)\*\*")
+
+
+def _tint(hex_color: str, alpha: float) -> colors.Color:
+    """Same hue, lower opacity — used to distinguish a secondary series
+    (e.g. 'prior period', 'unassigned zone') without introducing a new,
+    meaningless color into a chart."""
+    return colors.HexColor(hex_color).clone(alpha=alpha)
 
 
 def _register_fonts() -> tuple[str, str]:
@@ -96,6 +105,13 @@ def _register_fonts() -> tuple[str, str]:
 
 
 FONT_REGULAR, FONT_BOLD = _register_fonts()
+# Standard PDF base-14 fonts — always available, no embedding needed. Used
+# for timestamps and tabular figures throughout the report (metadata
+# "Generated at", the incident table's Time column, KPI values, chart axis
+# numbers) to visually tie those values back to the monitoring system they
+# came from, distinct from the sans-serif used for labels/prose.
+FONT_MONO = "Courier"
+FONT_MONO_BOLD = "Courier-Bold"
 
 
 def _styles() -> dict:
@@ -108,6 +124,14 @@ def _styles() -> dict:
         "Muted": ParagraphStyle(
             "ReportMuted", parent=base["Normal"], fontName=FONT_REGULAR,
             fontSize=8.5, leading=11, textColor=colors.HexColor(MUTED),
+        ),
+        "Mono": ParagraphStyle(
+            "ReportMono", parent=base["Normal"], fontName=FONT_MONO,
+            fontSize=9, leading=12, textColor=colors.HexColor(INK),
+        ),
+        "TableCell": ParagraphStyle(
+            "ReportTableCell", parent=base["Normal"], fontName=FONT_REGULAR,
+            fontSize=8, leading=10, textColor=colors.HexColor(INK),
         ),
         "SectionHeading": ParagraphStyle(
             "ReportSectionHeading", parent=base["Normal"], fontName=FONT_BOLD,
@@ -168,8 +192,7 @@ def render_incident_report(
         story.append(_caveats_box(data.data_caveats, styles))
     story.append(Spacer(1, 12))
     story.append(_kpi_band(data, styles))
-    story.extend(_heading_block("Key Insights", styles))
-    story.extend(_insights_bullets(data.insights, styles))
+    story.extend(_section("Key Insights", styles, _insights_bullets(data.insights, styles)))
 
     if data.summary.grand_total == 0:
         story.append(Spacer(1, 24))
@@ -177,29 +200,21 @@ def render_incident_report(
         doc.build(story, onFirstPage=_footer(data), onLaterPages=_footer(data))
         return buffer.getvalue()
 
-    story.extend(_heading_block("Severity Distribution", styles))
-    story.append(_severity_drawing(data.summary))
-
-    story.extend(_heading_block("Incidents by Zone", styles))
-    story.extend(_zone_section(data, styles))
-
-    story.extend(_heading_block("Trend Over Time", styles))
-    story.extend(_trend_section(data.trend, styles))
-
-    story.extend(_heading_block("Current vs Prior Period", styles))
-    story.extend(_compare_section(data.compare, styles))
-
-    story.extend(_heading_block("Incident Types", styles))
-    story.append(_type_table(data.summary, styles))
-
-    story.extend(_heading_block("Recent Priority Incidents", styles))
-    story.append(_incident_table(data.top_incidents, styles))
+    story.extend(_section("Severity Distribution", styles, [_severity_drawing(data.summary)]))
+    story.extend(_section("Incidents by Zone", styles, _zone_section(data, styles)))
+    story.extend(_section("Trend Over Time", styles, _trend_section(data.trend, styles)))
+    story.extend(_section("Current vs Prior Period", styles, _compare_section(data.compare, styles)))
+    story.extend(_section("Incident Types", styles, [_type_table(data.summary, styles)]))
+    story.extend(
+        _section_flowing(
+            "Recent Priority Incidents", styles, [_incident_table(data.top_incidents, styles)]
+        )
+    )
 
     if snapshots:
         appendix = _evidence_appendix(data.top_incidents, snapshots, styles)
         if appendix is not None:
-            story.extend(_heading_block("Evidence Appendix", styles))
-            story.append(appendix)
+            story.extend(_section("Evidence Appendix", styles, [appendix]))
 
     doc.build(story, onFirstPage=_footer(data), onLaterPages=_footer(data))
     return buffer.getvalue()
@@ -224,6 +239,27 @@ def _heading_block(text: str, styles: dict) -> list:
         )
     )
     return [Spacer(1, 16), row, Spacer(1, 8)]
+
+
+def _section(heading: str, styles: dict, flowables: list) -> list:
+    """Groups a section heading together with its immediate, fixed-height
+    content (a chart or a small, bounded table) in one KeepTogether unit,
+    so the heading can never get orphaned at the bottom of a page while
+    its content is pushed to the next one."""
+    return [KeepTogether([*_heading_block(heading, styles), *flowables])]
+
+
+def _section_flowing(heading: str, styles: dict, flowables: list, min_height: float = 110) -> list:
+    """Like _section, but for a table that may itself span several pages
+    (repeatRows keeps its header row visible on each). KeepTogether would
+    force the *entire* table onto a fresh page whenever it doesn't fit the
+    remaining space, trading the orphaned-heading bug for an even larger
+    blank gap. Instead, only guarantee the heading isn't placed unless at
+    least the header row plus one full data row can follow it on the same
+    page — 110pt covers heading (~46pt) + header + one wrapped data row
+    (~50pt) with headroom; a smaller margin let the table split right
+    after its header, stranding the heading above an empty page tail."""
+    return [CondPageBreak(min_height), *_heading_block(heading, styles), *flowables]
 
 
 def _bold_markup(text: str) -> str:
@@ -303,12 +339,14 @@ def _metadata_table(data: ReportData, styles: dict) -> Table:
     ]
     table_rows = []
     for label_a, value_a, label_b, value_b in rows:
+        style_a = styles["Mono"] if label_a == "Generated at" else styles["Body"]
+        style_b = styles["Mono"] if label_b == "Generated at" else styles["Body"]
         table_rows.append(
             [
                 Paragraph(f"<b>{escape(label_a)}</b>", styles["Muted"]),
-                Paragraph(escape(value_a), styles["Body"]),
+                Paragraph(escape(value_a), style_a),
                 Paragraph(f"<b>{escape(label_b)}</b>", styles["Muted"]),
-                Paragraph(escape(value_b), styles["Body"]),
+                Paragraph(escape(value_b), style_b),
             ]
         )
     table = Table(
@@ -400,8 +438,8 @@ class _KPICard(Flowable):
         c.setFillColor(colors.HexColor(MUTED))
         c.drawString(13, h - 16, _truncate(self.label.upper(), 22))
 
-        value_font_size = 19 if len(self.value) <= 9 else 14
-        c.setFont(FONT_BOLD, value_font_size)
+        value_font_size = 18 if len(self.value) <= 9 else 13
+        c.setFont(FONT_MONO_BOLD, value_font_size)
         c.setFillColor(colors.HexColor(self.value_color))
         c.drawString(13, h - 36, _truncate(self.value, 16))
 
@@ -479,7 +517,9 @@ def _style_value_axis(axis) -> None:
     axis.gridStrokeWidth = 0.5
     axis.strokeColor = colors.HexColor(RULE)
     axis.labels.fillColor = colors.HexColor(MUTED)
-    axis.labels.fontName = FONT_REGULAR
+    # Value axes are pure figures — monospace keeps them tabular and reads
+    # as instrument-panel data rather than prose.
+    axis.labels.fontName = FONT_MONO
     axis.labels.fontSize = 7
 
 
@@ -490,46 +530,82 @@ def _style_category_axis(axis, font_size: float = 6.5) -> None:
     axis.labels.fontSize = font_size
 
 
-def _severity_drawing(summary) -> Drawing:
+class _SeverityBar(Flowable):
+    """A single 100%-stacked horizontal bar: one segment per severity,
+    width proportional to its share of total incidents. Counts and
+    percentages are labeled directly on each segment when it's wide enough
+    to hold the text, and always repeated in the legend row underneath —
+    so every value stays readable even for a near-zero-count severity."""
+
+    _BAR_HEIGHT = 22
+    _LEGEND_GAP = 10
+    _LEGEND_HEIGHT = 16
+    _MIN_LABEL_PAD = 6
+
+    def __init__(self, width: float, counts: list[int]) -> None:
+        super().__init__()
+        self.width = width
+        self.counts = counts
+        self.total = sum(counts) or 1
+        self.height = self._BAR_HEIGHT + self._LEGEND_GAP + self._LEGEND_HEIGHT
+
+    def wrap(self, _avail_width: float, _avail_height: float) -> tuple[float, float]:
+        return self.width, self.height
+
+    def draw(self) -> None:
+        c = self.canv
+        bar_y = self._LEGEND_GAP + self._LEGEND_HEIGHT
+
+        x = 0.0
+        for sev_name, count in zip(_SEVERITY_ORDER, self.counts):
+            seg_width = count / self.total * self.width
+            if seg_width <= 0:
+                continue
+            c.setFillColor(colors.HexColor(SEVERITY_COLORS[sev_name]))
+            c.rect(x, bar_y, seg_width, self._BAR_HEIGHT, fill=1, stroke=0)
+
+            label = f"{count} · {count / self.total * 100:.0f}%"
+            label_width = c.stringWidth(label, FONT_MONO_BOLD, 8)
+            if label_width + self._MIN_LABEL_PAD <= seg_width:
+                c.setFont(FONT_MONO_BOLD, 8)
+                c.setFillColor(colors.white)
+                c.drawCentredString(x + seg_width / 2, bar_y + self._BAR_HEIGHT / 2 - 3, label)
+            x += seg_width
+
+        # thin white separators between segments so adjacent severities with
+        # similar hues (e.g. High/Medium) stay visually distinct
+        c.setStrokeColor(colors.white)
+        c.setLineWidth(1.25)
+        x = 0.0
+        for count in self.counts:
+            seg_width = count / self.total * self.width
+            x += seg_width
+            if seg_width > 0 and x < self.width - 0.5:
+                c.line(x, bar_y, x, bar_y + self._BAR_HEIGHT)
+
+        # legend row: swatch + name (sans) + count/percent (mono), one
+        # column per severity, always visible regardless of segment width
+        col_width = self.width / len(_SEVERITY_ORDER)
+        for i, (sev_name, count) in enumerate(zip(_SEVERITY_ORDER, self.counts)):
+            cx = i * col_width
+            c.setFillColor(colors.HexColor(SEVERITY_COLORS[sev_name]))
+            c.rect(cx, 4, 8, 8, fill=1, stroke=0)
+
+            c.setFont(FONT_BOLD, 8)
+            c.setFillColor(colors.HexColor(INK))
+            c.drawString(cx + 12, 5, sev_name)
+            name_width = c.stringWidth(sev_name, FONT_BOLD, 8)
+
+            c.setFont(FONT_MONO_BOLD, 8)
+            c.setFillColor(colors.HexColor(MUTED))
+            pct = count / self.total * 100
+            c.drawString(cx + 12 + name_width + 5, 5, f"{count} · {pct:.0f}%")
+
+
+def _severity_drawing(summary) -> Flowable:
     sev = summary.severity_counts
     counts = [getattr(sev, s) for s in _SEVERITY_ORDER]
-    total = sum(counts) or 1
-
-    d = Drawing(_CONTENT_WIDTH, 44 * mm)
-    pie = Pie()
-    pie.x = 12
-    pie.y = 6
-    pie.width = 40 * mm
-    pie.height = 40 * mm
-    pie.data = counts
-    pie.labels = None
-    pie.simpleLabels = False
-    pie.slices.strokeWidth = 1.25
-    pie.slices.strokeColor = colors.white
-    for i, sev_name in enumerate(_SEVERITY_ORDER):
-        pie.slices[i].fillColor = colors.HexColor(SEVERITY_COLORS[sev_name])
-    d.add(pie)
-
-    legend = Legend()
-    legend.x = 66 * mm
-    legend.y = 34 * mm
-    legend.dx = 9
-    legend.dy = 9
-    legend.dxTextSpace = 6
-    legend.columnMaximum = len(_SEVERITY_ORDER)
-    legend.fontName = FONT_BOLD
-    legend.fontSize = 9.5
-    legend.leading = 16
-    legend.alignment = "left"
-    legend.colorNamePairs = [
-        (
-            colors.HexColor(SEVERITY_COLORS[sev_name]),
-            f"{sev_name}   {counts[i]} · {counts[i] / total * 100:.0f}%",
-        )
-        for i, sev_name in enumerate(_SEVERITY_ORDER)
-    ]
-    d.add(legend)
-    return d
+    return _SeverityBar(_CONTENT_WIDTH, counts)
 
 
 def _zone_section(data: ReportData, styles: dict) -> list:
@@ -550,30 +626,34 @@ def _zone_section(data: ReportData, styles: dict) -> list:
         return elements
 
     zones = summary.zone_totals
-    d = Drawing(_CONTENT_WIDTH, 55 * mm)
+    d = Drawing(_CONTENT_WIDTH, 60 * mm)
     chart = VerticalBarChart()
     chart.x = 12 * mm
-    chart.y = 14 * mm
+    chart.y = 20 * mm
     chart.width = _CONTENT_WIDTH - 20 * mm
-    chart.height = 36 * mm
+    chart.height = 32 * mm
     chart.data = [[z.total for z in zones]]
-    chart.categoryAxis.categoryNames = [_truncate(z.zone_name, 14) for z in zones]
-    _style_category_axis(chart.categoryAxis)
-    if len(zones) > 6:
-        chart.categoryAxis.labels.angle = 30
-        chart.categoryAxis.labels.dy = -8
-        chart.categoryAxis.labels.dx = -4
+    # Font and per-line width budget scale down as more zones share the same
+    # chart width, so a wrapped label can never bleed into its neighbor.
+    category_font_size = 7 if len(zones) <= 8 else 6
+    label_budget = (chart.width / len(zones)) * 0.92
+    chart.categoryAxis.categoryNames = [
+        _wrap_label(z.zone_name, label_budget, FONT_REGULAR, category_font_size) for z in zones
+    ]
+    _style_category_axis(chart.categoryAxis, font_size=category_font_size)
+    chart.categoryAxis.labels.leading = category_font_size + 1.5
     chart.valueAxis.valueMin = 0
     _style_value_axis(chart.valueAxis)
-    chart.barLabels.fontName = FONT_BOLD
+    chart.barLabels.fontName = FONT_MONO_BOLD
     chart.barLabels.fontSize = 7
     chart.barLabels.fillColor = colors.HexColor(INK)
     chart.barLabels.dy = 4
     chart.barLabelFormat = "%d"
     chart.bars.strokeWidth = 0
     for i, zone in enumerate(zones):
-        color = UNASSIGNED_COLOR if zone.zone_id is None else ZONE_PALETTE[i % len(ZONE_PALETTE)]
-        chart.bars[(0, i)].fillColor = colors.HexColor(color)
+        # Single neutral brand color everywhere — an unassigned-zone bar is
+        # a lighter tint of the same hue, never a different, meaningless color.
+        chart.bars[(0, i)].fillColor = _tint(BRAND, 0.45) if zone.zone_id is None else colors.HexColor(BRAND)
     d.add(chart)
     elements.append(d)
     return elements
@@ -593,6 +673,7 @@ def _trend_section(trend, styles: dict) -> list:
     chart.data = [totals]
     chart.categoryAxis.categoryNames = [p.date for p in trend.points]
     _style_category_axis(chart.categoryAxis)
+    chart.categoryAxis.labels.fontName = FONT_MONO  # dates are data, not prose
     if len(trend.points) > 12:
         chart.categoryAxis.labels.angle = 45
         chart.categoryAxis.labels.dy = -10
@@ -640,7 +721,7 @@ def _compare_section(compare, styles: dict) -> list:
     chart.bars.strokeWidth = 0
     for i in range(len(points)):
         chart.bars[(0, i)].fillColor = colors.HexColor(BRAND)
-        chart.bars[(1, i)].fillColor = colors.HexColor(UNASSIGNED_COLOR)
+        chart.bars[(1, i)].fillColor = _tint(BRAND, 0.4)
 
     legend = Legend()
     legend.x = 16 * mm
@@ -655,7 +736,7 @@ def _compare_section(compare, styles: dict) -> list:
     legend.alignment = "left"
     legend.colorNamePairs = [
         (colors.HexColor(BRAND), "Current period"),
-        (colors.HexColor(UNASSIGNED_COLOR), "Prior period"),
+        (_tint(BRAND, 0.4), "Prior period"),
     ]
 
     outer = Drawing(_CONTENT_WIDTH, drawing_height)
@@ -686,7 +767,7 @@ def _type_table(summary, styles: dict) -> Table:
         rows.append(
             [
                 t.category.upper(),
-                t.type,
+                Paragraph(escape(t.type), styles["TableCell"]),
                 str(t.count),
                 f"{t.count / total * 100:.0f}%",
             ]
@@ -694,7 +775,11 @@ def _type_table(summary, styles: dict) -> Table:
     if len(rows) == 1:
         rows.append(["—", "No incident types recorded.", "", ""])
 
-    table = Table(rows, colWidths=[25 * mm, _CONTENT_WIDTH - 25 * mm - 25 * mm - 25 * mm, 25 * mm, 25 * mm])
+    table = Table(
+        rows,
+        colWidths=[25 * mm, _CONTENT_WIDTH - 25 * mm - 25 * mm - 25 * mm, 25 * mm, 25 * mm],
+        repeatRows=1,
+    )
     table.setStyle(
         TableStyle(
             [
@@ -709,6 +794,8 @@ def _type_table(summary, styles: dict) -> Table:
                 ("TOPPADDING", (0, 0), (-1, -1), 5),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
                 ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                # Count / % of total are pure figures — monospace for tabular alignment
+                ("FONTNAME", (2, 1), (3, -1), FONT_MONO),
             ]
         )
     )
@@ -724,18 +811,19 @@ def _incident_table(rows: list[ReportIncidentRow], styles: dict) -> Table:
                 row.timestamp_local,
                 row.severity,
                 row.category,
-                row.type,
-                row.zone_name,
-                row.camera_label,
+                Paragraph(escape(row.type), styles["TableCell"]),
+                Paragraph(escape(row.zone_name), styles["TableCell"]),
+                Paragraph(escape(row.camera_label), styles["TableCell"]),
             ]
         )
     if len(table_rows) == 1:
         table_rows.append(["—", "—", "—", "No incidents in this period.", "—", "—"])
 
-    col_widths = [
-        28 * mm, 18 * mm, 18 * mm, _CONTENT_WIDTH - 28 * mm - 18 * mm - 18 * mm - 28 * mm - 28 * mm,
-        28 * mm, 28 * mm,
-    ]
+    # Type/Zone/Camera hold free text of unpredictable length, so they're
+    # wrapped in Paragraphs (above) rather than left as plain strings —
+    # plain-string cells don't wrap and will visually overlap the next
+    # column once a zone or camera name outgrows its fixed width.
+    col_widths = [32 * mm, 18 * mm, 16 * mm, 40 * mm, 40 * mm, _CONTENT_WIDTH - 146 * mm]
     table = Table(table_rows, colWidths=col_widths, repeatRows=1)
     style_commands = [
         ("FONTNAME", (0, 0), (-1, -1), FONT_REGULAR),
@@ -749,6 +837,11 @@ def _incident_table(rows: list[ReportIncidentRow], styles: dict) -> Table:
         ("TOPPADDING", (0, 0), (-1, -1), 4.5),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 4.5),
         ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        # Time is a timestamp — monospace ties it visually to the source data;
+        # sized slightly down from the other columns' 8pt so it reliably fits
+        # its column (Courier runs wider per-character than the sans body font)
+        ("FONTNAME", (0, 1), (0, -1), FONT_MONO),
+        ("FONTSIZE", (0, 1), (0, -1), 7.5),
     ]
     for i, row in enumerate(rows, start=1):
         color = SEVERITY_COLORS.get(row.severity)
@@ -817,6 +910,47 @@ def _truncate(text: str, max_len: int) -> str:
     if len(text) <= max_len:
         return text
     return text[: max_len - 1] + "…"
+
+
+def _wrap_label(
+    text: str, max_width_pts: float, font_name: str = FONT_REGULAR, font_size: float = 7
+) -> str:
+    """Wraps a chart category label onto two lines at a word boundary
+    instead of truncating it — full zone names should always be readable.
+    Both lines are sized to the actual per-category width (via stringWidth,
+    not a fixed character count) so labels never bleed into the
+    neighboring category regardless of how many bars share the chart. A
+    third line's worth of leftover text (rare — most zone names are a
+    handful of words) is ellipsized rather than left to overflow."""
+    if pdfmetrics.stringWidth(text, font_name, font_size) <= max_width_pts:
+        return text
+    words = text.split(" ")
+    if len(words) == 1:
+        return text
+
+    def _fill(candidates: list[str]) -> tuple[str, int]:
+        line = ""
+        used = 0
+        for word in candidates:
+            candidate = f"{line} {word}".strip()
+            if not line or pdfmetrics.stringWidth(candidate, font_name, font_size) <= max_width_pts:
+                line = candidate
+                used += 1
+            else:
+                break
+        return line, used
+
+    line1, used1 = _fill(words)
+    remaining = words[used1:]
+    if not remaining:
+        return line1
+
+    line2, used2 = _fill(remaining)
+    if used2 < len(remaining):
+        while line2 and pdfmetrics.stringWidth(f"{line2}…", font_name, font_size) > max_width_pts:
+            line2 = line2.rsplit(" ", 1)[0] if " " in line2 else line2[:-1]
+        line2 = f"{line2}…" if line2 else "…"
+    return f"{line1}\n{line2}"
 
 
 def _footer(data: ReportData):

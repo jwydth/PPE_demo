@@ -94,7 +94,7 @@ export async function analyzeVideo(
 }
 
 export async function getViolations(): Promise<ViolationReport[]> {
-  const res = await fetch(`${API_URL}/violations`);
+  const res = await fetch(`${API_URL}/violations?limit=500`);
   if (!res.ok) throw await readError(res, "Could not load PPE violations");
 
   const payload = (await res.json()) as ViolationReport[];
@@ -113,7 +113,7 @@ export async function getViolation(violationId: number): Promise<ViolationDetail
 }
 
 export async function getZoneViolations(): Promise<ZoneViolation[]> {
-  const res = await fetch(`${API_URL}/zone-violations`);
+  const res = await fetch(`${API_URL}/zone-violations?limit=500`);
   if (!res.ok) throw await readError(res, "Could not load zone violations");
 
   const payload = (await res.json()) as ZoneViolation[];
@@ -132,7 +132,7 @@ export async function getZoneViolation(zoneViolationId: number): Promise<ZoneVio
 }
 
 export async function getBehaviorIncidents(): Promise<BehaviorIncident[]> {
-  const res = await fetch(`${API_URL}/behavior-incidents?limit=100`);
+  const res = await fetch(`${API_URL}/behavior-incidents?limit=500`);
   if (!res.ok) throw await readError(res, "Could not load behavior incidents");
 
   const payload = (await res.json()) as BehaviorIncident[];
