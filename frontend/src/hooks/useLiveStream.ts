@@ -34,8 +34,8 @@ export const emptyStreamData = (): StreamData => ({
   tracking_overlay: {
     fps: 30,
     stride: 1,
-    frame_width: 1000,
-    frame_height: 1000,
+    frame_width: 16,
+    frame_height: 9,
     frames: [],
   },
   live_frame: null,
@@ -96,6 +96,64 @@ export function useLiveStream({
   const reconnectAttemptsRef = useRef<Record<string, number>>({});
   const MAX_RECONNECT_ATTEMPTS = 5;
 
+  // Mirrors of the latest props/state, kept current every render so
+  // long-lived callbacks (ws.onopen fires whenever the browser decides the
+  // handshake is done, not on a React render) can read fresh values instead
+  // of whatever was captured in their closure at connect time.
+  const camerasRef = useRef(cameras);
+  const cameraFeatureMapRef = useRef(cameraFeatureMap);
+  const ppeEnabledRef = useRef(ppeEnabled);
+  const zoneEnabledRef = useRef(zoneEnabled);
+  const fallEnabledRef = useRef(fallEnabled);
+  const viewModeRef = useRef(viewMode);
+  const selectedCameraIdsRef = useRef(selectedCameraIds);
+  useEffect(() => {
+    camerasRef.current = cameras;
+    cameraFeatureMapRef.current = cameraFeatureMap;
+    ppeEnabledRef.current = ppeEnabled;
+    zoneEnabledRef.current = zoneEnabled;
+    fallEnabledRef.current = fallEnabled;
+    viewModeRef.current = viewMode;
+    selectedCameraIdsRef.current = selectedCameraIds;
+  });
+
+  // Single source of truth for what a connection's feature flags should be
+  // right now, from the per-camera config once it has loaded, falling back
+  // to the generic (non-per-camera) toggles until then.
+  const buildSettingsMessage = (videoName: string) => {
+    const cams = camerasRef.current;
+    const featureMap = cameraFeatureMapRef.current;
+
+    let isViewing = false;
+    if (viewModeRef.current === "matrix" && selectedCameraIdsRef.current && cams) {
+      const cam = cams.find((c) => c.rtspUrl === videoName);
+      isViewing = cam ? selectedCameraIdsRef.current.includes(cam.id) : false;
+    } else {
+      isViewing = videoName === viewedVideoNameRef.current;
+    }
+
+    const cam = cams?.find((c) => c.rtspUrl === videoName);
+    const featureDict = cam && featureMap ? featureMap[cam.id] : null;
+
+    const ppe = featureDict ? featureDict["ppe_detection"] : ppeEnabledRef.current;
+    const zone = featureDict ? featureDict["zone_monitoring"] : zoneEnabledRef.current;
+    const fall = featureDict
+      ? (featureDict["behavior_detection"] ?? featureDict["fall_detection"])
+      : fallEnabledRef.current;
+
+    return {
+      event: "update_settings",
+      data: {
+        features: {
+          ppe_detection: ppe !== undefined ? ppe : true,
+          zone_monitoring: zone !== undefined ? zone : false,
+          behavior_detection: fall !== undefined ? fall : false,
+        },
+        viewing: isViewing,
+      },
+    };
+  };
+
   // Object URL for the most recent binary JPEG frame received per stream (see
   // ws.onmessage below — the server sends the frame as a raw binary WS message
   // immediately before the "frame" JSON envelope that references it via
@@ -124,38 +182,19 @@ export function useLiveStream({
   const [videoElement, setVideoElement] = useState<HTMLVideoElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
 
-  // Synchronize settings across all open connections
+  // Synchronize settings across all open connections. This only reaches
+  // sockets that are already OPEN — a socket that's still mid-handshake when
+  // this fires (e.g. per-camera feature config resolves before the WS
+  // handshake completes) won't be caught here, since nothing re-runs this
+  // effect purely because a socket later transitions to OPEN. That gap is
+  // closed by ws.onopen in startStreaming below, which sends the same
+  // freshly-computed settings the instant the connection becomes ready —
+  // whichever of the two "finishes last" ends up delivering the correct
+  // settings, so the connection can never get stuck on stale defaults.
   useEffect(() => {
     Object.entries(wsRefs.current).forEach(([vidName, ws]) => {
       if (ws.readyState === WebSocket.OPEN) {
-        let isViewing = false;
-        if (viewMode === "matrix" && selectedCameraIds && cameras) {
-          const cam = cameras.find((c) => c.rtspUrl === vidName);
-          isViewing = cam ? selectedCameraIds.includes(cam.id) : false;
-        } else {
-          isViewing = vidName === viewedVideoNameRef.current;
-        }
-
-        const cam = cameras?.find((c) => c.rtspUrl === vidName);
-        const featureDict = cam && cameraFeatureMap ? cameraFeatureMap[cam.id] : null;
-
-        const ppe = featureDict ? featureDict["ppe_detection"] : ppeEnabled;
-        const zone = featureDict ? featureDict["zone_monitoring"] : zoneEnabled;
-        const fall = featureDict ? (featureDict["behavior_detection"] ?? featureDict["fall_detection"]) : fallEnabled;
-
-        ws.send(
-          JSON.stringify({
-            event: "update_settings",
-            data: {
-              features: {
-                ppe_detection: ppe !== undefined ? ppe : true,
-                zone_monitoring: zone !== undefined ? zone : false,
-                behavior_detection: fall !== undefined ? fall : false,
-              },
-              viewing: isViewing,
-            },
-          }),
-        );
+        ws.send(JSON.stringify(buildSettingsMessage(vidName)));
       }
     });
   }, [fallEnabled, ppeEnabled, zoneEnabled, viewedVideoName, viewMode, selectedCameraIds, cameras, cameraFeatureMap]);
@@ -223,34 +262,7 @@ export function useLiveStream({
     // Instantly toggle viewed stream frames on the backend WebSockets
     Object.entries(wsRefs.current).forEach(([vidName, ws]) => {
       if (ws.readyState === WebSocket.OPEN) {
-        let isViewing = false;
-        if (viewMode === "matrix" && selectedCameraIds && cameras) {
-          const cam = cameras.find((c) => c.rtspUrl === vidName);
-          isViewing = cam ? selectedCameraIds.includes(cam.id) : false;
-        } else {
-          isViewing = vidName === url;
-        }
-
-        const cam = cameras?.find((c) => c.rtspUrl === vidName);
-        const featureDict = cam && cameraFeatureMap ? cameraFeatureMap[cam.id] : null;
-
-        const ppe = featureDict ? featureDict["ppe_detection"] : ppeEnabled;
-        const zone = featureDict ? featureDict["zone_monitoring"] : zoneEnabled;
-        const fall = featureDict ? (featureDict["behavior_detection"] ?? featureDict["fall_detection"]) : fallEnabled;
-
-        ws.send(
-          JSON.stringify({
-            event: "update_settings",
-            data: {
-              features: {
-                ppe_detection: ppe !== undefined ? ppe : true,
-                zone_monitoring: zone !== undefined ? zone : false,
-                behavior_detection: fall !== undefined ? fall : false,
-              },
-              viewing: isViewing,
-            },
-          }),
-        );
+        ws.send(JSON.stringify(buildSettingsMessage(vidName)));
       }
     });
   };
@@ -284,6 +296,18 @@ export function useLiveStream({
       const ws = new WebSocket(wsUrl);
       ws.binaryType = "blob";
       wsRefs.current[videoName] = ws;
+
+      // The URL query params above reflect whatever cameraFeatureMap held at
+      // call time, which can still be pre-fetch (this connection is often
+      // opened by syncCameraConnections before the per-camera feature GET
+      // resolves) — see buildSettingsMessage's doc comment for why the
+      // "Synchronize settings" effect alone can't be relied on to correct
+      // that. Sending fresh settings the instant the handshake completes
+      // guarantees this connection is never left running with stale
+      // ppe/zone/fall flags, regardless of which resolves first.
+      ws.onopen = () => {
+        ws.send(JSON.stringify(buildSettingsMessage(videoName)));
+      };
 
       setIsStreaming(true);
       setIsLive(isAutoLive);
@@ -364,8 +388,8 @@ export function useLiveStream({
             ...prev,
             [videoName]: {
               frames: appendOverlayRing(prev[videoName]?.frames ?? [], timestampedFrames),
-              frameWidth: data.frame_width || 1000,
-              frameHeight: data.frame_height || 1000,
+              frameWidth: data.frame_width || 16,
+              frameHeight: data.frame_height || 9,
               fallDetections: appendBehaviorRing(
                 prev[videoName]?.fallDetections ?? [],
                 timestampedBehavior,

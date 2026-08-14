@@ -719,7 +719,8 @@ async def real_video_pipeline(
                     break
                 control_flags = get_flags()
                 if not (control_flags[0] or control_flags[1]):
-                    await sync_behavior_worker(control_flags[2])
+                    curr_fall = control_flags[2]
+                    await sync_behavior_worker(curr_fall)
                     if behavior_worker is not None:
                         (
                             last_fall_payload,
@@ -735,6 +736,43 @@ async def real_video_pipeline(
                             )
                     while not sign_events.empty():
                         yield sign_events.get_nowait()
+
+                    # Neither PPE nor zone monitoring needs this frame, but the
+                    # live preview and behavior summary still do — without this,
+                    # a camera viewed with PPE/zone both off (e.g. Behavior
+                    # Detection alone) never gets a "frame" event and the UI
+                    # freezes on the last image with stale/no aspect ratio.
+                    if ppe_gate.accept(packet.frame_index):
+                        viewed = is_viewed()
+                        metadata_only = bool(settings_state and settings_state.get("metadata_only"))
+                        has_image = is_stream and viewed and not metadata_only
+                        image_bytes = (
+                            await asyncio.to_thread(_encode_frame_to_jpeg, packet.image)
+                            if has_image
+                            else None
+                        )
+                        frame_height, frame_width = packet.image.shape[:2]
+                        yield _stream_event(
+                            "frame",
+                            {
+                                "frames": [],
+                                "processed_frames": processed_frames,
+                                "frame_width": frame_width,
+                                "frame_height": frame_height,
+                                "fall_summary": last_fall_payload.get("summary") if curr_fall and last_fall_payload and viewed else None,
+                                "fall_detections": last_fall_payload.get("detections") if curr_fall and last_fall_payload and viewed else [],
+                                "fall_unavailable": fall_unavailable_message if curr_fall and viewed else None,
+                                "behavior_timeline": (
+                                    last_fall_payload.get("timeline")
+                                    if curr_fall and last_fall_payload and viewed
+                                    else None
+                                ),
+                            },
+                            packet=packet,
+                            frame_index=packet.frame_index,
+                            has_image=has_image,
+                            image_bytes=image_bytes,
+                        )
                     continue
                 if not control_flags[2]:
                     await sync_behavior_worker(False)

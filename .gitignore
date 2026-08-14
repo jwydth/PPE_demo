@@ -12,6 +12,7 @@ backend/weights/*.pt
 # .onnx are just export intermediates — neither belongs in git.
 backend/weights/*.engine
 backend/weights/*.onnx
+backend/weights/*.joblib
 backend/.venv
 backend/venv
 video_debug.log
@@ -26,3 +27,4 @@ task.md
 .codex
 .agents
 AGENTS.md
+skills
