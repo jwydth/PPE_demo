@@ -14,7 +14,7 @@ import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import cv2
 import numpy as np
@@ -374,6 +374,7 @@ class FallLiveSession:
         frame_index: int,
         source_name: str | None,
         timestamp_seconds: float | None = None,
+        ignore_detection: Callable[[dict[str, Any]], bool] | None = None,
     ) -> dict[str, Any]:
         """Consume an already-tracked YOLO-Pose result without re-running pose."""
         # Report classifier work performed for this frame only. Reusing the
@@ -382,6 +383,8 @@ class FallLiveSession:
         self.last_classifier_ms = 0.0
         self.last_pose_repaired_samples = 0
         detections = _pose_detections(result)
+        if ignore_detection is not None:
+            detections = [detection for detection in detections if not ignore_detection(detection)]
         for track_id, window in self.windows.items():
             window.append(None)
             self.missing_samples_by_track[track_id] += 1

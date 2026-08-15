@@ -53,6 +53,7 @@ from app.services.zone_service import (
     ZoneViolationRecord,
     load_zones,
     get_person_foot_point,
+    is_point_in_ignore_zone,
     check_zone_incursion,
     record_zone_violation,
 )
@@ -691,6 +692,7 @@ async def real_video_pipeline(
                     fps=fps,
                     detector=_fall_detector,
                     render_store=render_store,
+                    ignore_zones_provider=lambda: zones,
                 )
                 behavior_worker.start()
                 behavior_separate = True
@@ -878,6 +880,18 @@ async def real_video_pipeline(
             persons, helmets, vests, cleaning_coveralls = _extract_result_boxes(result)
 
             response = _build_response(persons, helmets, vests, cleaning_coveralls, 0.0)
+            if zones:
+                response.persons = [
+                    person
+                    for person in response.persons
+                    if not is_point_in_ignore_zone(
+                        zones,
+                        get_person_foot_point(person, frame_width, frame_height),
+                    )
+                ]
+                response.summary.total_persons = len(response.persons)
+                response.summary.compliant = sum(person.compliant for person in response.persons)
+                response.summary.violations = response.summary.total_persons - response.summary.compliant
             if render_store is not None and packet is not None:
                 for person in response.persons:
                     pose_track_id = render_store.match_pose_track(packet, person.bbox)

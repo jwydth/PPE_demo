@@ -99,7 +99,7 @@ export interface TrackingOverlayFrame {
   camera_zone_view_id?: number;
   physical_zone_id?: number;
   zone_name?: string;
-  zone_type?: "RESTRICTED" | "WALKWAY" | "SLIPPERY";
+  zone_type?: "RESTRICTED" | "WALKWAY" | "SLIPPERY" | "IGNORE";
   behavior?: {
     status: "unknown" | "others" | "running" | "falling";
     score: number;

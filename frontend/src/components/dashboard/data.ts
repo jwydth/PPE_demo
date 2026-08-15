@@ -21,7 +21,7 @@ export type SafetyMetric = {
 // route and component are still in place, just not linked from the top bar.
 export const navigation = [
   { label: "Camera Feeds", active: true, icon: Camera },
-  { label: "Incident Log", active: false, icon: ClipboardCheck },
+  { label: "Live Incident Panel", active: false, icon: ClipboardCheck },
   { label: "Analytics", active: false, icon: BarChart3 },
 ];
 

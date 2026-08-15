@@ -160,6 +160,7 @@ export function ZoneConfigPanel({
               <option value="RESTRICTED">Restricted</option>
               <option value="WALKWAY">Walkway</option>
               <option value="SLIPPERY">Slippery</option>
+              <option value="IGNORE">Exclusion Zone</option>
             </select>
           </label>
           <div className="grid grid-cols-2 gap-2">

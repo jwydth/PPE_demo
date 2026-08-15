@@ -8,9 +8,8 @@ import {
   RefreshCw,
   Settings,
   Trash2,
-  Shield,
-  Eye,
-  Activity,
+  MapPinned,
+  PersonStanding,
 } from "lucide-react";
 import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -80,7 +79,32 @@ const zoneColors: Record<ZoneType, string> = {
   RESTRICTED: "#dc2626",
   WALKWAY: "#0284c7",
   SLIPPERY: "#f59e0b",
+  IGNORE: "#64748b",
 };
+
+function SafetyVestIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="24"
+      height="24"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.25"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d="m9 3-2 4-3 2v12h16V9l-3-2-2-4" />
+      <path d="M9 3v4l3 2 3-2V3" />
+      <path d="M12 9v12" />
+      <path d="M5 13h14" />
+      <path d="M5 17h14" />
+    </svg>
+  );
+}
 
 function filterTrackingOverlay(
   overlay: TrackingOverlay | undefined,
@@ -634,13 +658,15 @@ function CameraPanel({
         for (let j = i + 1; j < zoneDrawing.zonesReadyToSave.length; j++) {
           const typeA = zoneDrawing.zonesReadyToSave[i].type;
           const typeB = zoneDrawing.zonesReadyToSave[j].type;
-          const isWalkwaySlipperyPair =
-             (typeA === "WALKWAY" && typeB === "SLIPPERY") ||
-             (typeA === "SLIPPERY" && typeB === "WALKWAY");
+          const allowsOverlap =
+            typeA === "IGNORE" ||
+            typeB === "IGNORE" ||
+            (typeA === "WALKWAY" && typeB === "SLIPPERY") ||
+            (typeA === "SLIPPERY" && typeB === "WALKWAY");
 
           if (
             typeA !== typeB &&
-            !isWalkwaySlipperyPair &&
+            !allowsOverlap &&
             doPolygonsOverlap(zoneDrawing.zonesReadyToSave[i].points, zoneDrawing.zonesReadyToSave[j].points)
           ) {
             hasOverlap = true;
@@ -651,7 +677,7 @@ function CameraPanel({
       }
 
       if (hasOverlap) {
-        setError("Cannot run analysis: Zones of different types (excluding Walkway & Slippery) overlap. Please adjust the vertices to avoid overlap.");
+        setError("Cannot run analysis: Only Exclusion Zones and Walkway/Slippery zones may overlap. Please adjust the vertices to avoid overlap.");
         setPhase("error");
         return;
       }
@@ -1142,7 +1168,7 @@ function CameraPanel({
                                           : "bg-slate-900/80 text-slate-400 border-slate-700/50 hover:bg-slate-800"
                                       }`}
                                     >
-                                      <Shield className="size-3.5" />
+                                      <SafetyVestIcon className="size-4" />
                                     </button>
                                     <button
                                       type="button"
@@ -1157,7 +1183,7 @@ function CameraPanel({
                                           : "bg-slate-900/80 text-slate-400 border-slate-700/50 hover:bg-slate-800"
                                       }`}
                                     >
-                                      <Eye className="size-3.5" />
+                                      <MapPinned className="size-3.5" />
                                     </button>
                                     <button
                                       type="button"
@@ -1172,7 +1198,7 @@ function CameraPanel({
                                           : "bg-slate-900/80 text-slate-400 border-slate-700/50 hover:bg-slate-800"
                                       }`}
                                     >
-                                      <Activity className="size-3.5" />
+                                      <PersonStanding className="size-3.5" />
                                     </button>
                                   </div>
 
@@ -1710,7 +1736,7 @@ export function DashboardShell() {
 
   const pageTitle =
     activeView === "violations"
-      ? "Incident Log"
+      ? "Live Incident Panel"
       : activeView === "factory3d"
         ? "Factory 3D Map"
         : activeView === "analytics"
@@ -1718,7 +1744,7 @@ export function DashboardShell() {
           : "Packaging Line 1";
   const pageDescription =
     activeView === "violations"
-      ? "Review PPE, zone, and behavior incidents recorded by the backend stores."
+      ? "Review live PPE, zone, and behavior incidents recorded by the backend stores."
       : activeView === "factory3d"
         ? "Explore the factory blueprint in 3D and drill into a zone's incident log."
         : activeView === "analytics"

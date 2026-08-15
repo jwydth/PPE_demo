@@ -237,6 +237,10 @@ export function AnalyticsDashboard({
     staleTime: 60_000,
   });
   const cameraOptions = camerasQuery.data ?? [];
+  const cameraNameById = useMemo(
+    () => new Map(cameraOptions.map((camera) => [camera.id, camera.name])),
+    [cameraOptions],
+  );
 
   // Diffs each new feed fetch against the previous one to flag newly-arrived
   // rows for the fade-in animation, clearing the flag after FRESH_ROW_MS. Kept
@@ -386,7 +390,7 @@ export function AnalyticsDashboard({
               className="flex h-full items-center gap-2 border-b-2 border-transparent px-4 text-xs font-semibold uppercase tracking-wide text-slate-400 transition hover:text-slate-100"
             >
               <ClipboardCheck className="size-4" aria-hidden="true" />
-              Incident Log
+              Live Incident Panel
             </Link>
             <span className="flex h-full items-center gap-2 border-b-2 border-lime-200 px-4 text-xs font-semibold uppercase tracking-wide text-lime-200">
               <Bell className="size-4" aria-hidden="true" />
@@ -629,7 +633,7 @@ export function AnalyticsDashboard({
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-base font-semibold text-slate-900">{item.type}</p>
                         <p className="truncate font-mono text-xs text-slate-500">
-                          {item.zone_name} · {item.camera_label} · {timeAgo(item.timestamp, now)}
+                          {item.zone_name} · {cameraNameById.get(item.camera_id ?? -1) ?? "Unknown camera"} · {timeAgo(item.timestamp, now)}
                         </p>
                       </div>
                       <span className={`shrink-0 rounded px-2 py-1 text-xs font-semibold ring-1 ${badge.className}`}>

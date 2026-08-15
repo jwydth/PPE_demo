@@ -375,6 +375,17 @@ def check_zone_incursion(
     return incursion_zones
 
 
+def is_point_in_ignore_zone(
+    zones: list[ZoneViolationRecord],
+    test_point: tuple,
+) -> bool:
+    """Return whether a point belongs to a camera-specific ignore zone."""
+    return any(
+        zone.zone_type == "IGNORE" and zone.point_in_zone(test_point)
+        for zone in zones
+    )
+
+
 def record_zone_violation(
     worker_state,
     zone: ZoneViolationRecord,

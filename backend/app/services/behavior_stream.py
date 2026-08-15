@@ -10,7 +10,7 @@ import asyncio
 import logging
 import time
 from contextlib import suppress
-from typing import Any
+from typing import Any, Callable
 
 from app.core.config import settings
 from app.services.annotated_stream import AnnotatedStateStore
@@ -20,6 +20,7 @@ from app.services.behavior_inference import (
 )
 from app.services.fall_detector import FallDetector, FallModelUnavailable
 from app.services.frame_hub import FrameHubRegistry, frame_hubs
+from app.services.zone_service import COORD_SCALE, ZoneViolationRecord, is_point_in_ignore_zone
 from app.services.stream_health import (
     increment_stream_health,
     mark_stream_event,
@@ -41,6 +42,7 @@ class BehaviorStreamWorker:
         scheduler: BehaviorInferenceScheduler | None = None,
         hubs: FrameHubRegistry | None = None,
         render_store: AnnotatedStateStore | None = None,
+        ignore_zones_provider: Callable[[], list[ZoneViolationRecord]] | None = None,
     ) -> None:
         self.source = source
         self.source_name = source_name
@@ -49,6 +51,7 @@ class BehaviorStreamWorker:
         self.scheduler = scheduler or get_behavior_scheduler(detector)
         self.hubs = hubs or frame_hubs
         self.render_store = render_store
+        self.ignore_zones_provider = ignore_zones_provider
         self.session = detector.create_live_session(fps=self.fps, frame_stride=1)
         self.latest_payload: dict[str, Any] | None = None
         self.unavailable: str | None = None
@@ -78,6 +81,18 @@ class BehaviorStreamWorker:
         with suppress(asyncio.CancelledError):
             await self._task
         self._task = None
+
+    def _is_detection_ignored(self, detection: dict[str, Any], frame_width: int, frame_height: int) -> bool:
+        if self.ignore_zones_provider is None:
+            return False
+        bbox = detection.get("bbox")
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            return False
+        test_point = (
+            ((float(bbox[0]) + float(bbox[2])) / 2 / frame_width) * COORD_SCALE,
+            (float(bbox[3]) / frame_height) * COORD_SCALE,
+        )
+        return is_point_in_ignore_zone(self.ignore_zones_provider(), test_point)
 
     async def _run(self) -> None:
         subscription = None
@@ -163,6 +178,11 @@ class BehaviorStreamWorker:
                             frame_index=frame_index,
                             source_name=self.source_name,
                             timestamp_seconds=timestamp,
+                            ignore_detection=lambda detection: self._is_detection_ignored(
+                                detection,
+                                frame.shape[1],
+                                frame.shape[0],
+                            ),
                         )
                         timeline = {
                             "stream_epoch": packet.stream_epoch,

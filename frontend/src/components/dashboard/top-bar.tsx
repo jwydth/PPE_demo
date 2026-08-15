@@ -6,7 +6,7 @@ export type DashboardView = "feeds" | "violations" | "factory3d" | "analytics";
 
 const navViewByLabel: Record<string, DashboardView> = {
   "Camera Feeds": "feeds",
-  "Incident Log": "violations",
+  "Live Incident Panel": "violations",
   "3D Map": "factory3d",
   "Analytics": "analytics",
 };

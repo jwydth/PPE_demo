@@ -124,9 +124,8 @@ export function useZoneDrawing({
   const [surfaceElement, setSurfaceElement] = useState<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    // WALKWAY tolerates longer presence; RESTRICTED and SLIPPERY are hazard
-    // zones monitored with the shorter dwell threshold.
-    setDwellThresholdSeconds(zoneType === "WALKWAY" ? 3 : 1.5);
+    // Exclusion zones do not generate events; Walkway tolerates longer presence.
+    setDwellThresholdSeconds(zoneType === "IGNORE" ? 0 : zoneType === "WALKWAY" ? 3 : 1.5);
   }, [zoneType]);
 
   useEffect(() => {
@@ -162,7 +161,7 @@ export function useZoneDrawing({
             ...zonesForVideo,
             {
               id: "draft",
-              name: zoneName || `${zoneType} Zone`,
+              name: zoneName || (zoneType === "IGNORE" ? "Exclusion Zone" : `${zoneType} Zone`),
               type: zoneType,
               dwellThresholdSeconds,
               points: draftPoints,
@@ -228,7 +227,7 @@ export function useZoneDrawing({
       ...current,
       {
         id: crypto.randomUUID(),
-        name: zoneName || `${zoneType} Zone`,
+        name: zoneName || (zoneType === "IGNORE" ? "Exclusion Zone" : `${zoneType} Zone`),
         type: zoneType,
         dwellThresholdSeconds,
         points: draftPoints,
@@ -261,13 +260,15 @@ export function useZoneDrawing({
       for (let j = i + 1; j < zonesReadyToSave.length; j++) {
         const typeA = zonesReadyToSave[i].type;
         const typeB = zonesReadyToSave[j].type;
-        const isWalkwaySlipperyPair =
+        const allowsOverlap =
+          typeA === "IGNORE" ||
+          typeB === "IGNORE" ||
           (typeA === "WALKWAY" && typeB === "SLIPPERY") ||
           (typeA === "SLIPPERY" && typeB === "WALKWAY");
 
         if (
           typeA !== typeB &&
-          !isWalkwaySlipperyPair &&
+          !allowsOverlap &&
           doPolygonsOverlap(zonesReadyToSave[i].points, zonesReadyToSave[j].points)
         ) {
           hasOverlap = true;
@@ -279,7 +280,7 @@ export function useZoneDrawing({
 
     if (hasOverlap) {
       window.alert(
-        "Cannot save zones: Zones of different types (excluding Walkway & Slippery) overlap. Please adjust the vertices to avoid overlap.",
+        "Cannot save zones: Only Exclusion Zones and Walkway/Slippery zones may overlap. Please adjust the vertices to avoid overlap.",
       );
       setZoneActionState("error");
       setTimeout(() => setZoneActionState("idle"), 2000);
