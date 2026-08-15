@@ -94,6 +94,32 @@ def test_update_persists_weekly_schedule_and_recipients():
     assert view.next_run_at is not None
 
 
+def test_update_persists_vietnamese_language():
+    repository = _repository()
+    service = ReportScheduleService(repository, Mock())
+
+    view = service.update(
+        frequency="off", day_of_week=None, day_of_month=None, hour=7, minute=0,
+        zone_id=None, recipients=[], include_snapshots=True, subject=None, message=None,
+        language="vi",
+    )
+
+    assert view.schedule.language == "vi"
+
+
+def test_update_falls_back_to_english_for_invalid_language():
+    repository = _repository()
+    service = ReportScheduleService(repository, Mock())
+
+    view = service.update(
+        frequency="off", day_of_week=None, day_of_month=None, hour=7, minute=0,
+        zone_id=None, recipients=[], include_snapshots=True, subject=None, message=None,
+        language="fr",
+    )
+
+    assert view.schedule.language == "en"
+
+
 def test_update_rejects_bad_recipient():
     service = ReportScheduleService(_repository(), Mock())
 

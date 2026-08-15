@@ -27,12 +27,21 @@ from app.services.incident_service import (
     UnifiedIncidentService,
     get_unified_incident_service,
 )
+from app.services.reporting.i18n import normalize_language, t
 from app.services.reporting.insights import build_caveats, build_insights
 from app.storage.evidence_storage import EvidenceStorage, get_evidence_storage
 
 _SEVERITY_RANK = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
-_CATEGORY_LABELS = {"ppe": "PPE", "zone": "Zone", "behavior": "Behavior"}
-_RANGE_LABELS = {"24H": "Last 24 hours", "7D": "Last 7 days", "30D": "Last 30 days"}
+# PPE is kept untranslated in both languages — it's a widely-recognized
+# acronym in Vietnamese HSE/industrial contexts (see plan §0.2 scope note).
+_CATEGORY_LABELS = {
+    "en": {"ppe": "PPE", "zone": "Zone", "behavior": "Behavior"},
+    "vi": {"ppe": "PPE", "zone": "Khu Vực", "behavior": "Hành Vi"},
+}
+_RANGE_LABELS = {
+    "en": {"24H": "Last 24 hours", "7D": "Last 7 days", "30D": "Last 30 days"},
+    "vi": {"24H": "24 giờ qua", "7D": "7 ngày qua", "30D": "30 ngày qua"},
+}
 
 
 @dataclass(frozen=True)
@@ -53,6 +62,8 @@ class ReportData:
     factory_location: str | None
     range_label: str                  # "Last 7 days (22 Jul - 29 Jul 2026)"
     range_param: str                  # "24H" | "7D" | "30D"
+    zone_id: int | None               # None = report is site-wide (all zones) — no default,
+                                       # must stay in this required-fields block, not below
     zone_scope_label: str             # "All zones" | "Production Floor"
     generated_at_local: str
     timezone_label: str               # "UTC+07:00 (Asia/Ho_Chi_Minh)"
@@ -62,10 +73,21 @@ class ReportData:
     top_incidents: list[ReportIncidentRow] = field(default_factory=list)
     insights: list[str] = field(default_factory=list)
     data_caveats: list[str] = field(default_factory=list)
+    language: str = "en"              # "en" | "vi" — see i18n.py. Must stay LAST: a defaulted
+                                       # field before a non-default one is a TypeError at import.
 
 
 def to_local(ts: datetime, tz: ZoneInfo) -> datetime:
     return ts.astimezone(tz)
+
+
+def _format_datetime(dt: datetime, language: str) -> str:
+    """dd/mm/yyyy, HH:MM for Vietnamese; dd Mon yyyy, HH:MM for English.
+    Numeric for `vi` deliberately — see plan §1 D3 (avoids locale.setlocale,
+    which is process-global and unsafe in an async web server)."""
+    if language == "vi":
+        return dt.strftime("%d/%m/%Y, %H:%M")
+    return dt.strftime("%d %b %Y, %H:%M")
 
 
 def format_delta_label(compare: AnalyticsCompare) -> str:
@@ -95,7 +117,8 @@ class ReportDataBuilder:
         self.factory_repository = factory_repository
         self.physical_zone_repository = physical_zone_repository
 
-    def build(self, *, range_: str, zone_id: int | None) -> ReportData:
+    def build(self, *, range_: str, zone_id: int | None, language: str = "en") -> ReportData:
+        language = normalize_language(language)
         tz, tz_fallback = _resolve_timezone(settings.REPORT_TIMEZONE)
 
         summary = self.analytics_service.get_summary(range_=range_, zone_id=zone_id)
@@ -117,8 +140,8 @@ class ReportDataBuilder:
         )
         top_incidents = [
             ReportIncidentRow(
-                timestamp_local=to_local(i.timestamp, tz).strftime("%d %b %Y, %H:%M"),
-                category=_CATEGORY_LABELS.get(i.category, i.category),
+                timestamp_local=_format_datetime(to_local(i.timestamp, tz), language),
+                category=_CATEGORY_LABELS[language].get(i.category, i.category),
                 type=i.type,
                 severity=i.severity,
                 zone_name=i.zone_name,
@@ -129,26 +152,28 @@ class ReportDataBuilder:
         ]
 
         factory = self.factory_repository.get_or_create_default_factory()
-        zone_scope_label = _zone_scope_label(summary, zone_id)
+        zone_scope_label = _zone_scope_label(summary, zone_id, language)
 
         now_local = to_local(_utc_now_tz(), tz)
-        generated_at_local = now_local.strftime("%d %b %Y, %H:%M")
+        generated_at_local = _format_datetime(now_local, language)
         timezone_label = _timezone_label(tz, tz_fallback)
 
-        insights = build_insights(summary, trend, compare)
+        insights = build_insights(summary, trend, compare, language)
         data_caveats = build_caveats(
             summary=summary,
             zone_id=zone_id,
             zone_scope_label=zone_scope_label,
             tz_fallback=tz_fallback,
+            language=language,
         )
 
         return ReportData(
             company_name=settings.REPORT_COMPANY_NAME,
             factory_name=factory.name,
             factory_location=factory.location,
-            range_label=_range_label(range_, date_from, date_to, tz),
+            range_label=_range_label(range_, date_from, date_to, tz, language),
             range_param=range_,
+            zone_id=zone_id,
             zone_scope_label=zone_scope_label,
             generated_at_local=generated_at_local,
             timezone_label=timezone_label,
@@ -158,6 +183,7 @@ class ReportDataBuilder:
             top_incidents=top_incidents,
             insights=insights,
             data_caveats=data_caveats,
+            language=language,
         )
 
 
@@ -182,30 +208,28 @@ def _timezone_label(tz: ZoneInfo, tz_fallback: bool) -> str:
     return f"UTC{sign}{hours:02d}:{minutes:02d} ({tz.key})"
 
 
-def _zone_scope_label(summary: AnalyticsSummary, zone_id: int | None) -> str:
+def _zone_scope_label(summary: AnalyticsSummary, zone_id: int | None, language: str) -> str:
     if zone_id is None:
-        return "All zones"
+        return t("all_zones", language)
     for zone_total in summary.zone_totals:
         if zone_total.zone_id == zone_id:
             return zone_total.zone_name
-    return f"Zone #{zone_id}"
+    zone_word = "Khu vực" if language == "vi" else "Zone"
+    return f"{zone_word} #{zone_id}"
 
 
 def _range_label(
-    range_: str, date_from: datetime, date_to: datetime, tz: ZoneInfo
+    range_: str, date_from: datetime, date_to: datetime, tz: ZoneInfo, language: str
 ) -> str:
     local_from = to_local(date_from, tz)
     local_to = to_local(date_to, tz)
-    label = _RANGE_LABELS.get(range_, range_)
-    if range_ == "24H":
-        return (
-            f"{label} ({local_from.strftime('%d %b %H:%M')} - "
-            f"{local_to.strftime('%d %b %H:%M')})"
-        )
-    return (
-        f"{label} ({local_from.strftime('%d %b')} - "
-        f"{local_to.strftime('%d %b %Y')})"
+    label = _RANGE_LABELS[language].get(range_, range_)
+    day_fmt, day_time_fmt, day_month_year_fmt = (
+        ("%d/%m", "%d/%m %H:%M", "%d/%m/%Y") if language == "vi" else ("%d %b", "%d %b %H:%M", "%d %b %Y")
     )
+    if range_ == "24H":
+        return f"{label} ({local_from.strftime(day_time_fmt)} - {local_to.strftime(day_time_fmt)})"
+    return f"{label} ({local_from.strftime(day_fmt)} - {local_to.strftime(day_month_year_fmt)})"
 
 
 def get_report_data_builder(

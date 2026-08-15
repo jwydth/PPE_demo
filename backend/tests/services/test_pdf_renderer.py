@@ -72,8 +72,10 @@ def _report_data(
     top_incidents: list[ReportIncidentRow] | None = None,
     insights: list[str] | None = None,
     data_caveats: list[str] | None = None,
+    zone_id: int | None = None,
     zone_scope_label: str = "All zones",
     factory_name: str = "Default Factory",
+    language: str = "en",
 ) -> ReportData:
     return ReportData(
         company_name="De Heus LLC",
@@ -81,6 +83,7 @@ def _report_data(
         factory_location="Bien Hoa, Dong Nai",
         range_label="Last 7 days (22 Jul - 29 Jul 2026)",
         range_param="7D",
+        zone_id=zone_id,
         zone_scope_label=zone_scope_label,
         generated_at_local="29 Jul 2026, 14:32",
         timezone_label="UTC+07:00 (Asia/Ho_Chi_Minh)",
@@ -90,6 +93,7 @@ def _report_data(
         top_incidents=top_incidents or [],
         insights=insights or [],
         data_caveats=data_caveats or [],
+        language=language,
     )
 
 
@@ -173,6 +177,19 @@ def test_render_zero_incident_report_succeeds():
     data = _report_data(
         summary=_summary(grand_total=0),
         insights=["No incidents recorded in this period across any monitored zone."],
+    )
+
+    pdf_bytes = render_incident_report(data)
+
+    assert pdf_bytes.startswith(b"%PDF-")
+
+
+def test_render_zero_incident_report_succeeds_in_vietnamese():
+    data = _report_data(
+        summary=_summary(grand_total=0),
+        insights=["Không có sự cố nào được ghi nhận trong kỳ này tại bất kỳ khu vực giám sát nào."],
+        zone_scope_label="Tất cả khu vực",
+        language="vi",
     )
 
     pdf_bytes = render_incident_report(data)

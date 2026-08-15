@@ -12,67 +12,72 @@ from email.utils import formataddr, formatdate, make_msgid
 
 from app.core.config import settings
 from app.services.reporting import ReportEmailError, ReportEmailTimeoutError
+from app.services.reporting.i18n import t
 from app.services.reporting.report_data import ReportData, format_delta_label
 
 logger = logging.getLogger(__name__)
 
 _BOLD_MARKER = re.compile(r"\*\*(.+?)\*\*")
 
-_SUBJECT_TEMPLATE = (
-    "[Safety Report] {factory_name} — {range_label} — {total} incidents ({critical} critical)"
-)
+# Templates are keyed by language; body layout/markup is identical between
+# the two, only the label text and word order differ (see plan §0.2 — this
+# stays a template swap, not a full HTML rewrite per language).
+_SUBJECT_TEMPLATES = {
+    "en": "[Safety Report] {factory_name} — {range_label} — {total} incidents ({critical} critical)",
+    "vi": "[Báo Cáo An Toàn] {factory_name} — {range_label} — {total} sự cố ({critical} nghiêm trọng)",
+}
 
 _HTML_BODY_TEMPLATE = """\
 <div style="max-width:600px;margin:0 auto;font-family:Arial,Helvetica,sans-serif;color:#0f172a;">
   <div style="background:#0f172a;color:#d9f99d;padding:16px 20px;border-radius:6px 6px 0 0;">
     <div style="font-size:16px;font-weight:bold;">{company_name}</div>
-    <div style="font-size:12px;">Incident Analytics Report — {range_label}</div>
+    <div style="font-size:12px;">{report_title} — {range_label}</div>
   </div>
   <div style="border:1px solid #e2e8f0;border-top:none;padding:20px;border-radius:0 0 6px 6px;">
     <p style="margin:0 0 12px 0;">{factory_name} &middot; {zone_scope_label}</p>
     <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
       <tr>
         <td style="padding:8px;text-align:center;background:#f1f5f9;">
-          <div style="font-size:11px;color:#64748b;">Total</div>
+          <div style="font-size:11px;color:#64748b;">{total_label}</div>
           <div style="font-size:20px;font-weight:bold;">{total}</div>
         </td>
         <td style="padding:8px;text-align:center;background:#f1f5f9;">
-          <div style="font-size:11px;color:#64748b;">Critical</div>
+          <div style="font-size:11px;color:#64748b;">{critical_label}</div>
           <div style="font-size:20px;font-weight:bold;color:#ef4444;">{critical}</div>
         </td>
         <td style="padding:8px;text-align:center;background:#f1f5f9;">
-          <div style="font-size:11px;color:#64748b;">High</div>
+          <div style="font-size:11px;color:#64748b;">{high_label}</div>
           <div style="font-size:20px;font-weight:bold;color:#f97316;">{high}</div>
         </td>
         <td style="padding:8px;text-align:center;background:#f1f5f9;">
-          <div style="font-size:11px;color:#64748b;">vs prior period</div>
+          <div style="font-size:11px;color:#64748b;">{vs_prior_label}</div>
           <div style="font-size:20px;font-weight:bold;">{delta_label}</div>
         </td>
       </tr>
     </table>
     {message_html}
-    <p style="margin:0 0 8px 0;font-weight:bold;">Key insights</p>
+    <p style="margin:0 0 8px 0;font-weight:bold;">{key_insights_label}</p>
     <ul style="margin:0 0 16px 0;padding-left:18px;">
       {insights_html}
     </ul>
-    <p style="margin:0;color:#64748b;font-size:12px;">The full report is attached as a PDF.</p>
+    <p style="margin:0;color:#64748b;font-size:12px;">{pdf_attached_label}</p>
   </div>
 </div>
 """
 
 _TEXT_BODY_TEMPLATE = """\
-{company_name} — Incident Analytics Report
+{company_name} — {report_title}
 {range_label} - {factory_name} - {zone_scope_label}
 
-Total incidents: {total}
-Critical: {critical}
-High: {high}
-vs prior period: {delta_label}
+{total_label}: {total}
+{critical_label}: {critical}
+{high_label}: {high}
+{vs_prior_label}: {delta_label}
 
-{message_text}Key insights:
+{message_text}{key_insights_label}:
 {insights_text}
 
-The full report is attached as a PDF.
+{pdf_attached_label}
 """
 
 
@@ -84,7 +89,7 @@ class EmailAttachment:
 
 
 def build_subject(data: ReportData) -> str:
-    return _SUBJECT_TEMPLATE.format(
+    return _SUBJECT_TEMPLATES.get(data.language, _SUBJECT_TEMPLATES["en"]).format(
         factory_name=data.factory_name,
         range_label=data.range_label,
         total=data.summary.grand_total,
@@ -93,9 +98,10 @@ def build_subject(data: ReportData) -> str:
 
 
 def build_html_body(data: ReportData, custom_message: str | None) -> str:
+    lang = data.language
     insights = data.insights[:3]
     insights_html = "".join(f"<li>{_bold_to_html(text)}</li>" for text in insights) or (
-        "<li>No notable insights for this period.</li>"
+        f"<li>{html.escape(t('email_no_insights', lang))}</li>"
     )
     message_html = ""
     if custom_message:
@@ -106,9 +112,16 @@ def build_html_body(data: ReportData, custom_message: str | None) -> str:
         )
     return _HTML_BODY_TEMPLATE.format(
         company_name=html.escape(data.company_name),
+        report_title=html.escape(t("email_report_title", lang)),
         range_label=html.escape(data.range_label),
         factory_name=html.escape(data.factory_name),
         zone_scope_label=html.escape(data.zone_scope_label),
+        total_label=html.escape(t("email_total", lang)),
+        critical_label=html.escape(t("email_critical", lang)),
+        high_label=html.escape(t("email_high", lang)),
+        vs_prior_label=html.escape(t("email_vs_prior", lang)),
+        key_insights_label=html.escape(t("email_key_insights", lang)),
+        pdf_attached_label=html.escape(t("email_pdf_attached", lang)),
         total=data.summary.grand_total,
         critical=data.summary.severity_counts.Critical,
         high=data.summary.severity_counts.High,
@@ -119,16 +132,24 @@ def build_html_body(data: ReportData, custom_message: str | None) -> str:
 
 
 def build_text_body(data: ReportData, custom_message: str | None) -> str:
+    lang = data.language
     insights = data.insights[:3]
     insights_text = "\n".join(f"- {_strip_bold(text)}" for text in insights) or (
-        "- No notable insights for this period."
+        f"- {t('email_no_insights', lang)}"
     )
     message_text = f"{custom_message}\n\n" if custom_message else ""
     return _TEXT_BODY_TEMPLATE.format(
         company_name=data.company_name,
+        report_title=t("email_report_title", lang),
         range_label=data.range_label,
         factory_name=data.factory_name,
         zone_scope_label=data.zone_scope_label,
+        total_label=t("email_total", lang),
+        critical_label=t("email_critical", lang),
+        high_label=t("email_high", lang),
+        vs_prior_label=t("email_vs_prior", lang),
+        key_insights_label=t("email_key_insights", lang),
+        pdf_attached_label=t("email_pdf_attached", lang),
         total=data.summary.grand_total,
         critical=data.summary.severity_counts.Critical,
         high=data.summary.severity_counts.High,

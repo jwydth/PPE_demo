@@ -1,7 +1,7 @@
 "use client";
 
 import Hls from "hls.js";
-import { Maximize2, Minimize2 } from "lucide-react";
+import { Info, Maximize2, Minimize2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { rtspToHlsUrl, type StreamTimeline } from "@/lib/stream-timeline";
@@ -204,6 +204,24 @@ export function LlHlsVideo({
           playsInline
         />
         {children}
+        {annotated && (
+          // Discloses that the footage itself is synthetic demo content, not
+          // real De Heus factory video — the live streams in this app are
+          // looped demo clips pushed into mediamtx (see
+          // scripts/publish-rtsp.ps1), not actual factory cameras. Non-live
+          // playback (e.g. an uploaded file reviewed in <video>, which does
+          // not use this component) correctly never shows this badge. Not
+          // pointer-events-none: the tooltip needs hover to fire, and this
+          // corner is otherwise empty in both matrix and single view.
+          <div
+            className="absolute bottom-3 left-3 z-20 flex items-center gap-1 rounded-md border border-white/10 bg-slate-950/75 px-2 py-1 text-[10px] font-medium text-slate-200 backdrop-blur"
+            title="This footage is AI-generated for demonstration purposes only and does not depict real De Heus factory video or incidents."
+            aria-label="This footage is AI-generated for demonstration purposes only and does not depict real De Heus factory video or incidents."
+          >
+            <Info className="size-3" aria-hidden="true" />
+            AI-generated demo footage
+          </div>
+        )}
         <button
           type="button"
           title={isFullscreen ? "Thu nhỏ video" : "Xem toàn màn hình"}

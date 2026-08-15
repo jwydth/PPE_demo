@@ -22,6 +22,7 @@ from app.services.reporting.report_service import (
     get_report_service,
     validate_recipients,
 )
+from app.services.reporting.i18n import normalize_language
 from app.services.reporting.schedule import is_due, next_run_at, report_range_for, resolve_timezone
 from app.storage.evidence_storage import EvidenceStorage, get_evidence_storage
 
@@ -57,6 +58,7 @@ class ReportScheduleService:
         include_snapshots: bool,
         subject: str | None,
         message: str | None,
+        language: str = "en",
     ) -> ScheduleView:
         if frequency not in _VALID_FREQUENCIES:
             raise ServiceValidationError("frequency must be 'off', 'weekly', or 'monthly'.")
@@ -86,6 +88,7 @@ class ReportScheduleService:
         schedule.include_snapshots = include_snapshots
         schedule.subject = subject
         schedule.message = message
+        schedule.language = normalize_language(language)
         return self._to_view(self.repository.update(schedule))
 
     def _to_view(self, schedule: ReportSchedule) -> ScheduleView:
@@ -124,6 +127,7 @@ def run_due_schedule(
             subject=schedule.subject,
             message=schedule.message,
             include_snapshots=schedule.include_snapshots,
+            language=schedule.language,
         )
     except (ServiceValidationError, ReportEmailError):
         # Don't stamp last_sent_at — retry on the next tick (every 15 min)

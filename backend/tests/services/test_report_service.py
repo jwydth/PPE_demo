@@ -23,6 +23,7 @@ def _report_data(factory_name: str = "Khu vực sản xuất") -> ReportData:
         factory_location=None,
         range_label="Last 7 days",
         range_param="7D",
+        zone_id=None,
         zone_scope_label="All zones",
         generated_at_local="29 Jul 2026, 14:32",
         timezone_label="UTC+07:00 (Asia/Ho_Chi_Minh)",
@@ -137,10 +138,18 @@ def test_build_pdf_returns_bytes_and_filename():
 
     pdf_bytes, filename = service.build_pdf(range_="7D", zone_id=None)
 
-    builder.build.assert_called_once_with(range_="7D", zone_id=None)
+    builder.build.assert_called_once_with(range_="7D", zone_id=None, language="en")
     assert pdf_bytes.startswith(b"%PDF-")
     assert filename.startswith("safety-report_khu-vuc-san-xuat_7D_")
     assert filename.endswith(".pdf")
+
+
+def test_build_pdf_passes_language_through_to_the_builder():
+    service, builder, *_ = _service()
+
+    service.build_pdf(range_="7D", zone_id=None, language="vi")
+
+    builder.build.assert_called_once_with(range_="7D", zone_id=None, language="vi")
 
 
 # ---- ReportService.email_report ----

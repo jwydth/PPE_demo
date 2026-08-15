@@ -217,10 +217,11 @@ class ReportService:
         self.delivery_repository = delivery_repository
 
     def build_pdf(
-        self, *, range_: str, zone_id: int | None, include_snapshots: bool = True
+        self, *, range_: str, zone_id: int | None, include_snapshots: bool = True,
+        language: str = "en",
     ) -> tuple[bytes, str]:
         _data, pdf_bytes, filename = self._assemble(
-            range_=range_, zone_id=zone_id, include_snapshots=include_snapshots
+            range_=range_, zone_id=zone_id, include_snapshots=include_snapshots, language=language
         )
         return pdf_bytes, filename
 
@@ -233,6 +234,7 @@ class ReportService:
         subject: str | None,
         message: str | None,
         include_snapshots: bool = True,
+        language: str = "en",
     ) -> ReportDeliveryResult:
         # Order matters: fail fast before generating a PDF nobody can send,
         # and before touching storage — see plan §4.4.
@@ -240,7 +242,7 @@ class ReportService:
         clean_recipients = validate_recipients(recipients)
 
         data, pdf_bytes, filename = self._assemble(
-            range_=range_, zone_id=zone_id, include_snapshots=include_snapshots
+            range_=range_, zone_id=zone_id, include_snapshots=include_snapshots, language=language
         )
 
         object_key = self._archive(pdf_bytes) if settings.REPORT_ARCHIVE_TO_MINIO else None
@@ -290,9 +292,9 @@ class ReportService:
         )
 
     def _assemble(
-        self, *, range_: str, zone_id: int | None, include_snapshots: bool
+        self, *, range_: str, zone_id: int | None, include_snapshots: bool, language: str = "en"
     ) -> tuple[ReportData, bytes, str]:
-        data = self.report_data_builder.build(range_=range_, zone_id=zone_id)
+        data = self.report_data_builder.build(range_=range_, zone_id=zone_id, language=language)
         snapshots = (
             fetch_snapshots(data.top_incidents, settings.REPORT_MAX_SNAPSHOTS)
             if include_snapshots

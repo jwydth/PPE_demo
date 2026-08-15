@@ -9,7 +9,7 @@ from app.schemas.analytics import (
     AnalyticsTrend,
     CompareMode,
 )
-from app.schemas.incident import UnifiedIncidentRead
+from app.schemas.incident import IncidentSeverity, UnifiedIncidentRead
 from app.services import ServiceValidationError
 from app.services.analytics_service import AnalyticsService, get_analytics_service
 from app.services.incident_service import (
@@ -25,6 +25,8 @@ async def list_unified_incidents(
     service: Annotated[UnifiedIncidentService, Depends(get_unified_incident_service)],
     limit: int = Query(default=30, ge=1, le=500),
     zone_id: int | None = Query(default=None, ge=1),
+    camera_id: int | None = Query(default=None, ge=1),
+    severity: IncidentSeverity | None = Query(default=None),
 ) -> list[UnifiedIncidentRead]:
     """Normalized (category, severity, zone) incident feed — the Live Feed
     panel needs zone/severity fields getSafetyEvents() doesn't carry."""
@@ -41,7 +43,9 @@ async def list_unified_incidents(
             camera_label=i.camera_label,
             snapshot_url=i.snapshot_url,
         )
-        for i in service.list_incidents(zone_id=zone_id, limit=limit)
+        for i in service.list_incidents(
+            zone_id=zone_id, camera_id=camera_id, severity=severity, limit=limit
+        )
     ]
 
 

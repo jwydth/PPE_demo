@@ -4,7 +4,7 @@ import { FileDown, Loader2, Mail, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { downloadIncidentReportPdf, emailIncidentReport, getReportPreview } from "@/lib/ppe-api";
 import { AnalyticsRangeParam } from "@/types/analytics";
-import { ReportPreview } from "@/types/report";
+import { ReportLanguage, ReportPreview } from "@/types/report";
 
 interface ZoneOption {
   id: number;
@@ -23,6 +23,7 @@ type SendState = "idle" | "sending" | "success" | "error";
 
 export function ReportExportDialog({ open, onClose, range, zoneId, zoneOptions }: ReportExportDialogProps) {
   const [selectedZoneId, setSelectedZoneId] = useState<number | null>(zoneId);
+  const [language, setLanguage] = useState<ReportLanguage>("en");
   // Re-sync to whichever zone is selected on the dashboard each time the
   // dialog opens, but leave it alone while open — the user can pick a
   // different zone for this export without it snapping back mid-edit.
@@ -51,7 +52,7 @@ export function ReportExportDialog({ open, onClose, range, zoneId, zoneOptions }
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
-    getReportPreview(range, selectedZoneId)
+    getReportPreview(range, selectedZoneId, language)
       .then((result) => {
         if (cancelled) return;
         setPreview(result);
@@ -65,7 +66,7 @@ export function ReportExportDialog({ open, onClose, range, zoneId, zoneOptions }
     return () => {
       cancelled = true;
     };
-  }, [open, range, selectedZoneId]);
+  }, [open, range, selectedZoneId, language]);
 
   if (!open) return null;
 
@@ -101,7 +102,7 @@ export function ReportExportDialog({ open, onClose, range, zoneId, zoneOptions }
     setDownloading(true);
     setDownloadError("");
     try {
-      await downloadIncidentReportPdf(range, selectedZoneId, includeSnapshots);
+      await downloadIncidentReportPdf(range, selectedZoneId, includeSnapshots, language);
     } catch (err) {
       setDownloadError(err instanceof Error ? err.message : "Could not generate the PDF report");
     } finally {
@@ -130,6 +131,7 @@ export function ReportExportDialog({ open, onClose, range, zoneId, zoneOptions }
         subject: subject.trim() || null,
         message: message.trim() || null,
         include_snapshots: includeSnapshots,
+        language,
       });
       setSentTo(result.recipients);
       setSendState("success");
@@ -217,6 +219,20 @@ export function ReportExportDialog({ open, onClose, range, zoneId, zoneOptions }
                   {z.name}
                 </option>
               ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+              Language
+            </label>
+            <select
+              value={language}
+              onChange={(e) => setLanguage(e.target.value as ReportLanguage)}
+              className="w-full rounded-md border border-slate-200 px-2 py-1.5 text-xs outline-none focus:border-slate-400"
+            >
+              <option value="en">English</option>
+              <option value="vi">Tiếng Việt</option>
             </select>
           </div>
 

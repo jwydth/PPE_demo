@@ -270,3 +270,25 @@ def test_no_caveats_in_the_normal_case():
     )
 
     assert caveats == []
+
+
+def test_trend_direction_fires_in_vietnamese():
+    compare = _compare(current_total=128, prior_total=95, delta_pct=34.2)
+
+    insights = build_insights(_summary(), _trend(), compare, language="vi")
+
+    assert any("tăng" in i or "giảm" in i for i in insights)
+
+
+def test_caveat_fires_on_truncation_in_vietnamese():
+    summary = _summary(grand_total=settings.ANALYTICS_LIMIT)
+
+    caveats = build_caveats(
+        summary=summary,
+        zone_id=None,
+        zone_scope_label="Tất cả khu vực",
+        tz_fallback=False,
+        language="vi",
+    )
+
+    assert any("giới hạn tổng hợp" in c for c in caveats)

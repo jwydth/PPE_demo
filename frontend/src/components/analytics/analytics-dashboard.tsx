@@ -40,6 +40,7 @@ import {
   deleteIncident,
   getAnalyticsCompare,
   getAnalyticsTrend,
+  getCameras,
   getUnifiedIncidents,
 } from "@/lib/ppe-api";
 import {
@@ -169,6 +170,8 @@ export function AnalyticsDashboard({
 } = {}) {
   const [timeRange, setTimeRange] = useState<AnalyticsRangeParam>("7D");
   const [selectedZone, setSelectedZone] = useState<number | null>(null);
+  const [selectedCamera, setSelectedCamera] = useState<number | null>(null);
+  const [selectedSeverity, setSelectedSeverity] = useState<SeverityLevel | null>(null);
   const [comparisonMode, setComparisonMode] = useState<CompareMode>("week");
 
   const [freshKeys, setFreshKeys] = useState<Set<string>>(new Set());
@@ -226,6 +229,15 @@ export function AnalyticsDashboard({
   });
   const feed = useMemo(() => feedQuery.data ?? [], [feedQuery.data]);
 
+  // Camera list for the Live Feed filter dropdown — rarely changes, so a
+  // long staleTime avoids refetching it on every 5s feed poll.
+  const camerasQuery = useQuery({
+    queryKey: ["cameras"],
+    queryFn: getCameras,
+    staleTime: 60_000,
+  });
+  const cameraOptions = camerasQuery.data ?? [];
+
   // Diffs each new feed fetch against the previous one to flag newly-arrived
   // rows for the fade-in animation, clearing the flag after FRESH_ROW_MS. Kept
   // as a ref (not query state) since it's a pure animation trigger, not data.
@@ -267,7 +279,16 @@ export function AnalyticsDashboard({
     () => new Set((summary?.active_zone_ids ?? []).map(zoneKey)),
     [summary],
   );
-  const filteredFeed = selectedZone != null ? feed.filter((f) => f.zone_id === selectedZone) : feed;
+  // Camera/severity filters apply client-side over the same unfiltered
+  // FEED_LIMIT-row fetch the zone filter already uses (see plan §0.3, D6)
+  // — consistent with the existing zone-filter behavior rather than a new
+  // fetch-per-filter strategy.
+  const filteredFeed = feed.filter((f) => {
+    if (selectedZone != null && f.zone_id !== selectedZone) return false;
+    if (selectedCamera != null && f.camera_id !== selectedCamera) return false;
+    if (selectedSeverity != null && f.severity !== selectedSeverity) return false;
+    return true;
+  });
 
   // Zone Pulse geometry
   const centerX = 200;
@@ -561,9 +582,35 @@ export function AnalyticsDashboard({
                   LIVE
                 </span>
               </div>
+              <div className="mt-2 flex gap-2">
+                <select
+                  value={selectedCamera ?? ""}
+                  onChange={(e) => setSelectedCamera(e.target.value ? Number(e.target.value) : null)}
+                  className="flex-1 rounded-md border border-slate-200 px-2 py-1 text-xs outline-none focus:border-slate-400"
+                >
+                  <option value="">All cameras</option>
+                  {cameraOptions.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={selectedSeverity ?? ""}
+                  onChange={(e) => setSelectedSeverity((e.target.value || null) as SeverityLevel | null)}
+                  className="flex-1 rounded-md border border-slate-200 px-2 py-1 text-xs outline-none focus:border-slate-400"
+                >
+                  <option value="">All severities</option>
+                  {(Object.keys(SEVERITY_TONE) as SeverityLevel[]).map((sev) => (
+                    <option key={sev} value={sev}>
+                      {sev}
+                    </option>
+                  ))}
+                </select>
+              </div>
               <div className="mt-2 flex-1 overflow-y-auto">
                 {filteredFeed.length === 0 && (
-                  <div className="p-4 text-sm text-slate-400">No incidents for this zone yet.</div>
+                  <div className="p-4 text-sm text-slate-400">No incidents match the current filters.</div>
                 )}
                 {filteredFeed.map((item) => {
                   const zone = zoneLookup[zoneKey(item.zone_id)];

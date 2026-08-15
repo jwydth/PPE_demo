@@ -4,6 +4,8 @@ from pydantic import BaseModel, EmailStr, Field
 
 from app.schemas.analytics import AnalyticsRange, SeverityCounts
 
+ReportLanguage = Literal["en", "vi"]
+
 
 class ReportEmailRequest(BaseModel):
     recipients: list[EmailStr]  # pydantic validates shape; the service validates policy
@@ -12,6 +14,7 @@ class ReportEmailRequest(BaseModel):
     subject: str | None = Field(default=None, max_length=200)
     message: str | None = Field(default=None, max_length=2000)
     include_snapshots: bool = True
+    language: ReportLanguage = "en"
 
 
 class ReportEmailResponse(BaseModel):
@@ -31,3 +34,4 @@ class ReportPreview(BaseModel):
     severity_counts: SeverityCounts
     insights: list[str]
     data_caveats: list[str]
+    language: ReportLanguage = "en"

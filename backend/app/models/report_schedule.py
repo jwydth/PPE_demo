@@ -34,6 +34,10 @@ class ReportSchedule(SQLModel, table=True):
         default="", sa_column=Column(String(1000), nullable=False, server_default="")
     )
     include_snapshots: bool = Field(default=True, nullable=False)
+    # "en" | "vi" — language for scheduled report PDF + email chrome (see i18n.py).
+    language: str = Field(
+        default="en", sa_column=Column(String(8), nullable=False, server_default="en")
+    )
     subject: str | None = Field(default=None, sa_column=Column(String(500), nullable=True))
     message: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     last_sent_at: datetime | None = Field(

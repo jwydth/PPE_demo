@@ -170,3 +170,28 @@ def test_analytics_incidents_zone_filter(session):
 
     assert res.status_code == 200
     assert len(res.json()) == 2
+
+
+def test_analytics_incidents_camera_filter(session):
+    _zone_id, camera_id = _seed(session)
+    client = _client(session)
+
+    res = client.get("/analytics/incidents", params={"camera_id": camera_id})
+    assert res.status_code == 200
+    assert len(res.json()) == 2
+
+    res = client.get("/analytics/incidents", params={"camera_id": camera_id + 999})
+    assert res.status_code == 200
+    assert res.json() == []
+
+
+def test_analytics_incidents_severity_filter(session):
+    _seed(session)
+    client = _client(session)
+
+    res = client.get("/analytics/incidents", params={"severity": "High"})
+
+    assert res.status_code == 200
+    body = res.json()
+    assert len(body) == 1
+    assert body[0]["category"] == "ppe"

@@ -4,8 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.schemas.analytics import AnalyticsCompare, AnalyticsSummary, AnalyticsTrend, SeverityCounts
 from app.services.reporting import ReportEmailError
-from app.services.reporting.email_sender import EmailAttachment, SmtpEmailSender
+from app.services.reporting.email_sender import EmailAttachment, SmtpEmailSender, build_subject
+from app.services.reporting.report_data import ReportData
 
 
 class _FakeSMTP:
@@ -75,6 +77,51 @@ def _send(sender: SmtpEmailSender, **overrides):
     )
     payload.update(overrides)
     sender.send(**payload)
+
+
+def _report_data(*, language: str = "en") -> ReportData:
+    return ReportData(
+        company_name="De Heus LLC",
+        factory_name="Test Factory",
+        factory_location=None,
+        range_label="Last 7 days",
+        range_param="7D",
+        zone_id=None,
+        zone_scope_label="All zones",
+        generated_at_local="29 Jul 2026, 14:32",
+        timezone_label="UTC+07:00 (Asia/Ho_Chi_Minh)",
+        summary=AnalyticsSummary(
+            range="7D",
+            zone_id=None,
+            grand_total=0,
+            zone_totals=[],
+            severity_counts=SeverityCounts(),
+            type_counts=[],
+            active_zone_ids=[],
+            open_incidents=0,
+            active_cameras=0,
+            total_cameras=0,
+        ),
+        trend=AnalyticsTrend(range="7D", bucket="day", zones=[], points=[]),
+        compare=AnalyticsCompare(
+            mode="week",
+            zone_id=None,
+            current_total=0,
+            prior_total=0,
+            delta_pct=0.0,
+            points=[],
+            severity_breakdown=[],
+        ),
+        language=language,
+    )
+
+
+def test_build_subject_uses_vietnamese_template():
+    data = _report_data(language="vi")
+
+    subject = build_subject(data)
+
+    assert subject.startswith("[Báo Cáo An Toàn]")
 
 
 def test_validate_configuration_raises_when_disabled():

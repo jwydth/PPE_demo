@@ -17,6 +17,7 @@ import { Camera, Feature, CameraFeatureConfig } from "@/types/camera";
 import {
   ReportEmailRequest,
   ReportEmailResponse,
+  ReportLanguage,
   ReportPreview,
   ReportScheduleRequest,
   ReportScheduleResponse,
@@ -390,8 +391,9 @@ export async function updateCameraFeatures(
 export async function getReportPreview(
   range: AnalyticsRangeParam,
   zoneId: number | null,
+  language: ReportLanguage = "en",
 ): Promise<ReportPreview> {
-  const params = new URLSearchParams({ range });
+  const params = new URLSearchParams({ range, language });
   if (zoneId != null) params.set("zone_id", String(zoneId));
   const res = await fetch(`${API_URL}/reports/incidents/preview?${params}`);
   if (!res.ok) throw await readError(res, "Could not load the report preview");
@@ -402,8 +404,9 @@ export async function downloadIncidentReportPdf(
   range: AnalyticsRangeParam,
   zoneId: number | null,
   includeSnapshots = true,
+  language: ReportLanguage = "en",
 ): Promise<void> {
-  const params = new URLSearchParams({ range, include_snapshots: String(includeSnapshots) });
+  const params = new URLSearchParams({ range, include_snapshots: String(includeSnapshots), language });
   if (zoneId != null) params.set("zone_id", String(zoneId));
   const res = await fetch(`${API_URL}/reports/incidents.pdf?${params}`);
   if (!res.ok) throw await readError(res, "Could not generate the PDF report");

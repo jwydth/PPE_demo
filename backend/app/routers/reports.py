@@ -8,7 +8,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
 from app.schemas.analytics import AnalyticsRange
-from app.schemas.report import ReportEmailRequest, ReportEmailResponse, ReportPreview
+from app.schemas.report import ReportEmailRequest, ReportEmailResponse, ReportLanguage, ReportPreview
 from app.schemas.report_schedule import ReportScheduleRequest, ReportScheduleResponse
 from app.services import ServiceValidationError
 from app.services.reporting import ReportEmailError, ReportEmailTimeoutError
@@ -58,9 +58,10 @@ async def get_report_preview(
     builder: Annotated[ReportDataBuilder, Depends(get_report_data_builder)],
     range: AnalyticsRange = Query(default="7D"),
     zone_id: int | None = Query(default=None, ge=1),
+    language: ReportLanguage = Query(default="en"),
 ) -> ReportPreview:
     try:
-        data = builder.build(range_=range, zone_id=zone_id)
+        data = builder.build(range_=range, zone_id=zone_id, language=language)
     except ServiceValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return ReportPreview(
@@ -71,6 +72,7 @@ async def get_report_preview(
         severity_counts=data.summary.severity_counts,
         insights=data.insights,
         data_caveats=data.data_caveats,
+        language=data.language,
     )
 
 
@@ -80,6 +82,7 @@ async def download_incident_report_pdf(
     range: AnalyticsRange = Query(default="7D"),
     zone_id: int | None = Query(default=None, ge=1),
     include_snapshots: bool = Query(default=True),
+    language: ReportLanguage = Query(default="en"),
 ) -> Response:
     # PDF rendering is blocking (ReportLab) — running it directly in this
     # async handler would stall every open camera WebSocket the app holds
@@ -90,6 +93,7 @@ async def download_incident_report_pdf(
             range_=range,
             zone_id=zone_id,
             include_snapshots=include_snapshots,
+            language=language,
         )
     except ServiceValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -122,6 +126,7 @@ async def email_incident_report(
             subject=payload.subject,
             message=payload.message,
             include_snapshots=payload.include_snapshots,
+            language=payload.language,
         )
     except ServiceValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -165,6 +170,7 @@ async def update_report_schedule(
             include_snapshots=payload.include_snapshots,
             subject=payload.subject,
             message=payload.message,
+            language=payload.language,
         )
     except ServiceValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -185,6 +191,7 @@ def _schedule_to_response(view: ScheduleView) -> ReportScheduleResponse:
         include_snapshots=schedule.include_snapshots,
         subject=schedule.subject,
         message=schedule.message,
+        language=schedule.language,
         last_sent_at=schedule.last_sent_at.isoformat() if schedule.last_sent_at else None,
         next_run_at=view.next_run_at.isoformat() if view.next_run_at else None,
         timezone_label=timezone_label(resolve_timezone()),

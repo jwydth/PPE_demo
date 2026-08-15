@@ -1,3 +1,4 @@
+import re
 from datetime import datetime, timezone
 
 from app.models.camera import Camera
@@ -139,3 +140,12 @@ def test_build_empty_database_produces_zero_totals(session):
     assert data.summary.grand_total == 0
     assert data.top_incidents == []
     assert any("No incidents recorded" in i for i in data.insights)
+
+
+def test_build_vietnamese_zone_scope_label(session):
+    builder = _builder(session)
+
+    data = builder.build(range_="7D", zone_id=None, language="vi")
+
+    assert data.zone_scope_label == "Tất cả khu vực"
+    assert re.match(r"\d{2}/\d{2}/\d{4}, \d{2}:\d{2}", data.generated_at_local)

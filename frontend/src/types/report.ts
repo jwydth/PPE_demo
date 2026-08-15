@@ -1,5 +1,7 @@
 import { AnalyticsRangeParam, SeverityCounts } from "@/types/analytics";
 
+export type ReportLanguage = "en" | "vi";
+
 export interface ReportPreview {
   range: AnalyticsRangeParam;
   zone_scope_label: string;
@@ -8,6 +10,7 @@ export interface ReportPreview {
   severity_counts: SeverityCounts;
   insights: string[];
   data_caveats: string[];
+  language: ReportLanguage;
 }
 
 export interface ReportEmailRequest {
@@ -17,6 +20,7 @@ export interface ReportEmailRequest {
   subject?: string | null;
   message?: string | null;
   include_snapshots: boolean;
+  language: ReportLanguage;
 }
 
 export interface ReportEmailResponse {
@@ -41,6 +45,7 @@ export interface ReportScheduleRequest {
   include_snapshots: boolean;
   subject?: string | null;
   message?: string | null;
+  language: ReportLanguage;
 }
 
 export interface ReportScheduleResponse {
@@ -54,6 +59,7 @@ export interface ReportScheduleResponse {
   include_snapshots: boolean;
   subject: string | null;
   message: string | null;
+  language: ReportLanguage;
   last_sent_at: string | null;
   next_run_at: string | null;
   timezone_label: string;

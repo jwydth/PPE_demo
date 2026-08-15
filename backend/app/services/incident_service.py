@@ -88,6 +88,7 @@ class UnifiedIncidentService:
         self,
         *,
         zone_id: int | None = None,
+        camera_id: int | None = None,
         category: str | None = None,
         severity: str | None = None,
         date_from: datetime | None = None,
@@ -140,6 +141,8 @@ class UnifiedIncidentService:
 
         if zone_id is not None:
             incidents = [i for i in incidents if i.zone_id == zone_id]
+        if camera_id is not None:
+            incidents = [i for i in incidents if i.camera_id == camera_id]
         if severity is not None:
             incidents = [i for i in incidents if i.severity == severity]
 

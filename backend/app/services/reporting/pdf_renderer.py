@@ -39,6 +39,7 @@ from reportlab.platypus import (
 
 from app.core.config import settings
 from app.schemas.analytics import ComparePoint
+from app.services.reporting.i18n import t
 from app.services.reporting.report_data import (
     ReportData,
     ReportIncidentRow,
@@ -46,6 +47,22 @@ from app.services.reporting.report_data import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Report-local display labels only — these do NOT change the underlying
+# `severity`/`category` values used anywhere else in the app (dashboard,
+# analytics API, etc.). See plan §0.2 scope note.
+_SEVERITY_LABEL_VI = {"Critical": "Nghiêm Trọng", "High": "Cao", "Medium": "Trung Bình", "Low": "Thấp"}
+_CATEGORY_LABEL_VI = {"ppe": "PPE", "zone": "Khu Vực", "behavior": "Hành Vi"}
+
+
+def _severity_label(severity: str, language: str) -> str:
+    return _SEVERITY_LABEL_VI.get(severity, severity) if language == "vi" else severity
+
+
+def _category_label(category: str, language: str) -> str:
+    if language == "vi":
+        return _CATEGORY_LABEL_VI.get(category.lower(), category.upper())
+    return category.upper()
 
 _FONTS_DIR = Path(__file__).parent / "fonts"
 _PAGE_SIZE = A4
@@ -179,10 +196,11 @@ def render_incident_report(
         rightMargin=_MARGIN,
         topMargin=_MARGIN,
         bottomMargin=_MARGIN,
-        title=f"Incident Analytics Report — {data.factory_name}",
+        title=f"{t('pdf_title_prefix', data.language)} — {data.factory_name}",
         author=data.company_name,
     )
 
+    lang = data.language
     story: list = []
     story.append(_header_band(data, styles))
     story.append(Spacer(1, 12))
@@ -192,29 +210,29 @@ def render_incident_report(
         story.append(_caveats_box(data.data_caveats, styles))
     story.append(Spacer(1, 12))
     story.append(_kpi_band(data, styles))
-    story.extend(_section("Key Insights", styles, _insights_bullets(data.insights, styles)))
+    story.extend(_section(t("key_insights", lang), styles, _insights_bullets(data.insights, styles, lang)))
 
     if data.summary.grand_total == 0:
         story.append(Spacer(1, 24))
-        story.append(Paragraph("No incidents recorded in this period.", styles["Centered"]))
+        story.append(Paragraph(t("no_incidents_period", lang), styles["Centered"]))
         doc.build(story, onFirstPage=_footer(data), onLaterPages=_footer(data))
         return buffer.getvalue()
 
-    story.extend(_section("Severity Distribution", styles, [_severity_drawing(data.summary)]))
-    story.extend(_section("Incidents by Zone", styles, _zone_section(data, styles)))
-    story.extend(_section("Trend Over Time", styles, _trend_section(data.trend, styles)))
-    story.extend(_section("Current vs Prior Period", styles, _compare_section(data.compare, styles)))
-    story.extend(_section("Incident Types", styles, [_type_table(data.summary, styles)]))
+    story.extend(_section(t("severity_distribution", lang), styles, [_severity_drawing(data.summary, lang)]))
+    story.extend(_section(t("incidents_by_zone", lang), styles, _zone_section(data, styles)))
+    story.extend(_section(t("trend_over_time", lang), styles, _trend_section(data.trend, styles, lang)))
+    story.extend(_section(t("current_vs_prior", lang), styles, _compare_section(data.compare, styles, lang)))
+    story.extend(_section(t("incident_types", lang), styles, [_type_table(data.summary, styles, lang)]))
     story.extend(
         _section_flowing(
-            "Recent Priority Incidents", styles, [_incident_table(data.top_incidents, styles)]
+            t("recent_priority_incidents", lang), styles, [_incident_table(data.top_incidents, styles, lang)]
         )
     )
 
     if snapshots:
         appendix = _evidence_appendix(data.top_incidents, snapshots, styles)
         if appendix is not None:
-            story.extend(_section("Evidence Appendix", styles, [appendix]))
+            story.extend(_section(t("evidence_appendix", lang), styles, [appendix]))
 
     doc.build(story, onFirstPage=_footer(data), onLaterPages=_footer(data))
     return buffer.getvalue()
@@ -269,7 +287,7 @@ def _bold_markup(text: str) -> str:
 
 def _header_band(data: ReportData, styles: dict) -> Table:
     eyebrow = Paragraph(
-        f'<font face="{FONT_BOLD}" size="8" color="{ACCENT}">INCIDENT ANALYTICS REPORT</font>',
+        f'<font face="{FONT_BOLD}" size="8" color="{ACCENT}">{escape(t("report_eyebrow", data.language))}</font>',
         styles["Body"],
     )
     title = Paragraph(escape(data.company_name), styles["HeaderTitle"])
@@ -332,15 +350,19 @@ def _header_band(data: ReportData, styles: dict) -> Table:
 
 
 def _metadata_table(data: ReportData, styles: dict) -> Table:
+    lang = data.language
+    # (label, value, is_monospace) — is_monospace used to be derived by
+    # comparing label text against the literal "Generated at", which broke
+    # once labels became translatable. Use an explicit flag instead.
     rows = [
-        ("Factory", data.factory_name, "Location", data.factory_location or "—"),
-        ("Period", data.range_label, "Zone scope", data.zone_scope_label),
-        ("Generated at", data.generated_at_local, "Timezone", data.timezone_label),
+        (t("factory", lang), data.factory_name, False, t("location", lang), data.factory_location or "—", False),
+        (t("period", lang), data.range_label, False, t("zone_scope", lang), data.zone_scope_label, False),
+        (t("generated_at", lang), data.generated_at_local, True, t("timezone", lang), data.timezone_label, False),
     ]
     table_rows = []
-    for label_a, value_a, label_b, value_b in rows:
-        style_a = styles["Mono"] if label_a == "Generated at" else styles["Body"]
-        style_b = styles["Mono"] if label_b == "Generated at" else styles["Body"]
+    for label_a, value_a, mono_a, label_b, value_b, mono_b in rows:
+        style_a = styles["Mono"] if mono_a else styles["Body"]
+        style_b = styles["Mono"] if mono_b else styles["Body"]
         table_rows.append(
             [
                 Paragraph(f"<b>{escape(label_a)}</b>", styles["Muted"]),
@@ -449,20 +471,22 @@ class _KPICard(Flowable):
             c.drawString(13, 7, _truncate(self.sublabel, 24))
 
 
-def _delta_sublabel(compare) -> tuple[str, str]:
+def _delta_sublabel(compare, language: str) -> tuple[str, str]:
     if compare.prior_total == 0:
-        return "No prior period", MUTED
+        return t("no_prior_period", language), MUTED
     label = format_delta_label(compare)
+    suffix = t("vs_prior", language)
     if compare.current_total > compare.prior_total:
-        return f"{label} vs prior", _NEGATIVE
+        return f"{label} {suffix}", _NEGATIVE
     if compare.current_total < compare.prior_total:
-        return f"{label} vs prior", _POSITIVE
-    return f"{label} vs prior", MUTED
+        return f"{label} {suffix}", _POSITIVE
+    return f"{label} {suffix}", MUTED
 
 
 def _kpi_band(data: ReportData, styles: dict) -> Table:
+    lang = data.language
     summary = data.summary
-    delta_text, delta_color = _delta_sublabel(data.compare)
+    delta_text, delta_color = _delta_sublabel(data.compare, lang)
     zones_affected = sum(1 for z in summary.zone_totals if z.total > 0)
 
     col_width = _CONTENT_WIDTH / 3
@@ -471,23 +495,23 @@ def _kpi_band(data: ReportData, styles: dict) -> Table:
 
     cards = [
         _KPICard(
-            card_width, card_height, "Total Incidents", str(summary.grand_total), BRAND,
+            card_width, card_height, t("total_incidents", lang), str(summary.grand_total), BRAND,
             sublabel=delta_text, sublabel_color=delta_color,
         ),
         _KPICard(
-            card_width, card_height, "Critical", str(summary.severity_counts.Critical),
+            card_width, card_height, _severity_label("Critical", lang), str(summary.severity_counts.Critical),
             SEVERITY_COLORS["Critical"], value_color=SEVERITY_COLORS["Critical"],
         ),
         _KPICard(
-            card_width, card_height, "High", str(summary.severity_counts.High),
+            card_width, card_height, _severity_label("High", lang), str(summary.severity_counts.High),
             SEVERITY_COLORS["High"], value_color=SEVERITY_COLORS["High"],
         ),
-        _KPICard(card_width, card_height, "Open Incidents", str(summary.open_incidents), "#8b5cf6"),
+        _KPICard(card_width, card_height, t("open_incidents", lang), str(summary.open_incidents), "#8b5cf6"),
         _KPICard(
-            card_width, card_height, "Active Cameras",
+            card_width, card_height, t("active_cameras", lang),
             f"{summary.active_cameras}/{summary.total_cameras}", "#14b8a6",
         ),
-        _KPICard(card_width, card_height, "Zones Affected", str(zones_affected), "#eab308"),
+        _KPICard(card_width, card_height, t("zones_affected", lang), str(zones_affected), "#eab308"),
     ]
     table = Table([cards[:3], cards[3:]], colWidths=[col_width] * 3)
     table.setStyle(
@@ -505,9 +529,9 @@ def _kpi_band(data: ReportData, styles: dict) -> Table:
     return table
 
 
-def _insights_bullets(insights: list[str], styles: dict) -> list:
+def _insights_bullets(insights: list[str], styles: dict, language: str) -> list:
     if not insights:
-        return [Paragraph("No notable insights for this period.", styles["Muted"])]
+        return [Paragraph(t("no_insights", language), styles["Muted"])]
     return [Paragraph(f"•  {_bold_markup(text)}", styles["Bullet"]) for text in insights]
 
 
@@ -542,10 +566,11 @@ class _SeverityBar(Flowable):
     _LEGEND_HEIGHT = 16
     _MIN_LABEL_PAD = 6
 
-    def __init__(self, width: float, counts: list[int]) -> None:
+    def __init__(self, width: float, counts: list[int], language: str = "en") -> None:
         super().__init__()
         self.width = width
         self.counts = counts
+        self.language = language
         self.total = sum(counts) or 1
         self.height = self._BAR_HEIGHT + self._LEGEND_GAP + self._LEGEND_HEIGHT
 
@@ -591,10 +616,11 @@ class _SeverityBar(Flowable):
             c.setFillColor(colors.HexColor(SEVERITY_COLORS[sev_name]))
             c.rect(cx, 4, 8, 8, fill=1, stroke=0)
 
+            display_name = _severity_label(sev_name, self.language)
             c.setFont(FONT_BOLD, 8)
             c.setFillColor(colors.HexColor(INK))
-            c.drawString(cx + 12, 5, sev_name)
-            name_width = c.stringWidth(sev_name, FONT_BOLD, 8)
+            c.drawString(cx + 12, 5, display_name)
+            name_width = c.stringWidth(display_name, FONT_BOLD, 8)
 
             c.setFont(FONT_MONO_BOLD, 8)
             c.setFillColor(colors.HexColor(MUTED))
@@ -602,27 +628,27 @@ class _SeverityBar(Flowable):
             c.drawString(cx + 12 + name_width + 5, 5, f"{count} · {pct:.0f}%")
 
 
-def _severity_drawing(summary) -> Flowable:
+def _severity_drawing(summary, language: str = "en") -> Flowable:
     sev = summary.severity_counts
     counts = [getattr(sev, s) for s in _SEVERITY_ORDER]
-    return _SeverityBar(_CONTENT_WIDTH, counts)
+    return _SeverityBar(_CONTENT_WIDTH, counts, language)
 
 
 def _zone_section(data: ReportData, styles: dict) -> list:
+    lang = data.language
     summary = data.summary
     elements: list = []
-    if data.zone_scope_label != "All zones":
+    if data.zone_id is not None:  # was a fragile string compare — see plan §0.2
         elements.append(
             Paragraph(
-                f"Site-wide totals — headline figures above are filtered to "
-                f"{escape(data.zone_scope_label)}.",
+                t("site_wide_filtered_note", lang).format(zone=escape(data.zone_scope_label)),
                 styles["Muted"],
             )
         )
         elements.append(Spacer(1, 4))
 
     if not summary.zone_totals:
-        elements.append(Paragraph("No zones configured.", styles["Muted"]))
+        elements.append(Paragraph(t("no_zones_configured", lang), styles["Muted"]))
         return elements
 
     zones = summary.zone_totals
@@ -659,10 +685,10 @@ def _zone_section(data: ReportData, styles: dict) -> list:
     return elements
 
 
-def _trend_section(trend, styles: dict) -> list:
+def _trend_section(trend, styles: dict, language: str = "en") -> list:
     totals = [sum(p.zone_totals.values()) for p in trend.points]
     if not trend.points or sum(totals) <= 0:
-        return [Paragraph("No trend data for this period.", styles["Muted"])]
+        return [Paragraph(t("no_trend_data", language), styles["Muted"])]
 
     d = Drawing(_CONTENT_WIDTH, 55 * mm)
     chart = HorizontalLineChart()
@@ -691,12 +717,12 @@ def _trend_section(trend, styles: dict) -> list:
     return [d]
 
 
-def _compare_section(compare, styles: dict) -> list:
+def _compare_section(compare, styles: dict, language: str = "en") -> list:
     points = compare.points
     if len(points) > 14:
         points = _downsample_weekly(points)
     if not points:
-        return [Paragraph("No comparison data for this period.", styles["Muted"])]
+        return [Paragraph(t("no_compare_data", language), styles["Muted"])]
 
     # Legend lives in its own reserved strip above the plot area — never
     # inside the chart's coordinate box — so it can never overlap a bar
@@ -735,8 +761,8 @@ def _compare_section(compare, styles: dict) -> list:
     legend.fontSize = 8.5
     legend.alignment = "left"
     legend.colorNamePairs = [
-        (colors.HexColor(BRAND), "Current period"),
-        (_tint(BRAND, 0.4), "Prior period"),
+        (colors.HexColor(BRAND), t("current_period", language)),
+        (_tint(BRAND, 0.4), t("prior_period", language)),
     ]
 
     outer = Drawing(_CONTENT_WIDTH, drawing_height)
@@ -759,21 +785,21 @@ def _downsample_weekly(points: list) -> list:
     return buckets
 
 
-def _type_table(summary, styles: dict) -> Table:
-    header = ["Category", "Type", "Count", "% of total"]
+def _type_table(summary, styles: dict, language: str = "en") -> Table:
+    header = [t("col_category", language), t("col_type", language), t("col_count", language), t("col_pct_total", language)]
     rows = [header]
     total = summary.grand_total or 1
-    for t in summary.type_counts[:10]:
+    for row in summary.type_counts[:10]:
         rows.append(
             [
-                t.category.upper(),
-                Paragraph(escape(t.type), styles["TableCell"]),
-                str(t.count),
-                f"{t.count / total * 100:.0f}%",
+                _category_label(row.category, language),
+                Paragraph(escape(row.type), styles["TableCell"]),
+                str(row.count),
+                f"{row.count / total * 100:.0f}%",
             ]
         )
     if len(rows) == 1:
-        rows.append(["—", "No incident types recorded.", "", ""])
+        rows.append(["—", t("no_incident_types", language), "", ""])
 
     table = Table(
         rows,
@@ -802,28 +828,40 @@ def _type_table(summary, styles: dict) -> Table:
     return table
 
 
-def _incident_table(rows: list[ReportIncidentRow], styles: dict) -> Table:
-    header = ["Time", "Severity", "Category", "Type", "Zone", "Camera"]
+def _incident_table(rows: list[ReportIncidentRow], styles: dict, language: str = "en") -> Table:
+    header = [
+        t("col_time", language), t("col_severity", language), t("col_category", language),
+        t("col_type", language), t("col_zone", language), t("col_camera", language),
+    ]
     table_rows = [header]
     for row in rows:
+        severity_color = SEVERITY_COLORS.get(row.severity, INK)
         table_rows.append(
             [
                 row.timestamp_local,
-                row.severity,
-                row.category,
+                Paragraph(
+                    f'<font face="{FONT_BOLD}" color="{severity_color}">'
+                    f"{escape(_severity_label(row.severity, language))}</font>",
+                    styles["TableCell"],
+                ),
+                # already translated by report_data.py's _CATEGORY_LABELS
+                Paragraph(escape(row.category), styles["TableCell"]),
                 Paragraph(escape(row.type), styles["TableCell"]),
                 Paragraph(escape(row.zone_name), styles["TableCell"]),
                 Paragraph(escape(row.camera_label), styles["TableCell"]),
             ]
         )
     if len(table_rows) == 1:
-        table_rows.append(["—", "—", "—", "No incidents in this period.", "—", "—"])
+        table_rows.append(["—", "—", "—", t("no_incidents_table", language), "—", "—"])
 
-    # Type/Zone/Camera hold free text of unpredictable length, so they're
-    # wrapped in Paragraphs (above) rather than left as plain strings —
-    # plain-string cells don't wrap and will visually overlap the next
-    # column once a zone or camera name outgrows its fixed width.
-    col_widths = [32 * mm, 18 * mm, 16 * mm, 40 * mm, 40 * mm, _CONTENT_WIDTH - 146 * mm]
+    # Every free-text/variable-length cell is wrapped in a Paragraph so it
+    # wraps instead of silently overflowing into the next column once a
+    # translation or a long zone/camera name outgrows its fixed width. This
+    # bit both languages in practice: Vietnamese severity labels ("Nghiêm
+    # Trọng", "Trung Bình") and the English "Behavior" category label are
+    # each wider than the old fixed-width plain-string columns allowed for,
+    # which bled the text into the neighboring column.
+    col_widths = [33 * mm, 29 * mm, 21 * mm, 33 * mm, 33 * mm, _CONTENT_WIDTH - 149 * mm]
     table = Table(table_rows, colWidths=col_widths, repeatRows=1)
     style_commands = [
         ("FONTNAME", (0, 0), (-1, -1), FONT_REGULAR),
@@ -843,11 +881,6 @@ def _incident_table(rows: list[ReportIncidentRow], styles: dict) -> Table:
         ("FONTNAME", (0, 1), (0, -1), FONT_MONO),
         ("FONTSIZE", (0, 1), (0, -1), 7.5),
     ]
-    for i, row in enumerate(rows, start=1):
-        color = SEVERITY_COLORS.get(row.severity)
-        if color:
-            style_commands.append(("TEXTCOLOR", (1, i), (1, i), colors.HexColor(color)))
-            style_commands.append(("FONTNAME", (1, i), (1, i), FONT_BOLD))
     table.setStyle(TableStyle(style_commands))
     return table
 
@@ -963,9 +996,9 @@ def _footer(data: ReportData):
 
         canvas.setFont(FONT_REGULAR, 7.5)
         canvas.setFillColor(colors.HexColor(MUTED))
-        left_text = f"{data.company_name} — Confidential · Generated {data.generated_at_local}"
+        left_text = f"{data.company_name} — {t('confidential_generated', data.language)} {data.generated_at_local}"
         canvas.drawString(_MARGIN, 10 * mm, left_text)
-        right_text = f"Page {canvas.getPageNumber()}"
+        right_text = f"{t('page', data.language)} {canvas.getPageNumber()}"
         canvas.drawRightString(_PAGE_SIZE[0] - _MARGIN, 10 * mm, right_text)
         canvas.restoreState()
 

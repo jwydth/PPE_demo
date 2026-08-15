@@ -3,6 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, EmailStr, Field
 
 ScheduleFrequency = Literal["off", "weekly", "monthly"]
+ScheduleLanguage = Literal["en", "vi"]
 
 
 class ReportScheduleRequest(BaseModel):
@@ -18,6 +19,7 @@ class ReportScheduleRequest(BaseModel):
     include_snapshots: bool = True
     subject: str | None = Field(default=None, max_length=200)
     message: str | None = Field(default=None, max_length=2000)
+    language: ScheduleLanguage = "en"
 
 
 class ReportScheduleResponse(BaseModel):
@@ -31,6 +33,7 @@ class ReportScheduleResponse(BaseModel):
     include_snapshots: bool
     subject: str | None
     message: str | None
+    language: ScheduleLanguage
     last_sent_at: str | None
     next_run_at: str | None
     timezone_label: str

@@ -128,6 +128,15 @@ def test_preview_returns_insight_strings(session):
     assert all(isinstance(i, str) for i in body["insights"])
 
 
+def test_preview_returns_vietnamese_zone_scope_label(session):
+    client = _client(session)
+
+    res = client.get("/reports/incidents/preview", params={"range": "7D", "language": "vi"})
+
+    assert res.status_code == 200
+    assert res.json()["zone_scope_label"] == "Tất cả khu vực"
+
+
 def test_email_report_returns_503_when_disabled(session, monkeypatch):
     monkeypatch.setattr(settings, "REPORT_EMAIL_ENABLED", False)
     client = _client(session)

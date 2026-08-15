@@ -168,6 +168,23 @@ def test_list_incidents_filters_by_category_zone_and_severity():
     assert service.list_incidents(severity="Low") == []
 
 
+def test_list_incidents_filters_by_camera():
+    camera_a = _camera(1, home_zone_id=5)
+    camera_b = _camera(2, home_zone_id=6)
+    service = _service(
+        ppe=[
+            _ppe_violation(1, NOW, camera_id=1),
+            _ppe_violation(2, NOW, camera_id=2),
+        ],
+        cameras={1: camera_a, 2: camera_b},
+        zones={5: _zone(5, "Zone A"), 6: _zone(6, "Zone B")},
+    )
+
+    only_camera_1 = service.list_incidents(camera_id=1)
+    assert {i.id for i in only_camera_1} == {1}
+    assert service.list_incidents(camera_id=999) == []
+
+
 def test_ppe_severity_derivation_feeds_through_unified_incident():
     service = _service(ppe=[_ppe_violation(1, NOW, camera_id=None)])
 

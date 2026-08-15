@@ -1698,7 +1698,10 @@ export function DashboardShell() {
   const cameraCountsByZone = useMemo(() => {
     const counts: Record<number, number> = {};
     for (const cam of cameras) {
-      if (cam.homeZoneId != null) {
+      // Only active cameras count here — the sidebar's green/gray dot and
+      // camera count are meant to reflect what's actually watching the
+      // zone right now, not just what's assigned to it.
+      if (cam.homeZoneId != null && cam.active) {
         counts[cam.homeZoneId] = (counts[cam.homeZoneId] ?? 0) + 1;
       }
     }

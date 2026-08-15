@@ -3,7 +3,7 @@
 import { Calendar, Loader2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { getReportSchedule, updateReportSchedule } from "@/lib/ppe-api";
-import { ReportScheduleRequest, ReportScheduleResponse, ScheduleFrequency } from "@/types/report";
+import { ReportLanguage, ReportScheduleRequest, ReportScheduleResponse, ScheduleFrequency } from "@/types/report";
 
 interface ZoneOption {
   id: number;
@@ -40,6 +40,7 @@ export function ScheduleReportDialog({ open, onClose, zoneOptions }: ScheduleRep
   const [dayOfMonth, setDayOfMonth] = useState(1);
   const [time, setTime] = useState("07:00");
   const [zoneId, setZoneId] = useState<number | null>(null);
+  const [language, setLanguage] = useState<ReportLanguage>("en");
   const [recipientsInput, setRecipientsInput] = useState("");
   const [recipients, setRecipients] = useState<string[]>([]);
   const [includeSnapshots, setIncludeSnapshots] = useState(true);
@@ -59,6 +60,7 @@ export function ScheduleReportDialog({ open, onClose, zoneOptions }: ScheduleRep
         setDayOfMonth(schedule.day_of_month ?? 1);
         setTime(`${pad(schedule.hour)}:${pad(schedule.minute)}`);
         setZoneId(schedule.zone_id);
+        setLanguage(schedule.language);
         setRecipients(schedule.recipients);
         setIncludeSnapshots(schedule.include_snapshots);
         setLoadError("");
@@ -113,6 +115,7 @@ export function ScheduleReportDialog({ open, onClose, zoneOptions }: ScheduleRep
       zone_id: zoneId,
       recipients: finalRecipients,
       include_snapshots: includeSnapshots,
+      language,
     };
 
     setSaveState("saving");
@@ -272,6 +275,20 @@ export function ScheduleReportDialog({ open, onClose, zoneOptions }: ScheduleRep
                           {z.name}
                         </option>
                       ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      Language
+                    </label>
+                    <select
+                      value={language}
+                      onChange={(e) => setLanguage(e.target.value as ReportLanguage)}
+                      className="w-full rounded-md border border-slate-200 px-2 py-1.5 text-xs outline-none focus:border-slate-400"
+                    >
+                      <option value="en">English</option>
+                      <option value="vi">Tiếng Việt</option>
                     </select>
                   </div>
 
