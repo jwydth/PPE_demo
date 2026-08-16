@@ -21,10 +21,9 @@ class Settings(BaseSettings):
     # caps VRAM/connect-latency instead of loading a fresh copy of the weights
     # per websocket connection. Connections beyond this count queue for a free
     # instance (see PPEDetector.acquire_model_instance).
-    # A 12 GB GPU cannot safely hold the former four-instance PPE pool plus
-    # an independent Pose/ReID behavior worker. Extra streams queue instead
-    # of exhausting VRAM and crashing all active streams.
-    MAX_CONCURRENT_STREAMS: int = 1
+    # Three streams support the Matrix View camera set. Extra streams queue
+    # instead of exhausting VRAM and crashing all active streams.
+    MAX_CONCURRENT_STREAMS: int = 3
     INFERENCE_HALF: bool = True    # applied only on CUDA by the pipeline
     INFERENCE_IMGSZ: int = 640     # pin inference resolution for predictable latency
     CONFIDENCE_THRESHOLD: float = 0.3

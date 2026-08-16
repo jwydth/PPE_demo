@@ -61,11 +61,15 @@ export function IncidentCard({
   onDelete,
   onOpenDetail,
   compact = false,
+  cameraName,
+  showMetadata = true,
 }: {
   event: ViolationReport | ZoneViolation | BehaviorIncident;
   onDelete?: () => void;
   onOpenDetail?: (category: "ppe" | "zone" | "behavior", id: number) => void;
   compact?: boolean;
+  cameraName?: string;
+  showMetadata?: boolean;
 }) {
   const isPpe = isPpeIncident(event);
   const isBehavior = isBehaviorIncident(event);
@@ -124,12 +128,14 @@ export function IncidentCard({
             </span>
           </div>
         </div>
-        <div className={`${compact ? "mt-2 gap-1 pt-2" : "mt-3 gap-2 pt-3"} grid grid-cols-2 border-t border-slate-100 text-xs text-slate-600`}>
-          <span className="truncate">Video: {event.video_name ?? "-"}</span>
-          <span>Frame: {frameLabel ?? "-"}</span>
-          <span>Track: {event.track_id ?? "-"}</span>
-          <span>ID: #{event.id ?? "-"}</span>
-        </div>
+        {showMetadata ? (
+          <div className={`${compact ? "mt-2 gap-1 pt-2" : "mt-3 gap-2 pt-3"} grid grid-cols-2 border-t border-slate-100 text-xs text-slate-600`}>
+            <span className="truncate">Video: {cameraName ?? event.video_name ?? "-"}</span>
+            <span>Frame: {frameLabel ?? "-"}</span>
+            <span>Track: {event.track_id ?? "-"}</span>
+            <span>ID: #{event.id ?? "-"}</span>
+          </div>
+        ) : null}
         {onDelete ? (
           <button
             type="button"

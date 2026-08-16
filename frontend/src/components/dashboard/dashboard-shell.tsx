@@ -1471,6 +1471,15 @@ function IncidentPanel() {
     queryFn: getSafetyEvents,
   });
   const events = eventsQuery.data ?? [];
+  const camerasQuery = useQuery({
+    queryKey: ["cameras"],
+    queryFn: getCameras,
+    staleTime: 60_000,
+  });
+  const cameraNameBySource = useMemo(
+    () => new Map((camerasQuery.data ?? []).map((camera) => [camera.source_key, camera.name])),
+    [camerasQuery.data],
+  );
   const [deleteAllError, setDeleteAllError] = useState("");
   const [deletingAll, setDeletingAll] = useState(false);
   const [selectedIncident, setSelectedIncident] = useState<{
@@ -1571,6 +1580,8 @@ function IncidentPanel() {
           <IncidentCard
             key={`${event.id ?? index}-${event.timestamp}`}
             event={event}
+            cameraName={cameraNameBySource.get(event.video_name ?? "") ?? "Unknown camera"}
+            showMetadata={false}
             onDelete={() => void deleteEvent(event)}
             onOpenDetail={(category, id) => setSelectedIncident({ category, id })}
           />
