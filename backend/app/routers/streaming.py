@@ -4,9 +4,12 @@ import logging
 import time
 from collections import deque
 from pathlib import Path
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Query
+from fastapi.responses import HTMLResponse, Response
+from app.core.config import settings
 from app.schemas.streaming import StreamEvent
+from app.services.annotated_stream import latest_annotated_frame
+from app.services.ppe.response_builder import _encode_frame_to_jpeg
 from app.services.ppe_detector import PPEDetector
 from app.services.stream_health import (
     increment_stream_health,
@@ -33,6 +36,34 @@ _current_cancels: dict[str, asyncio.Event] = {}
 # a camera's stream_lock — without this, a plain receive_json() call just
 # blocks forever, and nothing else in the connection detects the disconnect.
 _LIVENESS_PROBE_SECONDS = 15.0
+
+@router.get("/stream-snapshot")
+async def stream_snapshot(video_name: str = Query(...)) -> Response:
+    """Latest annotated still frame for a camera, as JPEG.
+
+    Used as the <video poster> by the live player so a reloading page shows
+    a real frame straight away instead of a black rectangle while HLS
+    negotiates. Returns 404 rather than a stale image when the stream isn't
+    currently running — the player then just falls back to black, which is
+    exactly the previous behaviour, so this can never make a reload worse.
+    """
+    frame = latest_annotated_frame(
+        video_name,
+        settings.ANNOTATED_SNAPSHOT_MAX_AGE_SECONDS,
+    )
+    if frame is None:
+        raise HTTPException(status_code=404, detail="No recent frame for this source")
+    # cv2 encoding is CPU-bound; keep it off the event loop so a burst of
+    # poster requests can't add latency to the running streams.
+    jpeg = await asyncio.to_thread(_encode_frame_to_jpeg, frame)
+    return Response(
+        content=jpeg,
+        media_type="image/jpeg",
+        # The whole point is freshness — never let a browser or proxy reuse
+        # a poster from a previous page load.
+        headers={"Cache-Control": "no-store"},
+    )
+
 
 @router.websocket("/ws/stream")
 async def stream_video_ws(

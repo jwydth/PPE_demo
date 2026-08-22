@@ -87,9 +87,11 @@ async def startup() -> None:
 @app.on_event("shutdown")
 async def shutdown() -> None:
     _report_scheduler.shutdown(wait=False)
+    from app.services.annotated_stream import close_all_publishers
     from app.services.behavior_inference import shutdown_behavior_scheduler
     from app.services.frame_hub import frame_hubs
 
+    await close_all_publishers()
     await frame_hubs.close_all()
     await shutdown_behavior_scheduler()
 

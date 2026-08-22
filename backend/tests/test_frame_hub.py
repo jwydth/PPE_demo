@@ -44,7 +44,7 @@ class FakeCapture:
 def test_hub_shares_one_capture_and_closes_after_last_subscriber():
     async def run():
         FakeCapture.opened = FakeCapture.released = 0
-        registry = FrameHubRegistry(FakeCapture)
+        registry = FrameHubRegistry(FakeCapture, idle_grace_seconds=0)
         latest = await registry.subscribe("camera-a", policy="latest")
         ordered = await registry.subscribe("camera-a", policy="ordered", queue_size=8)
 
@@ -70,7 +70,7 @@ def test_hub_shares_one_capture_and_closes_after_last_subscriber():
 
 def test_new_hub_uses_a_new_stream_epoch():
     async def run():
-        registry = FrameHubRegistry(FakeCapture)
+        registry = FrameHubRegistry(FakeCapture, idle_grace_seconds=0)
         first = await registry.subscribe("camera-c", policy="latest")
         first_packet = await first.get()
         await first.close()
@@ -88,7 +88,7 @@ def test_new_hub_uses_a_new_stream_epoch():
 
 def test_latest_drops_stale_while_ordered_marks_overflow_gap():
     async def run():
-        registry = FrameHubRegistry(FakeCapture)
+        registry = FrameHubRegistry(FakeCapture, idle_grace_seconds=0)
         latest = await registry.subscribe("camera-b", policy="latest")
         ordered = await registry.subscribe("camera-b", policy="ordered", queue_size=2)
         await asyncio.sleep(0.03)
@@ -103,5 +103,48 @@ def test_latest_drops_stale_while_ordered_marks_overflow_gap():
         assert ordered_packet.dropped_before > 0
         await latest.close()
         await ordered.close()
+
+    asyncio.run(run())
+
+
+def test_quick_resubscribe_within_grace_window_reuses_the_capture():
+    async def run():
+        FakeCapture.opened = FakeCapture.released = 0
+        registry = FrameHubRegistry(FakeCapture, idle_grace_seconds=0.2)
+        first = await registry.subscribe("camera-d", policy="latest")
+        first_packet = await first.get()
+        await first.close()
+
+        # Still within the grace window — reuses the same capture/hub and
+        # therefore the same stream_epoch, unlike an immediate-teardown
+        # resubscribe (see test_new_hub_uses_a_new_stream_epoch).
+        second = await registry.subscribe("camera-d", policy="latest")
+        assert "camera-d" in registry.hubs
+        assert FakeCapture.opened == 1
+        assert FakeCapture.released == 0
+        second_packet = await second.get()
+        assert second_packet.stream_epoch == first_packet.stream_epoch
+        await second.close()
+        # second.close() leaves the hub idling out its grace window in a
+        # background task — force it down now so its capture thread doesn't
+        # keep running (and touching FakeCapture's shared counters) after
+        # this test's event loop closes.
+        await registry.close_all()
+
+    asyncio.run(run())
+
+
+def test_hub_tears_down_once_grace_window_elapses_unused():
+    async def run():
+        FakeCapture.opened = FakeCapture.released = 0
+        registry = FrameHubRegistry(FakeCapture, idle_grace_seconds=0.1)
+        sub = await registry.subscribe("camera-e", policy="latest")
+        await sub.get()
+        await sub.close()
+
+        assert "camera-e" in registry.hubs
+        await asyncio.sleep(0.3)
+        assert "camera-e" not in registry.hubs
+        assert FakeCapture.released == 1
 
     asyncio.run(run())

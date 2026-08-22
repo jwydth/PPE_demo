@@ -10,6 +10,7 @@ from app.services.annotated_stream import (
     RenderFeatures,
     _person_violation_labels,
     annotated_rtsp_url,
+    latest_annotated_frame,
     render_annotated_frame,
 )
 from app.core.config import settings
@@ -369,3 +370,177 @@ def test_only_one_publisher_can_own_an_annotated_output():
         await duplicate.stop()
 
     asyncio.run(exercise())
+
+
+class _QueueSubscription:
+    dropped_frames = 0
+    queue = SimpleNamespace(qsize=lambda: 0)
+
+    def __init__(self):
+        self._queue: asyncio.Queue = asyncio.Queue()
+
+    async def get(self):
+        return await self._queue.get()
+
+    async def close(self):
+        return None
+
+
+class _CountingRawPublisher:
+    instances = 0
+
+    def __init__(self, **_kwargs):
+        type(self).instances += 1
+
+    def write(self, frame):
+        return True
+
+    def close(self):
+        pass
+
+
+def test_poster_frame_is_served_fresh_and_withheld_once_stale():
+    import time as _time
+
+    from app.services.annotated_stream import (
+        _latest_frame_lock,
+        _latest_frames,
+        latest_annotated_frame,
+    )
+
+    fresh = np.full((4, 4, 3), 7, dtype=np.uint8)
+    stale = np.full((4, 4, 3), 9, dtype=np.uint8)
+    with _latest_frame_lock:
+        _latest_frames["src-fresh"] = (fresh, _time.monotonic())
+        _latest_frames["src-stale"] = (stale, _time.monotonic() - 60.0)
+    try:
+        assert latest_annotated_frame("src-fresh", 10.0) is fresh
+        # Safety footage: a minute-old frame must never be presented as the
+        # current view, even though it is still cached.
+        assert latest_annotated_frame("src-stale", 10.0) is None
+        assert latest_annotated_frame("src-stale", 120.0) is stale
+        assert latest_annotated_frame("src-never-published", 10.0) is None
+    finally:
+        with _latest_frame_lock:
+            _latest_frames.pop("src-fresh", None)
+            _latest_frames.pop("src-stale", None)
+
+
+def test_publishing_a_frame_records_it_as_the_poster(monkeypatch):
+    import app.services.annotated_stream as annotated_stream
+
+    monkeypatch.setattr(settings, "ANNOTATED_STREAM_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(annotated_stream, "RawFramePublisher", _CountingRawPublisher)
+    _CountingRawPublisher.instances = 0
+    source = packet(0).source
+
+    class FakeSubscription:
+        dropped_frames = 0
+        queue = SimpleNamespace(qsize=lambda: 0)
+
+        def __init__(self):
+            self.items = [packet(0), None]
+
+        async def get(self):
+            return self.items.pop(0)
+
+        async def close(self):
+            return None
+
+    class FakeHubs:
+        async def subscribe(self, *_args, **_kwargs):
+            return FakeSubscription()
+
+    with annotated_stream._latest_frame_lock:
+        annotated_stream._latest_frames.pop(source, None)
+
+    publisher = annotated_stream.AnnotatedStreamPublisher(
+        source=source,
+        fps=24,
+        store=AnnotatedStateStore(fps=24),
+        hubs=FakeHubs(),
+    )
+    asyncio.run(publisher._run())
+
+    try:
+        assert latest_annotated_frame(source, 30.0) is not None
+    finally:
+        with annotated_stream._latest_frame_lock:
+            annotated_stream._latest_frames.pop(source, None)
+
+
+def test_acquire_publisher_reuses_a_running_instance_within_grace(monkeypatch):
+    import app.services.annotated_stream as annotated_stream
+
+    monkeypatch.setattr(settings, "ANNOTATED_STREAM_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(settings, "ANNOTATED_PUBLISHER_IDLE_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr(annotated_stream, "RawFramePublisher", _CountingRawPublisher)
+    _CountingRawPublisher.instances = 0
+
+    class FakeHubs:
+        def __init__(self):
+            self.subscription = _QueueSubscription()
+
+        async def subscribe(self, *_args, **_kwargs):
+            return self.subscription
+
+    hubs = FakeHubs()
+    store1 = AnnotatedStateStore(fps=24)
+
+    async def run():
+        first = annotated_stream.acquire_publisher(
+            source=packet(0).source, fps=24, store=store1, hubs=hubs,
+        )
+        await hubs.subscription._queue.put(packet(0))
+        await asyncio.sleep(0.02)  # let _run() consume the packet and spin up ffmpeg
+
+        await first.release()
+        assert first._task is not None and not first._task.done(), (
+            "release() with a grace period must not stop the running task"
+        )
+
+        store2 = AnnotatedStateStore(fps=24)
+        second = annotated_stream.acquire_publisher(
+            source=packet(0).source, fps=24, store=store2, hubs=hubs,
+        )
+        assert second is first
+        assert second.store is store2
+
+        await first.stop()
+
+    asyncio.run(run())
+    assert _CountingRawPublisher.instances == 1
+
+
+def test_publisher_tears_down_once_grace_window_elapses_unused(monkeypatch):
+    import app.services.annotated_stream as annotated_stream
+
+    monkeypatch.setattr(settings, "ANNOTATED_STREAM_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(settings, "ANNOTATED_PUBLISHER_IDLE_GRACE_SECONDS", 0.1)
+    monkeypatch.setattr(annotated_stream, "RawFramePublisher", _CountingRawPublisher)
+    _CountingRawPublisher.instances = 0
+
+    class FakeHubs:
+        def __init__(self):
+            self.subscription = _QueueSubscription()
+
+        async def subscribe(self, *_args, **_kwargs):
+            return self.subscription
+
+    hubs = FakeHubs()
+    output_url = annotated_rtsp_url(packet(0).source)
+
+    async def run():
+        first = annotated_stream.acquire_publisher(
+            source=packet(0).source, fps=24, store=AnnotatedStateStore(fps=24), hubs=hubs,
+        )
+        await hubs.subscription._queue.put(packet(0))
+        await asyncio.sleep(0.02)
+
+        await first.release()
+        assert output_url in annotated_stream._active_publishers
+        await asyncio.sleep(0.3)
+        assert output_url not in annotated_stream._active_publishers
+        assert first._task is None or first._task.done()
+
+    asyncio.run(run())

@@ -24,6 +24,18 @@ class Settings(BaseSettings):
     # Three streams support the Matrix View camera set. Extra streams queue
     # instead of exhausting VRAM and crashing all active streams.
     MAX_CONCURRENT_STREAMS: int = 3
+    # How long a camera's shared frame-capture thread (CameraFrameHub) stays
+    # connected after its last subscriber disconnects before it actually
+    # tears down the RTSP/capture session. A page reload or a StrictMode
+    # dev-mode remount closes and reopens the websocket within a second or
+    # two; without this grace window every such reconnect pays the full
+    # RTSP handshake (TCP connect + SETUP/PLAY + wait for a keyframe) again,
+    # which is what makes the live feed go black for a few seconds on
+    # reload. Sized to comfortably cover a slow reload, a brief tab switch,
+    # or a user reopening the dashboard a moment later — at 8s a reload that
+    # took slightly longer still fell off the edge and paid a full cold
+    # start. Set to 0 to tear down immediately (previous behavior).
+    FRAME_HUB_IDLE_GRACE_SECONDS: float = 60.0
     INFERENCE_HALF: bool = True    # applied only on CUDA by the pipeline
     INFERENCE_IMGSZ: int = 640     # pin inference resolution for predictable latency
     CONFIDENCE_THRESHOLD: float = 0.3
@@ -35,6 +47,26 @@ class Settings(BaseSettings):
     # Server-composed live output. AI remains asynchronous; the compositor
     # releases each buffered source frame at its presentation deadline.
     ANNOTATED_STREAM_ENABLED: bool = True
+    # Mirrors FRAME_HUB_IDLE_GRACE_SECONDS for the downstream annotated-output
+    # publisher (ffmpeg -> mediamtx -> HLS): keeps its ffmpeg process and RTSP
+    # publish connection alive for this long after the last viewer disconnects,
+    # so a page reload reattaches to the still-running publisher instead of
+    # tearing down and re-negotiating a fresh RTSP publish + HLS stream (the
+    # dominant remaining cost behind the reload black screen once the camera
+    # capture itself — see FRAME_HUB_IDLE_GRACE_SECONDS — is kept warm).
+    # Cold-starting this chain leaves the HLS path 404ing for several
+    # seconds, which the player can only sit and retry through, so this
+    # window is kept generous enough that an ordinary reload always lands
+    # inside it. A too-long window costs an idle encoder; a too-short one
+    # costs a multi-second black screen on every reload.
+    ANNOTATED_PUBLISHER_IDLE_GRACE_SECONDS: float = 60.0
+    # How stale the poster still-frame served by /stream-snapshot may be.
+    # It exists to cover the sub-second gap while a reloaded page starts its
+    # HLS player, so anything beyond a few seconds is past its usefulness —
+    # and serving an old frame as the current view of the factory floor
+    # would be actively misleading. Beyond this age the endpoint 404s and
+    # the player simply falls back to its black background.
+    ANNOTATED_SNAPSHOT_MAX_AGE_SECONDS: float = 10.0
     ANNOTATED_STREAM_DELAY_SECONDS: float = 3.0
     ANNOTATED_STREAM_QUEUE_SIZE: int = 180
     ANNOTATED_PPE_TTL_FRAMES: int = 8

@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   createPhysicalZone,
@@ -197,8 +197,26 @@ function normalizeConfiguredCameras(cameras: CameraConfig[]): CameraConfig[] {
     });
 }
 
+// Synchronously seeds initial state from whatever camera list (with backend
+// IDs) a previous session already resolved, so a reload can start streaming
+// immediately instead of showing "Connecting to cameras..." while the
+// mount effect below re-resolves IDs it already resolved last time. Guarded
+// for SSR since this runs inside a useState lazy initializer, which executes
+// during the server render too.
+function loadCachedCameras(): CameraConfig[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const stored = localStorage.getItem("ppe_demo_cameras");
+    if (!stored) return [];
+    return normalizeConfiguredCameras(JSON.parse(stored) as CameraConfig[]);
+  } catch {
+    return [];
+  }
+}
+
 interface CameraPanelProps {
   cameras: CameraConfig[];
+  camerasLoading: boolean;
   activeCameraId: number;
   physicalZones: PhysicalZone[];
   onCameraChange: (id: number) => void;
@@ -208,6 +226,7 @@ interface CameraPanelProps {
 
 function CameraPanel({
   cameras,
+  camerasLoading,
   activeCameraId,
   physicalZones,
   onCameraChange,
@@ -741,14 +760,16 @@ function CameraPanel({
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
         <div>
           <p className="text-sm font-semibold text-white">
-            {liveStream.isLive ? "Live Camera Feed" : "Packaging Line 1 - Uploaded Feed"}
+            {camerasLoading || liveStream.isLive ? "Live Camera Feed" : "Packaging Line 1 - Uploaded Feed"}
           </p>
           <p className="text-xs text-slate-400">
-            {liveStream.isLive
-              ? displayedCameraNames.length > 0
-                ? `Connected to ${displayedCameraNames.join(", ")}`
-                : "Connecting…"
-              : "Upload a photo or CCTV clip, then choose which detection models run on this camera"}
+            {camerasLoading
+              ? "Connecting…"
+              : liveStream.isLive
+                ? displayedCameraNames.length > 0
+                  ? `Connected to ${displayedCameraNames.join(", ")}`
+                  : "Connecting…"
+                : "Upload a photo or CCTV clip, then choose which detection models run on this camera"}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -1011,7 +1032,11 @@ function CameraPanel({
             </div>
           </div>
         )}
-        {!liveStream.isLive && !upload.file ? (
+        {camerasLoading ? (
+          <div className="grid place-items-center rounded-md border border-slate-800 bg-slate-900 p-8 text-sm text-slate-400">
+            Connecting to cameras…
+          </div>
+        ) : !liveStream.isLive && !upload.file ? (
           <FileUpload
             label="Upload camera image or video"
             helper="This replaces the live stream for now. Select model detections after the file is loaded."
@@ -1676,6 +1701,29 @@ export function DashboardShell() {
   );
   const [activeCameraId, setActiveCameraId] = useState<number>(0);
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
+  // Gates the FileUpload/"Uploaded Feed" panel so it doesn't flash on screen
+  // while camera IDs are being resolved, before the live stream WebSockets
+  // have had a chance to connect and flip liveStream.isLive.
+  const [camerasLoading, setCamerasLoading] = useState(true);
+
+  // Seeds `cameras` from last session's already-resolved list (if any)
+  // *before the browser paints*, so a reload can start streaming on the
+  // first visible frame instead of showing "Connecting to cameras..." while
+  // the mount effect below re-resolves IDs it already resolved before.
+  // Deliberately a layout effect, not a useState lazy initializer: this
+  // component is SSR'd (no localStorage on the server), so seeding via the
+  // initializer would render different content server- vs client-side on
+  // the very first pass and trip a hydration mismatch. A layout effect runs
+  // after the (SSR-matching) first paint is committed but before the
+  // browser actually paints it, so the correction is invisible.
+  useLayoutEffect(() => {
+    const cached = loadCachedCameras();
+    if (cached.length === 0) return;
+    setCameras(cached);
+    const active = cached.find((camera) => camera.active) || cached[0];
+    setActiveCameraId(active?.id ?? 0);
+    setCamerasLoading(false);
+  }, []);
   const [physicalZones, setPhysicalZones] = useState<PhysicalZone[]>([]);
   // Same hook and default range/zone (7D, all zones) as the Incident
   // Analytics tab's KPI row, so the two stay in sync instead of this one
@@ -1699,9 +1747,13 @@ export function DashboardShell() {
 
     void getPhysicalZones().then(setPhysicalZones).catch(() => {});
 
-    // Resolve every source to its database camera before CameraPanel mounts.
-    // Feature requests and WebSocket settings can therefore never use a stale
-    // localStorage ID during the asynchronous startup window.
+    // Re-resolve every source to its database camera in the background. When
+    // `cameras` was already seeded from a cached, previously-resolved list
+    // (loadCachedCameras above), streaming has already started by the time
+    // this resolves — this call exists to self-heal drift (a camera
+    // renamed/recreated server-side, changing its id) rather than gate the
+    // first paint. On a true first-ever visit (no cache yet), `cameras`
+    // starts empty and this is what populates it.
     void Promise.all(
       loaded.map(async (camera) => {
         const backendCamera = await ensureCamera(camera.name, camera.rtspUrl);
@@ -1718,6 +1770,7 @@ export function DashboardShell() {
         setCameras(reconciled);
         const active = reconciled.find((camera) => camera.active) || reconciled[0];
         setActiveCameraId(active?.id ?? 0);
+        setCamerasLoading(false);
       })
       .catch((error) => {
         if (cancelled) return;
@@ -1726,6 +1779,7 @@ export function DashboardShell() {
         setCameras(loaded);
         const active = loaded.find((camera) => camera.active) || loaded[0];
         setActiveCameraId(active?.id ?? 0);
+        setCamerasLoading(false);
       });
 
     return () => {
@@ -1824,6 +1878,7 @@ export function DashboardShell() {
                 <div className={activeView === "feeds" ? "grid gap-4" : "hidden"}>
                   <CameraPanel
                     cameras={cameras}
+                    camerasLoading={camerasLoading}
                     activeCameraId={activeCameraId}
                     physicalZones={physicalZones}
                     onCameraChange={setActiveCameraId}

@@ -4,6 +4,7 @@ import Hls from "hls.js";
 import { Info, Maximize2, Minimize2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { API_URL } from "@/lib/ppe-api";
 import { rtspToHlsUrl, type StreamTimeline } from "@/lib/stream-timeline";
 
 export function LlHlsVideo({
@@ -43,6 +44,16 @@ export function LlHlsVideo({
   const metricsCallbackRef = useRef(onPlaybackMetrics);
   const normalizedAspectRatio =
     Number.isFinite(aspectRatio) && aspectRatio > 0 ? aspectRatio : 16 / 9;
+  // Latest annotated still frame, shown by the browser until the player has
+  // decoded its first real frame. Without it the element is a black
+  // rectangle for however long HLS startup takes — which on a cold stream
+  // is several seconds of manifest retries. Only for live (annotated)
+  // sources; an uploaded-file <video> has its own first frame to show.
+  // 404s harmlessly when the stream isn't running, leaving the old black
+  // background, so this can never regress the previous behaviour.
+  const posterUrl = annotated
+    ? `${API_URL}/stream-snapshot?video_name=${encodeURIComponent(source)}`
+    : undefined;
   const fullscreenStageStyle = isFullscreen
     ? {
         width: `min(100vw, ${normalizedAspectRatio * 100}vh)`,
@@ -73,6 +84,16 @@ export function LlHlsVideo({
     let retryTimer = 0;
     let resumeTimer = 0;
     let disposed = false;
+    // The annotated HLS path only exists once the backend's compositor has
+    // pushed its first segments into mediamtx, so on a fresh stream the
+    // manifest 404s for a moment and hls.js reports a fatal NETWORK_ERROR.
+    // Retry quickly at first (the stream usually appears within a few
+    // hundred ms) and back off toward RETRY_MAX_MS if it really is missing —
+    // a flat delay here meant a stream that became ready 50ms after a failed
+    // probe still showed a black player until the next attempt.
+    const RETRY_MIN_MS = 150;
+    const RETRY_MAX_MS = 1000;
+    let retryDelay = RETRY_MIN_MS;
     const canPlayHere = () =>
       !document.hidden &&
       (!document.fullscreenElement ||
@@ -99,17 +120,20 @@ export function LlHlsVideo({
       hls.on(Hls.Events.MEDIA_ATTACHED, () => hls.loadSource(playlist));
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         window.clearTimeout(retryTimer);
+        retryDelay = RETRY_MIN_MS;
         resumePlayback();
       });
       hls.on(Hls.Events.ERROR, (_event, data) => {
         if (!data.fatal) return;
         if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
           window.clearTimeout(retryTimer);
+          const delay = retryDelay;
+          retryDelay = Math.min(retryDelay * 2, RETRY_MAX_MS);
           retryTimer = window.setTimeout(() => {
             if (disposed) return;
             hls.loadSource(playlist);
             hls.startLoad();
-          }, 750);
+          }, delay);
         } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
           hls.recoverMediaError();
         } else {
@@ -199,6 +223,7 @@ export function LlHlsVideo({
           ref={videoRef}
           className={className}
           controls={controls}
+          poster={posterUrl}
           muted
           autoPlay
           playsInline

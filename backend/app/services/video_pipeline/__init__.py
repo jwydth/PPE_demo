@@ -35,7 +35,11 @@ from app.schemas.detection import (
 from app.schemas.streaming import StreamEvent
 from app.schemas.violation import ViolationReport
 from app.services.auto_zone import SignPPERegistry, SignZoneRegistry, extract_signs
-from app.services.annotated_stream import AnnotatedStateStore, AnnotatedStreamPublisher
+from app.services.annotated_stream import (
+    AnnotatedStateStore,
+    AnnotatedStreamPublisher,
+    acquire_publisher,
+)
 from app.services.behavior_stream import BehaviorStreamWorker
 from app.services.inference_coordination import gpu_inference_lock, inference_priority
 from app.services.model_cadence import CadenceGate, ModelCadence
@@ -507,13 +511,15 @@ async def real_video_pipeline(
         behavior_worker: BehaviorStreamWorker | None = None
         annotated_publisher: AnnotatedStreamPublisher | None = None
         if render_store is not None:
-            annotated_publisher = AnnotatedStreamPublisher(
+            # Reuses a still-running (or idling-in-its-post-release-grace)
+            # publisher for this camera instead of always starting a fresh
+            # ffmpeg process — see acquire_publisher()'s docstring.
+            annotated_publisher = acquire_publisher(
                 source=source_str,
                 fps=fps,
                 store=render_store,
                 feature_flags=get_flags,
             )
-            annotated_publisher.start()
         if behavior_separate:
             # Defer behavior startup until the first PPE inference below has
             # initialized this camera's CUDA tracker. Starting both model
@@ -1192,7 +1198,11 @@ async def real_video_pipeline(
         if "behavior_worker" in locals() and behavior_worker is not None:
             await behavior_worker.stop()
         if "annotated_publisher" in locals() and annotated_publisher is not None:
-            await annotated_publisher.stop()
+            # release(), not stop(): lets a quick reconnect (e.g. a page
+            # reload) reattach to this same running publisher instead of
+            # forcing a fresh RTSP-publish + HLS restart. See
+            # acquire_publisher()/AnnotatedStreamPublisher.release().
+            await annotated_publisher.release()
         if ppe_subscription is not None:
             await ppe_subscription.close()
         if pooled_model and model_instance is not None:

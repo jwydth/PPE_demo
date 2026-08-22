@@ -31,6 +31,30 @@ logger = logging.getLogger(__name__)
 _publisher_registry_lock = threading.Lock()
 _active_publishers: dict[str, "AnnotatedStreamPublisher"] = {}
 
+# Most recently composed frame per source, kept so a freshly-loaded page can
+# paint a real still image immediately instead of a black box while its HLS
+# player negotiates the stream (see stream_snapshot in routers/streaming.py).
+# This is the *annotated* frame, so the poster matches what the live video
+# will show once it starts. One frame per camera; the entry is replaced in
+# place rather than accumulated.
+_latest_frame_lock = threading.Lock()
+_latest_frames: dict[str, tuple[np.ndarray, float]] = {}
+
+
+def latest_annotated_frame(source: str, max_age_seconds: float) -> np.ndarray | None:
+    """Return the newest composed frame for `source`, or None if there isn't
+    one recent enough. Age-gating matters here: this is safety-monitoring
+    footage, so it is better to show nothing than to present a minutes-old
+    frame as if it were the current view of the floor."""
+    with _latest_frame_lock:
+        entry = _latest_frames.get(source)
+    if entry is None:
+        return None
+    frame, captured_at = entry
+    if time.monotonic() - captured_at > max_age_seconds:
+        return None
+    return frame
+
 BehaviorLabel = Literal["unknown", "others", "running", "falling"]
 
 
@@ -503,15 +527,19 @@ class AnnotatedStreamPublisher:
         store: AnnotatedStateStore,
         hubs: FrameHubRegistry | None = None,
         feature_flags: Callable[[], tuple[bool, bool, bool, bool]] | None = None,
+        idle_grace_seconds: float = 0.0,
     ) -> None:
         self.source = source
         self.fps = max(float(fps), 1.0)
         self.store = store
         self.hubs = hubs or frame_hubs
         self.feature_flags = feature_flags
+        self.idle_grace_seconds = idle_grace_seconds
         self.output_url = annotated_rtsp_url(source)
         self._task: asyncio.Task[None] | None = None
         self._publisher: RawFramePublisher | None = None
+        # Pending "no viewer attached anymore" teardown — see release() below.
+        self._idle_release_task: asyncio.Task[None] | None = None
 
     def start(self) -> bool:
         """Start once per output URL and return whether this instance owns it."""
@@ -537,6 +565,9 @@ class AnnotatedStreamPublisher:
         return True
 
     async def stop(self) -> None:
+        if self._idle_release_task is not None:
+            self._idle_release_task.cancel()
+            self._idle_release_task = None
         if self._task is not None:
             self._task.cancel()
             try:
@@ -548,6 +579,54 @@ class AnnotatedStreamPublisher:
             await asyncio.to_thread(self._publisher.close)
             self._publisher = None
         self._release_ownership()
+
+    async def release(self) -> None:
+        """Detach the current viewer from this publisher.
+
+        With no grace period configured this is identical to stop(). With one
+        configured, the ffmpeg process, RTSP publish connection, and HLS
+        stream are left running for that long in case a new connection
+        reattaches (acquire_publisher() below) — e.g. a page reload — instead
+        of tearing everything down and paying a fresh RTSP handshake plus HLS
+        restart on every reconnect.
+        """
+        if self.idle_grace_seconds <= 0:
+            await self.stop()
+            return
+        if self._idle_release_task is not None and not self._idle_release_task.done():
+            return
+        self._idle_release_task = asyncio.create_task(
+            self._idle_release(self.idle_grace_seconds)
+        )
+
+    async def _idle_release(self, grace: float) -> None:
+        try:
+            await asyncio.sleep(grace)
+        except asyncio.CancelledError:
+            return
+        with _publisher_registry_lock:
+            if _active_publishers.get(self.output_url) is not self:
+                return
+        await self.stop()
+
+    def _reattach(
+        self,
+        *,
+        fps: float,
+        store: AnnotatedStateStore,
+        feature_flags: Callable[[], tuple[bool, bool, bool, bool]] | None,
+    ) -> None:
+        """Rebind a new connection's fps/state-store/feature-flags onto this
+        already-running publisher, cancelling any pending idle teardown. The
+        publish loop reads self.store/self.feature_flags fresh on every
+        packet (see _publish_packet), so this takes effect on the very next
+        frame — no task restart, no ffmpeg restart."""
+        if self._idle_release_task is not None:
+            self._idle_release_task.cancel()
+            self._idle_release_task = None
+        self.fps = max(float(fps), 1.0)
+        self.store = store
+        self.feature_flags = feature_flags
 
     async def _run(self) -> None:
         subscription = await self.hubs.subscribe(
@@ -614,6 +693,11 @@ class AnnotatedStreamPublisher:
             features,
         )
         compose_ms = (time.perf_counter() - compose_started) * 1000.0
+        # Publish this frame as the source's poster before it goes to the
+        # encoder, so a page that loads a moment from now has something real
+        # to display while its player starts up.
+        with _latest_frame_lock:
+            _latest_frames[self.source] = (frame, time.monotonic())
         increment_stream_health(self.source, annotated_composed_frames=1)
         observe_stream_timing(self.source, "annotated_compose", compose_ms)
         observe_stream_timing(self.source, "annotated_deadline_late", late_ms)
@@ -666,6 +750,46 @@ class AnnotatedStreamPublisher:
             behavior=bool(behavior),
             sign=bool(sign),
         )
+
+
+def acquire_publisher(
+    *,
+    source: str,
+    fps: float,
+    store: AnnotatedStateStore,
+    feature_flags: Callable[[], tuple[bool, bool, bool, bool]] | None = None,
+    hubs: FrameHubRegistry | None = None,
+) -> AnnotatedStreamPublisher:
+    """Get the publisher for this camera's annotated output, reusing one
+    that's still running (including one idling out its post-release grace
+    window) instead of always starting a fresh ffmpeg process. Call
+    .release() (not .stop()) when the caller's connection ends, so a quick
+    reconnect (e.g. a page reload) can reattach here instead of forcing a
+    full RTSP-publish + HLS restart."""
+    output_url = annotated_rtsp_url(source)
+    with _publisher_registry_lock:
+        existing = _active_publishers.get(output_url)
+        if existing is not None and existing._task is not None and not existing._task.done():
+            existing._reattach(fps=fps, store=store, feature_flags=feature_flags)
+            return existing
+    publisher = AnnotatedStreamPublisher(
+        source=source,
+        fps=fps,
+        store=store,
+        hubs=hubs,
+        feature_flags=feature_flags,
+        idle_grace_seconds=settings.ANNOTATED_PUBLISHER_IDLE_GRACE_SECONDS,
+    )
+    publisher.start()
+    return publisher
+
+
+async def close_all_publishers() -> None:
+    """Force-stop every active/idling annotated publisher, bypassing their
+    grace window. Use only on process shutdown — the grace window otherwise
+    keeps ffmpeg processes running past a request's lifetime on purpose."""
+    for publisher in list(_active_publishers.values()):
+        await publisher.stop()
 
 
 def render_annotated_frame(

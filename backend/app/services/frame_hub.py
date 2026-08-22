@@ -135,11 +135,13 @@ class CameraFrameHub:
         registry: "FrameHubRegistry",
         loop: asyncio.AbstractEventLoop,
         capture_factory: Callable[[str], Any],
+        idle_grace_seconds: float,
     ) -> None:
         self.source = source
         self.registry = registry
         self.loop = loop
         self.capture_factory = capture_factory
+        self.idle_grace_seconds = idle_grace_seconds
         self.stream_epoch = uuid.uuid4().hex
         self.health = FrameHubHealth(source=source)
         self._subscribers: set[FrameSubscription] = set()
@@ -150,6 +152,8 @@ class CameraFrameHub:
             name=f"frame-hub:{source[-48:]}",
             daemon=True,
         )
+        # Pending "nobody's watching anymore" teardown — see remove() below.
+        self._idle_shutdown_task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
         self.health.started_monotonic = time.monotonic()
@@ -160,7 +164,13 @@ class CameraFrameHub:
         if self.health.reader_error:
             raise RuntimeError(self.health.reader_error)
 
+    def is_alive(self) -> bool:
+        return self._thread.is_alive()
+
     def subscribe(self, policy: DeliveryPolicy, queue_size: int) -> FrameSubscription:
+        if self._idle_shutdown_task is not None:
+            self._idle_shutdown_task.cancel()
+            self._idle_shutdown_task = None
         subscription = FrameSubscription(
             hub=self,
             policy=policy,
@@ -175,6 +185,30 @@ class CameraFrameHub:
         self.health.subscribers = len(self._subscribers)
         if self._subscribers:
             return False
+
+        grace = self.idle_grace_seconds
+        if grace <= 0:
+            return await self._stop_capture()
+
+        # Keep the capture connection warm for a short grace window instead
+        # of tearing it down the instant the last subscriber disconnects.
+        # A page reload or a StrictMode dev-mode remount reconnects within a
+        # second or two — without this, that reconnect always pays the full
+        # RTSP handshake (TCP connect + SETUP/PLAY + wait for a keyframe)
+        # again, which is what makes the live feed go black for a few
+        # seconds on reload. subscribe() above cancels this if a new
+        # subscriber shows up before it fires.
+        self._idle_shutdown_task = asyncio.create_task(self._idle_shutdown(grace))
+        return False
+
+    async def _idle_shutdown(self, grace: float) -> None:
+        try:
+            await asyncio.sleep(grace)
+        except asyncio.CancelledError:
+            return
+        await self.registry._drop_if_idle(self)
+
+    async def _stop_capture(self) -> bool:
         self._stop.set()
         await asyncio.to_thread(self._thread.join, 6.0)
         if self._thread.is_alive():
@@ -278,10 +312,19 @@ class CameraFrameHub:
 
 
 class FrameHubRegistry:
-    def __init__(self, capture_factory: Callable[[str], Any] | None = None) -> None:
+    def __init__(
+        self,
+        capture_factory: Callable[[str], Any] | None = None,
+        *,
+        idle_grace_seconds: float | None = None,
+    ) -> None:
         self._capture_factory = capture_factory
         self._hubs: dict[str, CameraFrameHub] = {}
         self._lock = asyncio.Lock()
+        # None (the production default) reads the live setting on every hub
+        # creation, so it can be tuned without a restart; tests pass an
+        # explicit value for deterministic, fast-running behavior.
+        self._idle_grace_seconds = idle_grace_seconds
 
     @property
     def hubs(self) -> dict[str, CameraFrameHub]:
@@ -296,6 +339,13 @@ class FrameHubRegistry:
     ) -> FrameSubscription:
         async with self._lock:
             hub = self._hubs.get(source)
+            if hub is not None and not hub.is_alive():
+                # The reader thread exited on its own (e.g. the camera
+                # source dropped) while this hub was sitting in its idle
+                # grace window — don't hand out a hub that will never
+                # deliver another frame.
+                self._hubs.pop(source, None)
+                hub = None
             if hub is None:
                 if self._capture_factory is None:
                     import cv2
@@ -308,6 +358,11 @@ class FrameHubRegistry:
                     registry=self,
                     loop=asyncio.get_running_loop(),
                     capture_factory=capture_factory,
+                    idle_grace_seconds=(
+                        settings.FRAME_HUB_IDLE_GRACE_SECONDS
+                        if self._idle_grace_seconds is None
+                        else self._idle_grace_seconds
+                    ),
                 )
                 self._hubs[source] = hub
                 hub.start()
@@ -329,6 +384,17 @@ class FrameHubRegistry:
             if stopped and self._hubs.get(hub.source) is hub:
                 self._hubs.pop(hub.source, None)
 
+    async def _drop_if_idle(self, hub: "CameraFrameHub") -> None:
+        """Called by a hub's idle-shutdown timer once its grace window has
+        elapsed. Actually tears the capture down, unless a subscriber raced
+        back in before this fired (subscribe() would have cancelled the
+        timer in that case, but the cancellation may still be in flight)."""
+        async with self._lock:
+            if hub._subscribers or self._hubs.get(hub.source) is not hub:
+                return
+            self._hubs.pop(hub.source, None)
+        await hub._stop_capture()
+
     async def close_all(self) -> None:
         subscriptions = [
             sub
@@ -337,6 +403,16 @@ class FrameHubRegistry:
         ]
         for subscription in subscriptions:
             await subscription.close()
+        # A hub already idling out its grace window (or one that had zero
+        # subscribers to begin with) isn't reached by the loop above — the
+        # process is exiting regardless, so tear every remaining hub down
+        # immediately instead of waiting out the grace period.
+        for hub in list(self._hubs.values()):
+            if hub._idle_shutdown_task is not None:
+                hub._idle_shutdown_task.cancel()
+                hub._idle_shutdown_task = None
+            await hub._stop_capture()
+        self._hubs.clear()
 
 
 frame_hubs = FrameHubRegistry()
