@@ -1,20 +1,26 @@
 "use client";
 
 import {
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Clock,
+  HardHat,
   Loader2,
   Maximize2,
   RefreshCw,
   Settings,
+  ShieldAlert,
+  SlidersHorizontal,
   Trash2,
   MapPinned,
   PersonStanding,
+  X,
 } from "lucide-react";
 import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   createPhysicalZone,
   deleteAllIncidents,
@@ -23,7 +29,8 @@ import {
   ensureCamera,
   getCameras,
   getPhysicalZones,
-  getSafetyEvents,
+  getSafetyEventsPage,
+  type SafetyEventsPage,
   getZones,
   setCameraHomeZone,
   getCameraFeatures,
@@ -47,6 +54,12 @@ import {
 } from "@/components/ppe/result-panels";
 import { doPolygonsOverlap } from "@/lib/spatial-utils";
 import { CONFIRM_DELETE_ALL_INCIDENTS, CONFIRM_DELETE_INCIDENT } from "@/lib/messages";
+import {
+  Severity,
+  SEVERITY_ACTIVE_CLASS,
+  SEVERITY_DOT_CLASS,
+  VALID_SEVERITIES,
+} from "@/lib/incident-severity";
 import { TrackingOverlay, ViolationReport } from "@/types/detection";
 import { PhysicalZone, ZoneType, ZoneViolation } from "@/types/zone";
 import { useDetectionUpload } from "@/hooks/useDetectionUpload";
@@ -63,7 +76,7 @@ import { IconButton } from "./icon-button";
 import { ZoneOverlaySvg } from "./zone-overlay-svg";
 import { ZoneConfigPanel } from "./zone-config-panel";
 import { AnalysisResultPanel } from "./analysis-result-panel";
-import { IncidentCategory, IncidentDetailModal } from "./incident-detail-modal";
+import { CATEGORY_LABEL, IncidentCategory, IncidentDetailModal } from "./incident-detail-modal";
 
 const Factory3DView = dynamic(
   () => import("@/components/factory3d/factory-3d-view").then((m) => m.Factory3DView),
@@ -214,6 +227,65 @@ function loadCachedCameras(): CameraConfig[] {
   }
 }
 
+// Camera feed layout (single vs. matrix, and which cameras the matrix shows)
+// persisted across reloads. `seen` records the cameras that have already been
+// auto-selected once, so the sync effect below can tell a brand new camera
+// (auto-show it) from one the user deliberately unchecked (leave it
+// unchecked) — without it, every reload would re-check everything.
+//
+// Cameras are keyed by source URL, not by backend id: ids are re-resolved
+// against the backend on every load and legitimately change (a camera
+// recreated server-side, or a failed reconcile falling back to the cached
+// list), and an id that changes under a stored selection reads as "that
+// camera is gone" plus "this one is already seen" — which silently emptied
+// the matrix and, because the ids were remembered as seen, never refilled it.
+// The source URL is the identity the camera config itself is keyed on.
+const VIEW_MODE_STORAGE_KEY = "ppe_camera_view_mode";
+const MATRIX_SELECTION_STORAGE_KEY = "ppe_camera_matrix_selection";
+
+interface StoredMatrixSelection {
+  selected: string[];
+  seen: string[];
+}
+
+const FILTERS_EXPANDED_STORAGE_KEY = "ppe_incident_filters_expanded";
+
+// Collapsed by default (see loadStoredFiltersExpanded's caller): most visits
+// to this tab are "check the list", not "narrow it down", so the filter
+// controls start tucked away rather than always occupying panel space.
+function loadStoredFiltersExpanded(): boolean | null {
+  try {
+    const stored = localStorage.getItem(FILTERS_EXPANDED_STORAGE_KEY);
+    return stored === "true" ? true : stored === "false" ? false : null;
+  } catch {
+    return null;
+  }
+}
+
+function loadStoredViewMode(): "single" | "matrix" | null {
+  try {
+    const stored = localStorage.getItem(VIEW_MODE_STORAGE_KEY);
+    return stored === "matrix" || stored === "single" ? stored : null;
+  } catch {
+    return null;
+  }
+}
+
+function loadStoredMatrixSelection(): StoredMatrixSelection | null {
+  try {
+    const stored = localStorage.getItem(MATRIX_SELECTION_STORAGE_KEY);
+    if (!stored) return null;
+    const parsed = JSON.parse(stored) as Partial<StoredMatrixSelection>;
+    // Anything not a string is from the earlier id-keyed format; dropping it
+    // leaves `seen` empty, so every active camera is auto-selected once again.
+    const sources = (value: unknown) =>
+      Array.isArray(value) ? value.filter((src): src is string => typeof src === "string") : [];
+    return { selected: sources(parsed?.selected), seen: sources(parsed?.seen) };
+  } catch {
+    return null;
+  }
+}
+
 interface CameraPanelProps {
   cameras: CameraConfig[];
   camerasLoading: boolean;
@@ -235,18 +307,78 @@ function CameraPanel({
 }: CameraPanelProps) {
   const [phase, setPhase] = useState<AnalysisPhase>("idle");
   const [error, setError] = useState("");
-  const [viewMode, setViewMode] = useState<"single" | "matrix">("single");
-  const [selectedCameraIds, setSelectedCameraIds] = useState<number[]>([]);
+  const [viewMode, setViewModeState] = useState<"single" | "matrix">("single");
+  const [selectedCameraSources, setSelectedCameraSources] = useState<string[]>([]);
   const [cameraZones, setCameraZones] = useState<Record<string, DraftZone[]>>({});
+  // Cameras already auto-added to the matrix selection at least once, by
+  // source URL. Kept in a ref (not state) because it only ever feeds the sync
+  // effect's decision and must not itself trigger a re-render.
+  const autoSelectedSourcesRef = useRef<Set<string>>(new Set());
+  const selectionRestoredRef = useRef(false);
 
+  // Restores the saved layout before the browser paints. Deliberately a layout
+  // effect rather than a useState lazy initializer, for the same reason as the
+  // cached-camera seeding in DashboardShell: this component is SSR'd, so
+  // reading localStorage during the initial render would produce different
+  // server and client markup and trip a hydration mismatch.
+  useLayoutEffect(() => {
+    const storedViewMode = loadStoredViewMode();
+    if (storedViewMode) setViewModeState(storedViewMode);
+
+    const storedSelection = loadStoredMatrixSelection();
+    if (storedSelection) {
+      autoSelectedSourcesRef.current = new Set(storedSelection.seen);
+      setSelectedCameraSources(storedSelection.selected);
+    }
+    selectionRestoredRef.current = true;
+  }, []);
+
+  const setViewMode = useCallback((mode: "single" | "matrix") => {
+    setViewModeState(mode);
+    try {
+      localStorage.setItem(VIEW_MODE_STORAGE_KEY, mode);
+    } catch {
+      // Storage unavailable (private window, quota) — the layout just won't persist.
+    }
+  }, []);
+
+  // Auto-shows each camera the first time it is seen active, prunes cameras
+  // that no longer exist, and otherwise leaves the selection alone so a
+  // restored (or hand-edited) one survives. Cameras that go offline stay
+  // selected and render as "Camera Offline" tiles rather than silently
+  // dropping out of the user's selection.
   useEffect(() => {
-    const activeIds = cameras.filter((c) => c.active).map((c) => c.id);
-    setSelectedCameraIds((prev) => {
-      const filteredPrev = prev.filter((id) => activeIds.includes(id));
-      const newActiveIds = activeIds.filter((id) => !prev.includes(id));
-      return [...filteredPrev, ...newActiveIds];
+    if (cameras.length === 0) return;
+    const knownSources = new Set(cameras.map((c) => c.rtspUrl));
+    const newlyActive = cameras
+      .filter((c) => c.active && !autoSelectedSourcesRef.current.has(c.rtspUrl))
+      .map((c) => c.rtspUrl);
+    newlyActive.forEach((src) => autoSelectedSourcesRef.current.add(src));
+
+    setSelectedCameraSources((prev) => {
+      const kept = prev.filter((src) => knownSources.has(src));
+      const added = newlyActive.filter((src) => !kept.includes(src));
+      if (added.length === 0 && kept.length === prev.length) return prev;
+      return [...kept, ...added];
     });
   }, [cameras]);
+
+  useEffect(() => {
+    // Skips the pre-restore render so an empty initial selection can't
+    // overwrite the saved one before the layout effect above has read it.
+    if (!selectionRestoredRef.current) return;
+    try {
+      localStorage.setItem(
+        MATRIX_SELECTION_STORAGE_KEY,
+        JSON.stringify({
+          selected: selectedCameraSources,
+          seen: [...autoSelectedSourcesRef.current],
+        } satisfies StoredMatrixSelection),
+      );
+    } catch {
+      // Storage unavailable (private window, quota) — the selection just won't persist.
+    }
+  }, [selectedCameraSources]);
   const [status, setStatus] = useState("");
   const [ppeEnabled, setPpeEnabled] = useState(true);
   const [zoneEnabled, setZoneEnabled] = useState(false);
@@ -329,7 +461,7 @@ function CameraPanel({
     setError,
     setStatus,
     viewMode,
-    selectedCameraIds,
+    selectedCameraSources,
     cameras,
     cameraFeatureMap,
   });
@@ -745,15 +877,27 @@ function CameraPanel({
     ? liveStream.streamData.summary
     : upload.videoResult?.summary;
 
-  const connectedCameraNames = cameras
-    .filter((c) => c.active && liveStream.liveFrames[c.rtspUrl])
+  // The cameras the matrix grid is actually showing. Deliberately NOT gated on
+  // liveStream.liveFrames: live cameras connect with metadata_only=true (see
+  // startStreaming in useLiveStream) and render through HLS, so no preview JPEG
+  // ever arrives for them and a liveFrames check would leave the header stuck
+  // on "Connecting…" forever. Matches the single-view line below, which names
+  // the viewed camera without waiting on frames either.
+  const matrixCameraNames = cameras
+    .filter((c) => c.active && selectedCameraSources.includes(c.rtspUrl))
     .map((c) => c.name);
 
   const viewedCameraName = cameras.find((c) => c.rtspUrl === liveStream.liveUrl)?.name;
 
   const displayedCameraNames = viewMode === "single"
     ? (viewedCameraName ? [viewedCameraName] : [])
-    : connectedCameraNames;
+    : matrixCameraNames;
+
+  // In matrix view an empty name list means "you unchecked everything", not
+  // "still connecting" — the grid says as much, so the header should agree.
+  const noCameraNamesLabel = viewMode === "matrix" && selectedCameraSources.length === 0
+    ? "No cameras selected"
+    : "Connecting…";
 
   return (
     <section className="h-fit overflow-hidden rounded-md border border-slate-300 bg-slate-950 shadow-md">
@@ -768,7 +912,7 @@ function CameraPanel({
               : liveStream.isLive
                 ? displayedCameraNames.length > 0
                   ? `Connected to ${displayedCameraNames.join(", ")}`
-                  : "Connecting…"
+                  : noCameraNamesLabel
                 : "Upload a photo or CCTV clip, then choose which detection models run on this camera"}
           </p>
         </div>
@@ -1052,7 +1196,7 @@ function CameraPanel({
                   {liveStream.isLive
                     ? displayedCameraNames.length > 0
                       ? displayedCameraNames.join(", ")
-                      : "Connecting…"
+                      : noCameraNamesLabel
                     : upload.file?.name}
                 </p>
                 <p className="text-xs text-slate-400">
@@ -1130,12 +1274,14 @@ function CameraPanel({
                         <label key={c.id} className="flex items-center gap-1.5 text-xs text-white cursor-pointer select-none">
                           <input
                             type="checkbox"
-                            checked={selectedCameraIds.includes(c.id)}
+                            checked={selectedCameraSources.includes(c.rtspUrl)}
                             onChange={(e) => {
                               if (e.target.checked) {
-                                setSelectedCameraIds([...selectedCameraIds, c.id]);
+                                setSelectedCameraSources([...selectedCameraSources, c.rtspUrl]);
                               } else {
-                                setSelectedCameraIds(selectedCameraIds.filter((id) => id !== c.id));
+                                setSelectedCameraSources(
+                                  selectedCameraSources.filter((src) => src !== c.rtspUrl),
+                                );
                               }
                             }}
                             className="rounded border-slate-700 bg-slate-950 text-lime-500 focus:ring-0 cursor-pointer size-3.5"
@@ -1147,7 +1293,7 @@ function CameraPanel({
                   </div>
 
                   {/* Grid of streams */}
-                  {selectedCameraIds.length === 0 ? (
+                  {selectedCameraSources.length === 0 ? (
                     <div className="flex flex-col items-center justify-center rounded-md border border-dashed border-slate-800 py-16 text-center text-slate-400">
                       <p className="text-sm font-medium">No cameras selected</p>
                       <p className="text-xs text-slate-500 mt-1">Check at least one camera above to view its stream feed.</p>
@@ -1155,17 +1301,17 @@ function CameraPanel({
                   ) : (
                     <div
                       className={`grid gap-4 ${
-                        selectedCameraIds.length === 1
+                        selectedCameraSources.length === 1
                           ? "grid-cols-1"
-                          : selectedCameraIds.length === 2
+                          : selectedCameraSources.length === 2
                             ? "grid-cols-2"
-                            : selectedCameraIds.length <= 4
+                            : selectedCameraSources.length <= 4
                               ? "grid-cols-2"
                               : "grid-cols-3"
                       }`}
                     >
                       {cameras
-                        .filter((c) => selectedCameraIds.includes(c.id))
+                        .filter((c) => selectedCameraSources.includes(c.rtspUrl))
                         .map((c) => {
                           return (
                             <div
@@ -1472,6 +1618,61 @@ function ModelToggle({
 
 const SAFETY_EVENTS_QUERY_KEY = ["safety-events"] as const;
 const INCIDENTS_PAGE_SIZE = 6;
+// Minimum time the paging indicator stays up. The request itself is usually
+// faster than this, and a flash too brief to read is the same as no feedback at
+// all — so the indicator is held for this long even once the data has arrived.
+const PAGE_INDICATOR_MIN_MS = 2500;
+
+const CATEGORY_FILTER_OPTIONS: IncidentCategory[] = ["ppe", "zone", "behavior"];
+const CATEGORY_FILTER_ICON: Record<IncidentCategory, ReactNode> = {
+  ppe: <HardHat className="size-3.5" aria-hidden="true" />,
+  zone: <MapPinned className="size-3.5" aria-hidden="true" />,
+  behavior: <PersonStanding className="size-3.5" aria-hidden="true" />,
+};
+
+type TimePreset = "all" | "24h" | "7d" | "30d" | "custom";
+const TIME_PRESET_OPTIONS: { value: TimePreset; label: string }[] = [
+  { value: "all", label: "All time" },
+  { value: "24h", label: "24 hours" },
+  { value: "7d", label: "7 days" },
+  { value: "30d", label: "30 days" },
+  { value: "custom", label: "Custom" },
+];
+const TIME_PRESET_HOURS: Record<"24h" | "7d" | "30d", number> = {
+  "24h": 24,
+  "7d": 24 * 7,
+  "30d": 24 * 30,
+};
+
+/** <input type="datetime-local"> works in local time with no timezone
+ * suffix; the backend expects an ISO instant, so this is the one spot that
+ * conversion happens. Blank/unparseable input means that bound isn't set. */
+function localDateTimeToIso(value: string): string | undefined {
+  if (!value) return undefined;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
+}
+
+function toggleInList<T>(list: T[], value: T, canonicalOrder: readonly T[]): T[] {
+  const next = list.includes(value) ? list.filter((v) => v !== value) : [...list, value];
+  return canonicalOrder.filter((v) => next.includes(v));
+}
+
+/** Kept as a plain function (not inlined into the component) so the
+ * Date.now() read isn't attributed to render — this is the boundary the
+ * purity lint rule treats as opaque. */
+function computeIncidentDateRange(
+  timePreset: TimePreset,
+  customFrom: string,
+  customTo: string,
+): { dateFrom: string | undefined; dateTo: string | undefined } {
+  if (timePreset === "all") return { dateFrom: undefined, dateTo: undefined };
+  if (timePreset === "custom") {
+    return { dateFrom: localDateTimeToIso(customFrom), dateTo: localDateTimeToIso(customTo) };
+  }
+  const since = new Date(Date.now() - TIME_PRESET_HOURS[timePreset] * 3_600_000);
+  return { dateFrom: since.toISOString(), dateTo: undefined };
+}
 
 /** Page numbers to render around `current`, with "…" gap markers — first
  * and last page always shown so long lists don't need to be scrolled
@@ -1489,13 +1690,173 @@ function getPageWindow(current: number, total: number): (number | "…")[] {
   return windowed;
 }
 
+function FilterRow({
+  label,
+  icon,
+  children,
+}: {
+  label: string;
+  icon: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 py-2.5">
+      <span className="flex w-20 shrink-0 items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+        {icon}
+        {label}
+      </span>
+      <div className="flex flex-1 flex-wrap items-center gap-1.5">{children}</div>
+    </div>
+  );
+}
+
+function FilterPill({
+  active,
+  onClick,
+  children,
+  icon,
+  dotClassName,
+  activeClassName,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: ReactNode;
+  icon?: ReactNode;
+  /** Small color dot shown while inactive — used on severity chips so the
+   * severity -> color mapping reads even before a chip is selected. */
+  dotClassName?: string;
+  /** Overrides the default neutral slate/lime active fill — used on
+   * severity chips so "active" also communicates which severity. */
+  activeClassName?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-semibold ring-1 ring-inset transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lime-400 focus-visible:ring-offset-1 ${
+        active
+          ? (activeClassName ?? "bg-slate-950 text-lime-200 ring-slate-950") + " shadow-sm"
+          : "bg-white text-slate-600 ring-slate-200 hover:bg-slate-50 hover:text-slate-900 hover:ring-slate-300"
+      }`}
+    >
+      {dotClassName ? (
+        <span className={`size-1.5 shrink-0 rounded-full ${dotClassName}`} aria-hidden="true" />
+      ) : null}
+      {icon}
+      {children}
+    </button>
+  );
+}
+
 function IncidentPanel() {
   const queryClient = useQueryClient();
+  const [page, setPage] = useState(1);
+  // False only while the indicator is serving out PAGE_INDICATOR_MIN_MS. The
+  // busy state is derived from this *and* the real request below, so a slow
+  // response extends it rather than being cut short by the timer.
+  const [floorElapsed, setFloorElapsed] = useState(true);
+  // The page that stays rendered while a change is in flight — see shownPage
+  // below. State, not a ref: it decides what the list renders, and reading a
+  // ref during render can leave that list stale when React re-renders for an
+  // unrelated reason.
+  const [heldPage, setHeldPage] = useState<SafetyEventsPage | null>(null);
+
+  // Filters. Empty categoryFilter/severityFilter means "all" — matches the
+  // backend's own semantics (see FeedFilters in incident_feed_service.py), so
+  // there's no separate "all selected" state to keep in sync.
+  const [categoryFilter, setCategoryFilter] = useState<IncidentCategory[]>([]);
+  const [severityFilter, setSeverityFilter] = useState<Severity[]>([]);
+  const [timePreset, setTimePreset] = useState<TimePreset>("all");
+  const [customFrom, setCustomFrom] = useState("");
+  const [customTo, setCustomTo] = useState("");
+  const activeFilterCount =
+    (categoryFilter.length > 0 ? 1 : 0) +
+    (severityFilter.length > 0 ? 1 : 0) +
+    (timePreset !== "all" ? 1 : 0);
+  const hasActiveFilters = activeFilterCount > 0;
+
+  // Collapsed on first render (SSR-safe default), then reconciled with the
+  // visitor's last choice after mount — same pattern as loadStoredViewMode
+  // below. Most tab visits don't touch filters, so starting open would cost
+  // everyone panel space for a feature most sessions never use.
+  const [filtersExpanded, setFiltersExpanded] = useState(false);
+  useLayoutEffect(() => {
+    const stored = loadStoredFiltersExpanded();
+    if (stored !== null) setFiltersExpanded(stored);
+  }, []);
+  const toggleFiltersExpanded = () => {
+    setFiltersExpanded((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(FILTERS_EXPANDED_STORAGE_KEY, String(next));
+      } catch {
+        // Storage unavailable (private browsing, quota) — the toggle still
+        // works for this render, it just won't be remembered next visit.
+      }
+      return next;
+    });
+  };
+
+  const { dateFrom, dateTo } = useMemo(
+    () => computeIncidentDateRange(timePreset, customFrom, customTo),
+    [timePreset, customFrom, customTo],
+  );
+
+  // Any filter change starts back at page 1 — a filter narrowing the result
+  // set can easily leave the current page past the new last page.
+  const applyFilterChange = (update: () => void) => {
+    update();
+    setPage(1);
+  };
+
   const eventsQuery = useQuery({
-    queryKey: SAFETY_EVENTS_QUERY_KEY,
-    queryFn: getSafetyEvents,
+    // Page and every filter are part of the key, so each combination is
+    // cached separately and revisiting one already seen is instant.
+    queryKey: [
+      ...SAFETY_EVENTS_QUERY_KEY,
+      page,
+      INCIDENTS_PAGE_SIZE,
+      categoryFilter,
+      severityFilter,
+      dateFrom,
+      dateTo,
+    ],
+    queryFn: () =>
+      getSafetyEventsPage(page, INCIDENTS_PAGE_SIZE, {
+        categories: categoryFilter,
+        severities: severityFilter,
+        dateFrom,
+        dateTo,
+      }),
+    // Keeps the current page rendered while the next one loads, instead of
+    // collapsing to the empty/loading state on every page or filter change.
+    placeholderData: keepPreviousData,
   });
-  const events = eventsQuery.data ?? [];
+  // Busy while either the request is running or the indicator's minimum has
+  // not elapsed — so a slow response extends the state instead of the timer
+  // cutting it short.
+  const isPaging = !floorElapsed || eventsQuery.isFetching;
+  // Paging state comes from the response, not from local arithmetic: the server
+  // clamps an out-of-range page (rows deleted since the controls were rendered)
+  // and owns the true total, so trusting its numbers keeps the controls honest
+  // without a second round of clamping here.
+  //
+  // While a page change is in flight the *outgoing* page stays rendered
+  // (heldPage, captured on click). Without that the new rows appeared as
+  // soon as the request resolved while the indicator was still counting out
+  // its minimum, which reads as a lie — results on screen under a "fetching"
+  // banner. Now the swap and the indicator end together.
+  const shownPage = isPaging ? heldPage ?? eventsQuery.data : eventsQuery.data;
+  const pageEvents = shownPage?.items ?? [];
+  const totalEvents = shownPage?.total ?? 0;
+  const totalPages = shownPage?.total_pages ?? 1;
+  const currentPage = shownPage?.page ?? page;
+  // The banner names where you are *going*, so it reads the requested page
+  // rather than the response's — with keepPreviousData the response still holds
+  // the outgoing page for the whole fetch, which had the banner announcing the
+  // page you were leaving. Clamped because the request may overshoot the end.
+  const pendingPage = Math.min(page, eventsQuery.data?.total_pages ?? totalPages);
   const camerasQuery = useQuery({
     queryKey: ["cameras"],
     queryFn: getCameras,
@@ -1511,17 +1872,45 @@ function IncidentPanel() {
     category: IncidentCategory;
     id: number;
   } | null>(null);
-  const [page, setPage] = useState(1);
-  const totalPages = Math.max(1, Math.ceil(events.length / INCIDENTS_PAGE_SIZE));
-  // Clamp during render (not an effect) if the page count shrinks out from
-  // under the current page — e.g. after deleting the last item on the last page.
-  const currentPage = Math.min(page, totalPages);
-  if (currentPage !== page) setPage(currentPage);
-  const pageEvents = events.slice(
-    (currentPage - 1) * INCIDENTS_PAGE_SIZE,
-    currentPage * INCIDENTS_PAGE_SIZE,
-  );
-
+  // The pagination controls sit below a full page of incidents, so paging from
+  // there leaves the viewport at the bottom of the list — showing the middle of
+  // the new page. Scroll the panel heading back into view on every page change.
+  const panelRef = useRef<HTMLElement | null>(null);
+  // Which control started the move, so the spinner replaces the icon on the
+  // button that was actually pressed rather than on all of them at once.
+  const [pagingControl, setPagingControl] = useState<"prev" | "next" | number | null>(null);
+  const pagingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (pagingTimerRef.current) clearTimeout(pagingTimerRef.current);
+  }, []);
+  const goToPage = (next: number, control: "prev" | "next" | number) => {
+    setPage(next);
+    setPagingControl(control);
+    // Reduced motion suppresses the travel, not the feedback: the scroll jumps
+    // instead of animating, but the indicator (and its spinners) still run —
+    // a busy spinner is feedback, and suppressing it left the loading state
+    // looking like a frozen icon.
+    const reducedMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    panelRef.current?.scrollIntoView({
+      behavior: reducedMotion ? "auto" : "smooth",
+      block: "start",
+    });
+    // Snapshot what is on screen now; it keeps rendering until the indicator
+    // clears, so the reader never sees new rows under a "fetching" banner.
+    setHeldPage(shownPage ?? null);
+    setFloorElapsed(false);
+    if (pagingTimerRef.current) clearTimeout(pagingTimerRef.current);
+    pagingTimerRef.current = setTimeout(() => {
+      setFloorElapsed(true);
+      setPagingControl(null);
+      // Releases the snapshot so the incoming page takes over. If the request
+      // is somehow still running, keepPreviousData keeps the same rows on
+      // screen anyway, so the handover is seamless either way.
+      setHeldPage(null);
+    }, PAGE_INDICATOR_MIN_MS);
+  };
   // isFetching (not isPending) so the refresh icon still spins on a manual
   // refresh click, and on the background refetch React Query fires every
   // time this panel remounts (switching tabs away and back). That refetch
@@ -1530,6 +1919,9 @@ function IncidentPanel() {
   // on having no data yet, rather than on `loading` alone, or it would
   // reappear over already-populated content on every single tab switch.
   const loading = eventsQuery.isFetching || deletingAll;
+  // Gated on already having data so the very first load keeps its own
+  // "Loading recent incidents…" state instead of showing both at once.
+  const showPagingIndicator = Boolean(shownPage) && isPaging;
   const error =
     deleteAllError ||
     (eventsQuery.isError
@@ -1538,11 +1930,11 @@ function IncidentPanel() {
         : "Could not load violations"
       : "");
 
-  const removeEventFromCache = (id: number) => {
-    queryClient.setQueryData<(ViolationReport | ZoneViolation | BehaviorIncident)[]>(
-      SAFETY_EVENTS_QUERY_KEY,
-      (current) => current?.filter((item) => item.id !== id),
-    );
+  // Every page is its own cache entry now, and removing a row reflows all of
+  // them (and changes the total), so the whole feed is refetched rather than
+  // patched in place.
+  const invalidateEvents = () => {
+    void queryClient.invalidateQueries({ queryKey: SAFETY_EVENTS_QUERY_KEY });
   };
 
   const deleteEvent = async (event: ViolationReport | ZoneViolation | BehaviorIncident) => {
@@ -1552,7 +1944,7 @@ function IncidentPanel() {
     const category: IncidentCategory =
       "violation_type" in event ? "ppe" : "behavior_type" in event ? "behavior" : "zone";
     await deleteIncident(category, event.id);
-    removeEventFromCache(event.id);
+    invalidateEvents();
   };
 
   const deleteAllEvents = async () => {
@@ -1561,7 +1953,8 @@ function IncidentPanel() {
     setDeleteAllError("");
     try {
       await deleteAllIncidents();
-      queryClient.setQueryData(SAFETY_EVENTS_QUERY_KEY, []);
+      setPage(1);
+      invalidateEvents();
     } catch (err) {
       setDeleteAllError(err instanceof Error ? err.message : "Could not delete incidents");
     } finally {
@@ -1570,7 +1963,10 @@ function IncidentPanel() {
   };
 
   return (
-    <section className="rounded-md border border-slate-200 bg-slate-50 p-3 shadow-sm">
+    <section
+      ref={panelRef}
+      className="scroll-mt-20 rounded-md border border-slate-200 bg-slate-50 p-3 shadow-sm"
+    >
       <div className="mb-3 flex items-start justify-between gap-3">
         <div>
           <h2 className="text-sm font-semibold text-slate-950">Recent Incidents</h2>
@@ -1579,7 +1975,7 @@ function IncidentPanel() {
         <div className="flex items-center gap-2">
           <button
             onClick={() => void deleteAllEvents()}
-            disabled={events.length === 0 || loading}
+            disabled={totalEvents === 0 || loading}
             className="flex items-center gap-1.5 rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-xs font-semibold text-red-700 transition hover:bg-red-100 hover:border-red-300 disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:border-slate-200 disabled:text-slate-400"
             type="button"
           >
@@ -1595,10 +1991,170 @@ function IncidentPanel() {
           </button>
         </div>
       </div>
-      {loading && events.length === 0 ? <LoadingState text="Loading recent incidents..." /> : null}
+      <div className="mb-3 rounded-lg border border-slate-200 bg-white shadow-sm">
+        <div className="flex items-center justify-between gap-3 px-3 py-2">
+          <button
+            type="button"
+            onClick={toggleFiltersExpanded}
+            aria-expanded={filtersExpanded}
+            aria-controls="incident-filters-body"
+            className="flex items-center gap-1.5 rounded-md text-xs font-semibold uppercase tracking-wide text-slate-500 transition-colors duration-150 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lime-400 focus-visible:ring-offset-1"
+          >
+            <SlidersHorizontal className="size-3.5 text-slate-400" aria-hidden="true" />
+            Filters
+            {hasActiveFilters ? (
+              <span className="rounded-full bg-lime-100 px-1.5 py-0.5 text-[10px] font-bold normal-case tracking-normal text-lime-800">
+                {activeFilterCount} active
+              </span>
+            ) : null}
+            <ChevronDown
+              className={`size-3.5 text-slate-400 transition-transform duration-200 motion-reduce:transition-none ${filtersExpanded ? "rotate-180" : ""}`}
+              aria-hidden="true"
+            />
+          </button>
+          {hasActiveFilters ? (
+            <button
+              type="button"
+              onClick={() =>
+                applyFilterChange(() => {
+                  setCategoryFilter([]);
+                  setSeverityFilter([]);
+                  setTimePreset("all");
+                  setCustomFrom("");
+                  setCustomTo("");
+                })
+              }
+              className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold text-slate-500 transition-colors duration-150 hover:bg-slate-100 hover:text-slate-950"
+            >
+              <X className="size-3" aria-hidden="true" />
+              Clear filters
+            </button>
+          ) : null}
+        </div>
+        <div
+          id="incident-filters-body"
+          className={`grid transition-[grid-template-rows] duration-200 ease-out motion-reduce:transition-none ${filtersExpanded ? "grid-rows-[1fr]" : "grid-rows-[0fr]"}`}
+        >
+          <div className="overflow-hidden">
+            <div className="divide-y divide-slate-100 border-t border-slate-100 px-3">
+              <FilterRow label="Type" icon={<HardHat className="size-3.5" aria-hidden="true" />}>
+                <FilterPill
+                  active={categoryFilter.length === 0}
+                  onClick={() => applyFilterChange(() => setCategoryFilter([]))}
+                >
+                  All
+                </FilterPill>
+                {CATEGORY_FILTER_OPTIONS.map((cat) => (
+                  <FilterPill
+                    key={cat}
+                    active={categoryFilter.includes(cat)}
+                    icon={CATEGORY_FILTER_ICON[cat]}
+                    onClick={() =>
+                      applyFilterChange(() =>
+                        setCategoryFilter((prev) =>
+                          toggleInList(prev, cat, CATEGORY_FILTER_OPTIONS),
+                        ),
+                      )
+                    }
+                  >
+                    {CATEGORY_LABEL[cat]}
+                  </FilterPill>
+                ))}
+              </FilterRow>
+              <FilterRow
+                label="Severity"
+                icon={<ShieldAlert className="size-3.5" aria-hidden="true" />}
+              >
+                <FilterPill
+                  active={severityFilter.length === 0}
+                  onClick={() => applyFilterChange(() => setSeverityFilter([]))}
+                >
+                  All
+                </FilterPill>
+                {VALID_SEVERITIES.map((sev) => (
+                  <FilterPill
+                    key={sev}
+                    active={severityFilter.includes(sev)}
+                    dotClassName={
+                      severityFilter.includes(sev) ? undefined : SEVERITY_DOT_CLASS[sev]
+                    }
+                    activeClassName={SEVERITY_ACTIVE_CLASS[sev]}
+                    onClick={() =>
+                      applyFilterChange(() =>
+                        setSeverityFilter((prev) => toggleInList(prev, sev, VALID_SEVERITIES)),
+                      )
+                    }
+                  >
+                    {sev}
+                  </FilterPill>
+                ))}
+              </FilterRow>
+              <FilterRow label="Time" icon={<Clock className="size-3.5" aria-hidden="true" />}>
+                {TIME_PRESET_OPTIONS.map((opt) => (
+                  <FilterPill
+                    key={opt.value}
+                    active={timePreset === opt.value}
+                    onClick={() => applyFilterChange(() => setTimePreset(opt.value))}
+                  >
+                    {opt.label}
+                  </FilterPill>
+                ))}
+              </FilterRow>
+            </div>
+            {timePreset === "custom" ? (
+              <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 bg-slate-50/80 px-3 py-2.5">
+                <span className="w-20 shrink-0" aria-hidden="true" />
+                <div className="flex flex-wrap items-center gap-4">
+                  <label className="flex items-center gap-2 text-xs font-medium text-slate-600">
+                    From
+                    <input
+                      type="datetime-local"
+                      value={customFrom}
+                      onChange={(e) => applyFilterChange(() => setCustomFrom(e.target.value))}
+                      className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-800 shadow-sm transition-colors focus:border-slate-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-lime-400"
+                    />
+                  </label>
+                  <label className="flex items-center gap-2 text-xs font-medium text-slate-600">
+                    To
+                    <input
+                      type="datetime-local"
+                      value={customTo}
+                      onChange={(e) => applyFilterChange(() => setCustomTo(e.target.value))}
+                      className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-800 shadow-sm transition-colors focus:border-slate-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-lime-400"
+                    />
+                  </label>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+      {showPagingIndicator ? (
+        <div
+          className="mb-3 flex items-center gap-3 rounded-md border-2 border-lime-300 bg-lime-50 px-4 py-4 text-sm font-semibold text-slate-800 shadow-sm"
+          role="status"
+          aria-live="polite"
+        >
+          <Loader2
+            className="size-5 shrink-0 animate-spin text-lime-600"
+            aria-hidden="true"
+          />
+          <span>
+            Fetching results · page {pendingPage} of{" "}
+            {eventsQuery.data?.total_pages ?? totalPages}
+          </span>
+        </div>
+      ) : null}
+      {loading && !eventsQuery.data ? <LoadingState text="Loading recent incidents..." /> : null}
       {error ? <ErrorState text={error} /> : null}
-      {!loading && !error && events.length === 0 ? (
-        <EmptyState text="No incidents have been recorded yet." />
+      {!loading && !error && totalEvents === 0 ? (
+        <EmptyState
+          text={
+            hasActiveFilters
+              ? "No incidents match the selected filters."
+              : "No incidents have been recorded yet."
+          }
+        />
       ) : null}
       <div className="grid gap-2">
         {pageEvents.map((event, index) => (
@@ -1615,17 +2171,23 @@ function IncidentPanel() {
       {totalPages > 1 ? (
         <div className="mt-3 flex items-center justify-between gap-2 border-t border-slate-200 pt-3">
           <p className="text-xs text-slate-500">
-            Page {currentPage} of {totalPages} · {events.length} incident{events.length === 1 ? "" : "s"}
+            Page {currentPage} of {totalPages} · {totalEvents} incident
+            {totalEvents === 1 ? "" : "s"}
           </p>
           <div className="flex items-center gap-1">
             <button
               type="button"
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
-              disabled={currentPage === 1}
+              onClick={() => goToPage(Math.max(1, currentPage - 1), "prev")}
+              disabled={currentPage === 1 || isPaging}
               aria-label="Previous page"
+              aria-busy={isPaging && pagingControl === "prev"}
               className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-500 transition hover:border-slate-300 hover:text-slate-950 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              <ChevronLeft className="size-3.5" aria-hidden="true" />
+              {isPaging && pagingControl === "prev" ? (
+                <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+              ) : (
+                <ChevronLeft className="size-3.5" aria-hidden="true" />
+              )}
             </button>
             {getPageWindow(currentPage, totalPages).map((p, i) =>
               p === "…" ? (
@@ -1636,24 +2198,35 @@ function IncidentPanel() {
                 <button
                   key={p}
                   type="button"
-                  onClick={() => setPage(p)}
+                  onClick={() => goToPage(p, p)}
+                  disabled={isPaging}
                   aria-current={p === currentPage ? "page" : undefined}
-                  className={`min-w-[1.75rem] rounded-md px-2 py-1 text-xs font-semibold transition ${
+                  aria-busy={isPaging && pagingControl === p}
+                  className={`flex min-w-[1.75rem] items-center justify-center rounded-md px-2 py-1 text-xs font-semibold transition disabled:cursor-not-allowed ${
                     p === currentPage ? "bg-slate-950 text-lime-200" : "text-slate-500 hover:bg-slate-100"
                   }`}
                 >
-                  {p}
+                  {isPaging && pagingControl === p ? (
+                    <Loader2 className="size-3 animate-spin" aria-hidden="true" />
+                  ) : (
+                    p
+                  )}
                 </button>
               ),
             )}
             <button
               type="button"
-              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-              disabled={currentPage === totalPages}
+              onClick={() => goToPage(Math.min(totalPages, currentPage + 1), "next")}
+              disabled={currentPage === totalPages || isPaging}
               aria-label="Next page"
+              aria-busy={isPaging && pagingControl === "next"}
               className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-500 transition hover:border-slate-300 hover:text-slate-950 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              <ChevronRight className="size-3.5" aria-hidden="true" />
+              {isPaging && pagingControl === "next" ? (
+                <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+              ) : (
+                <ChevronRight className="size-3.5" aria-hidden="true" />
+              )}
             </button>
           </div>
         </div>
@@ -1664,7 +2237,7 @@ function IncidentPanel() {
           category={selectedIncident.category}
           incidentId={selectedIncident.id}
           onClose={() => setSelectedIncident(null)}
-          onDeleted={() => removeEventFromCache(selectedIncident.id)}
+          onDeleted={invalidateEvents}
         />
       ) : null}
     </section>

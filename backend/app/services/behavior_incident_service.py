@@ -145,6 +145,16 @@ class BehaviorIncidentService:
             raise ServiceNotFoundError(f"Behavior incident {incident_id} was not found.")
         return self._to_read(incident)
 
+    def get_incidents_by_ids(self, ids: list[int]) -> list[BehaviorIncidentRead]:
+        """Hydrate a specific set of behavior incidents for the paginated
+        incident feed. See PPEViolationService.get_violations_by_ids."""
+        return [
+            self._to_read(incident) for incident in self.repository.get_by_ids(ids)
+        ]
+
+    def count_incidents(self) -> int:
+        return self.repository.count_all()
+
     def list_recent(
         self,
         *,

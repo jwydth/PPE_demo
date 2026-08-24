@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import Depends
-from sqlalchemy import delete
+from sqlalchemy import delete, func
 from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session, select
 
@@ -39,6 +39,28 @@ class ZoneViolationRepository:
         except SQLAlchemyError as exc:
             self.session.rollback()
             raise RepositoryError("Could not list zone violations.") from exc
+
+    def get_by_ids(self, ids: list[int]) -> list[ZoneViolation]:
+        """Fetch a specific set of rows in one query. Used by the paginated
+        incident feed, which decides *which* rows a page holds from a merged
+        cross-table index query and then hydrates only those."""
+        if not ids:
+            return []
+        try:
+            statement = select(ZoneViolation).where(ZoneViolation.id.in_(ids))  # type: ignore[union-attr]
+            return list(self.session.exec(statement).all())
+        except SQLAlchemyError as exc:
+            self.session.rollback()
+            raise RepositoryError("Could not read zone violations.") from exc
+
+    def count_all(self) -> int:
+        try:
+            return int(
+                self.session.exec(select(func.count()).select_from(ZoneViolation)).one()
+            )
+        except SQLAlchemyError as exc:
+            self.session.rollback()
+            raise RepositoryError("Could not count zone violations.") from exc
 
     def get_recent(self, limit: int) -> list[ZoneViolation]:
         try:

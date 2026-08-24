@@ -12,6 +12,7 @@ import {
   getZoneViolation,
   IncidentCategory,
 } from "@/lib/ppe-api";
+import { getBehaviorSeverity, getPpeSeverity, getZoneSeverity } from "@/lib/incident-severity";
 import { BehaviorIncident } from "@/types/behavior";
 import { Camera } from "@/types/camera";
 import { ViolationDetail } from "@/types/detection";
@@ -29,7 +30,7 @@ interface IncidentDetailModalProps {
 
 type IncidentDetail = ViolationDetail | ZoneViolation | BehaviorIncident;
 
-const CATEGORY_LABEL: Record<IncidentCategory, string> = {
+export const CATEGORY_LABEL: Record<IncidentCategory, string> = {
   ppe: "PPE Violation",
   zone: "Zone Violation",
   behavior: "Behavior Incident",
@@ -150,25 +151,6 @@ export function IncidentDetailModal({
       </div>
     </div>
   );
-}
-
-function getPpeSeverity(violationType: string): string {
-  const normalized = violationType.trim().toLowerCase();
-  if (normalized.includes("proximity")) return "Low";
-  if (normalized.includes("_and_") || normalized.includes(" and ")) return "High";
-  return "Medium";
-}
-
-function getZoneSeverity(raw: string | null | undefined): string {
-  if (!raw) return "Medium";
-  const titled = raw.trim().charAt(0).toUpperCase() + raw.trim().slice(1).toLowerCase();
-  return ["Critical", "High", "Medium", "Low"].includes(titled) ? titled : "Medium";
-}
-
-function getBehaviorSeverity(raw: string | null | undefined): string {
-  if (!raw) return "High";
-  const titled = raw.trim().charAt(0).toUpperCase() + raw.trim().slice(1).toLowerCase();
-  return ["Critical", "High", "Medium", "Low"].includes(titled) ? titled : "High";
 }
 
 interface DetailBodyProps {

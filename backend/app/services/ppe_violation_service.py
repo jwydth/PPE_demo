@@ -175,6 +175,31 @@ class PPEViolationService:
         ]
         return ViolationDetail(**report.model_dump(), subjects=subjects)
 
+    def get_violations_by_ids(self, ids: list[int]) -> list[ViolationReport]:
+        """Hydrate a specific set of PPE violations, for the paginated incident
+        feed (which picks the ids for a page from a merged cross-table query).
+        Returned in the repository's order — the caller re-orders to match the
+        page's own ordering."""
+        reports: list[ViolationReport] = []
+        for violation in self.repository.get_by_ids(ids):
+            if violation.id is None:
+                raise ServiceValidationError(
+                    "Persisted PPE violation is missing an ID."
+                )
+            subjects = self.repository.get_subjects(violation.id)
+            track_id = subjects[0].tracker_id if subjects else None
+            reports.append(
+                _to_report(
+                    violation,
+                    track_id=track_id,
+                    snapshot_url=self._snapshot_url(violation.snapshot_path),
+                )
+            )
+        return reports
+
+    def count_violations(self) -> int:
+        return self.repository.count_all()
+
     def get_recent_violations(self, limit: int = 100) -> list[ViolationReport]:
         normalized_limit = _validate_limit(limit)
         violations = self.repository.get_recent(normalized_limit)

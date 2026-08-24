@@ -1,5 +1,6 @@
 import io
 import logging
+from datetime import datetime
 import tempfile
 from pathlib import Path
 from typing import Annotated
@@ -8,9 +9,17 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from PIL import Image
 
 from app.schemas.detection import DetectionResponse, VideoProcessingResponse
+from app.schemas.incident_feed import SafetyEventsPage
 from app.schemas.violation import ViolationDetail, ViolationReport
 from app.services import ServiceNotFoundError
 from app.services.ppe_detector import PPEDetector
+from app.services.incident_feed_service import (
+    FeedFilters,
+    IncidentFeedService,
+    get_incident_feed_service,
+)
+from app.services.incident_filters import CATEGORIES
+from app.services.incident_normalization import VALID_SEVERITIES
 from app.services.ppe_violation_service import (
     PPEViolationService,
     get_ppe_violation_service,
@@ -135,6 +144,65 @@ def _cleanup_temp_video(tmp_path: Path | None) -> None:
             "Could not delete temporary video file because it is still in use: %s",
             tmp_path,
         )
+
+
+@router.get("/safety-events", response_model=SafetyEventsPage)
+async def safety_events(
+    service: Annotated[IncidentFeedService, Depends(get_incident_feed_service)],
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=6, ge=1, le=100),
+    category: Annotated[list[str] | None, Query()] = None,
+    severity: Annotated[list[str] | None, Query()] = None,
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+) -> SafetyEventsPage:
+    """One page of the merged incident feed, paginated and filtered in the
+    database.
+
+    Replaces the client-side merge of /violations + /zone-violations +
+    /behavior-incidents, which had to download three capped lists to render a
+    handful of rows and could not reach past those caps or report a real total.
+    A `page` beyond the end clamps to the last page.
+
+    `category` and `severity` repeat for multi-select (?severity=High&
+    severity=Critical); omitting one means "all". Filters apply before
+    pagination, so `total` counts matches, not everything.
+    """
+    unknown_categories = sorted(set(category or []) - set(CATEGORIES))
+    if unknown_categories:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown category: {', '.join(unknown_categories)}. "
+            f"Expected any of: {', '.join(CATEGORIES)}.",
+        )
+    unknown_severities = sorted(set(severity or []) - set(VALID_SEVERITIES))
+    if unknown_severities:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown severity: {', '.join(unknown_severities)}. "
+            f"Expected any of: {', '.join(VALID_SEVERITIES)}.",
+        )
+    if date_from is not None and date_to is not None and date_from > date_to:
+        raise HTTPException(
+            status_code=422, detail="date_from must not be after date_to."
+        )
+    result = service.get_page(
+        page=page,
+        page_size=page_size,
+        filters=FeedFilters(
+            categories=tuple(category or ()),  # type: ignore[arg-type]
+            severities=tuple(severity or ()),
+            date_from=date_from,
+            date_to=date_to,
+        ),
+    )
+    return SafetyEventsPage(
+        items=result.items,
+        total=result.total,
+        page=result.page,
+        page_size=result.page_size,
+        total_pages=result.total_pages,
+    )
 
 
 @router.get("/violations", response_model=list[ViolationReport])

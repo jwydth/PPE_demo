@@ -49,7 +49,7 @@ export function useLiveStream({
   setError,
   setStatus,
   viewMode,
-  selectedCameraIds,
+  selectedCameraSources,
   cameras,
   cameraFeatureMap,
 }: {
@@ -60,7 +60,7 @@ export function useLiveStream({
   setError: (message: string) => void;
   setStatus: (status: string) => void;
   viewMode?: "single" | "matrix";
-  selectedCameraIds?: number[];
+  selectedCameraSources?: string[];
   cameras?: { id: number; rtspUrl: string }[];
   cameraFeatureMap?: Record<number, Record<string, boolean>>;
 }) {
@@ -106,7 +106,7 @@ export function useLiveStream({
   const zoneEnabledRef = useRef(zoneEnabled);
   const fallEnabledRef = useRef(fallEnabled);
   const viewModeRef = useRef(viewMode);
-  const selectedCameraIdsRef = useRef(selectedCameraIds);
+  const selectedCameraSourcesRef = useRef(selectedCameraSources);
   useEffect(() => {
     camerasRef.current = cameras;
     cameraFeatureMapRef.current = cameraFeatureMap;
@@ -114,7 +114,7 @@ export function useLiveStream({
     zoneEnabledRef.current = zoneEnabled;
     fallEnabledRef.current = fallEnabled;
     viewModeRef.current = viewMode;
-    selectedCameraIdsRef.current = selectedCameraIds;
+    selectedCameraSourcesRef.current = selectedCameraSources;
   });
 
   // Single source of truth for what a connection's feature flags should be
@@ -125,9 +125,8 @@ export function useLiveStream({
     const featureMap = cameraFeatureMapRef.current;
 
     let isViewing = false;
-    if (viewModeRef.current === "matrix" && selectedCameraIdsRef.current && cams) {
-      const cam = cams.find((c) => c.rtspUrl === videoName);
-      isViewing = cam ? selectedCameraIdsRef.current.includes(cam.id) : false;
+    if (viewModeRef.current === "matrix" && selectedCameraSourcesRef.current) {
+      isViewing = selectedCameraSourcesRef.current.includes(videoName);
     } else {
       isViewing = videoName === viewedVideoNameRef.current;
     }
@@ -197,7 +196,7 @@ export function useLiveStream({
         ws.send(JSON.stringify(buildSettingsMessage(vidName)));
       }
     });
-  }, [fallEnabled, ppeEnabled, zoneEnabled, viewedVideoName, viewMode, selectedCameraIds, cameras, cameraFeatureMap]);
+  }, [fallEnabled, ppeEnabled, zoneEnabled, viewedVideoName, viewMode, selectedCameraSources, cameras, cameraFeatureMap]);
 
   useEffect(() => {
     if (fallEnabled) return;

@@ -162,6 +162,49 @@ export async function getBehaviorIncident(incidentId: number): Promise<BehaviorI
   };
 }
 
+export interface SafetyEventsPage {
+  items: (ViolationReport | ZoneViolation | BehaviorIncident)[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
+/** Matches app/routers/detection.py's `/safety-events` query params. An
+ * omitted/empty array means "all" for that dimension, not "none" — the
+ * backend leaves the category or severity unfiltered in that case. */
+export interface SafetyEventsFilters {
+  categories?: IncidentCategory[];
+  severities?: string[];
+  dateFrom?: string;
+  dateTo?: string;
+}
+
+/** One page of the merged incident feed, paginated and filtered by the backend.
+ *
+ * Prefer this over getSafetyEvents() for anything paginated: the server orders
+ * and slices across all three incident tables, so a page costs one request for
+ * exactly `pageSize` rows no matter how deep it is, `total` is the real count
+ * rather than whatever fitted under the per-category caps, and pages past the
+ * 500-row cap of the individual list endpoints become reachable at all. */
+export async function getSafetyEventsPage(
+  page: number,
+  pageSize: number,
+  filters: SafetyEventsFilters = {},
+): Promise<SafetyEventsPage> {
+  const params = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize),
+  });
+  for (const category of filters.categories ?? []) params.append("category", category);
+  for (const severity of filters.severities ?? []) params.append("severity", severity);
+  if (filters.dateFrom) params.set("date_from", filters.dateFrom);
+  if (filters.dateTo) params.set("date_to", filters.dateTo);
+  const res = await fetch(`${API_URL}/safety-events?${params.toString()}`);
+  if (!res.ok) throw await readError(res, "Could not load incidents");
+  return res.json();
+}
+
 export async function getSafetyEvents(): Promise<(ViolationReport | ZoneViolation | BehaviorIncident)[]> {
   const [ppe, zones, behavior] = await Promise.all([
     getViolations(),

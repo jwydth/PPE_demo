@@ -1,6 +1,7 @@
 "use client";
 
 import { HardHat, Trash2 } from "lucide-react";
+import { getEventSeverity, SEVERITY_BADGE_CLASS } from "@/lib/incident-severity";
 import { BehaviorIncident } from "@/types/behavior";
 import { DetectionResponse, PersonResult, ViolationReport } from "@/types/detection";
 import { ZoneViolation } from "@/types/zone";
@@ -95,6 +96,7 @@ export function IncidentCard({
       ? "bg-orange-50 text-orange-700 ring-orange-200"
       : "bg-amber-50 text-amber-700 ring-amber-200";
   const frameLabel = isBehavior ? event.frame_start : event.frame_index;
+  const severity = getEventSeverity(event);
 
   const canOpenDetail = Boolean(onOpenDetail && event.id != null);
 
@@ -125,6 +127,9 @@ export function IncidentCard({
             </span>
             <span className={`rounded px-2 py-1 text-xs font-semibold ring-1 ${badgeClass}`}>
               {sourceLabel}
+            </span>
+            <span className={`rounded px-2 py-1 text-xs font-semibold ring-1 ${SEVERITY_BADGE_CLASS[severity]}`}>
+              {severity}
             </span>
           </div>
         </div>

@@ -17,13 +17,23 @@ class Settings(BaseSettings):
     # "auto" uses the first CUDA GPU when PyTorch can access one, otherwise CPU.
     # You can also force "cpu", "cuda", "cuda:0", "0", etc.
     INFERENCE_DEVICE: str = "auto"
-    # Bounded pool of pre-warmed model instances for the live streaming path —
-    # caps VRAM/connect-latency instead of loading a fresh copy of the weights
-    # per websocket connection. Connections beyond this count queue for a free
-    # instance (see PPEDetector.acquire_model_instance).
-    # Three streams support the Matrix View camera set. Extra streams queue
-    # instead of exhausting VRAM and crashing all active streams.
-    MAX_CONCURRENT_STREAMS: int = 3
+    # Safety ceiling on the pool of tracker-isolated model instances backing
+    # the live streaming path — one instance is held per connected camera for
+    # the life of its websocket (every *active* camera connects, whether or not
+    # its tile is on screen), so this is also the maximum number of cameras
+    # that can stream at once. Connections beyond it queue for a free instance
+    # and time out (see PPEDetector.acquire_model_instance).
+    # Instances load on demand, so this costs nothing until cameras actually
+    # need the slots: raising it does not reserve VRAM, and adding a camera
+    # needs no config change until the ceiling itself is reached. Lower it only
+    # to protect a machine whose VRAM cannot hold this many copies of the
+    # weights at once.
+    MAX_CONCURRENT_STREAMS: int = 8
+    # How many of those instances are built and warmed at startup. These absorb
+    # the multi-second load+warm cost for the first cameras to connect; the
+    # rest pay it once, on their first connection. Keep it at least as high as
+    # the number of cameras normally streaming at once.
+    MODEL_POOL_PREWARM: int = 3
     # How long a camera's shared frame-capture thread (CameraFrameHub) stays
     # connected after its last subscriber disconnects before it actually
     # tears down the RTSP/capture session. A page reload or a StrictMode

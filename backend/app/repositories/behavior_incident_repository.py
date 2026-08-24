@@ -93,6 +93,28 @@ class BehaviorIncidentRepository:
             self.session.rollback()
             raise RepositoryError("Could not list behavior incident evidence.") from exc
 
+    def get_by_ids(self, ids: list[int]) -> list[BehaviorIncident]:
+        """Fetch a specific set of rows in one query. Used by the paginated
+        incident feed, which decides *which* rows a page holds from a merged
+        cross-table index query and then hydrates only those."""
+        if not ids:
+            return []
+        try:
+            statement = select(BehaviorIncident).where(BehaviorIncident.id.in_(ids))  # type: ignore[union-attr]
+            return list(self.session.exec(statement).all())
+        except SQLAlchemyError as exc:
+            self.session.rollback()
+            raise RepositoryError("Could not read behavior incidents.") from exc
+
+    def count_all(self) -> int:
+        try:
+            return int(
+                self.session.exec(select(func.count()).select_from(BehaviorIncident)).one()
+            )
+        except SQLAlchemyError as exc:
+            self.session.rollback()
+            raise RepositoryError("Could not count behavior incidents.") from exc
+
     def list_recent(
         self,
         *,

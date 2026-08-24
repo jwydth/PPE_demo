@@ -132,6 +132,17 @@ class ZoneViolationService:
             )
         return self._to_response(violation)
 
+    def get_zone_violations_by_ids(self, ids: list[int]) -> list[ZoneViolation]:
+        """Hydrate a specific set of zone violations for the paginated
+        incident feed. See PPEViolationService.get_violations_by_ids."""
+        return [
+            self._to_response(violation)
+            for violation in self.repository.get_by_ids(ids)
+        ]
+
+    def count_zone_violations(self) -> int:
+        return self.repository.count_all()
+
     def get_recent_zone_violations(
         self,
         limit: int = 100,

@@ -50,7 +50,11 @@ class PPEDetector:
         self.sign_model = None
         self.device = _select_inference_device(settings.INFERENCE_DEVICE)
         self._model_pool: asyncio.Queue | None = None
-        self._pool_size = 0
+        self._pool_size = 0        # ceiling: the most instances the pool may hold
+        self._pool_created = 0     # how many of those actually exist right now
+        self._pool_lock = asyncio.Lock()
+        self._pool_model_path: str | None = None
+        self._pool_half = False
         self._load_model()
         self._load_sign_model()
         if enable_stream_pool:
@@ -86,15 +90,23 @@ class PPEDetector:
         concurrent streams can't safely share one instance. Loading a fresh
         instance per websocket connection instead re-reads the weights from
         disk every time and holds N copies in VRAM under N concurrent
-        streams. A fixed-size pool caps VRAM at a known ceiling and removes
-        the per-connect disk load.
+        streams. A pool caps VRAM at a known ceiling and removes the
+        per-connect disk load.
+
+        Only MODEL_POOL_PREWARM instances are built here; the rest load on
+        demand in _grow_pool() as cameras actually connect. Sizing the whole
+        pool up front made MAX_CONCURRENT_STREAMS a number that had to be
+        hand-raised for every camera added - set it too low and the extra
+        camera's stream silently retried forever behind a busy pool; set it
+        high enough for future cameras and every unused slot still cost VRAM
+        at boot. Growing on demand makes the setting a pure safety ceiling:
+        it costs nothing until a camera needs the slot.
         """
         if self.model is None:
             return
 
         try:
             from ultralytics import YOLO
-            import numpy as np
 
             # ultralytics.engine.predictor.BasePredictor.stream_inference only
             # imports torchvision the first time it sees a *stream*-type source
@@ -106,57 +118,126 @@ class PPEDetector:
             # stream connecting around the same time pays it too).
             import torchvision  # noqa: F401
 
-            pool_size = max(1, settings.MAX_CONCURRENT_STREAMS)
-            model_path = self.model.ckpt_path or str(
+            ceiling = max(1, settings.MAX_CONCURRENT_STREAMS)
+            prewarm = max(1, min(settings.MODEL_POOL_PREWARM, ceiling))
+            self._pool_model_path = self.model.ckpt_path or str(
                 Path(settings.MODEL_PATH).resolve()
             )
-            half = bool(settings.INFERENCE_HALF) and self.device.startswith("cuda")
-            imgsz = settings.INFERENCE_IMGSZ
-            dummy_square = np.zeros((imgsz, imgsz, 3), dtype=np.uint8)
-            # Also warm up at a realistic 16:9 camera shape (the letterboxed
-            # tensor shape a real RTSP frame produces differs from the square
-            # dummy above). Measured on this repo's own RTSP demo setup: the
-            # first real inference at a shape the GPU hasn't seen yet costs an
-            # extra ~2.9s (CUDA allocator/kernel cache growing for that size),
-            # on top of the RTSP connect itself — that cost lands on whichever
-            # stream(s) connect first if we don't pay it here instead.
-            dummy_wide = np.zeros((720, 1280, 3), dtype=np.uint8)
+            self._pool_half = bool(settings.INFERENCE_HALF) and self.device.startswith(
+                "cuda"
+            )
 
-            pool: asyncio.Queue = asyncio.Queue(maxsize=pool_size)
-            for i in range(pool_size):
-                instance = self.model if i == 0 else YOLO(model_path)
-                for dummy in (dummy_square, dummy_wide):
-                    instance.predict(
-                        dummy, device=self.device, half=half, imgsz=imgsz, verbose=False
-                    )
+            pool: asyncio.Queue = asyncio.Queue(maxsize=ceiling)
+            for i in range(prewarm):
+                instance = self.model if i == 0 else YOLO(self._pool_model_path)
+                self._warm_pool_instance(instance)
                 pool.put_nowait(instance)
 
             self._model_pool = pool
-            self._pool_size = pool_size
+            self._pool_size = ceiling
+            self._pool_created = prewarm
             logger.info(
-                f"Pre-warmed model pool: {pool_size} instance(s) on {self.device} "
-                f"(half={half}, imgsz={imgsz})"
+                f"Pre-warmed model pool: {prewarm} of up to {ceiling} instance(s) on "
+                f"{self.device} (half={self._pool_half}, imgsz={settings.INFERENCE_IMGSZ})"
             )
         except Exception as e:
             logger.error(f"Failed to initialize model pool: {e}", exc_info=True)
 
-    async def acquire_model_instance(self, timeout: float = 30.0):
-        """Borrow a pre-warmed model instance from the pool for one stream.
+    def _warm_pool_instance(self, instance) -> None:
+        """Run the dummy inferences that move a fresh instance's first-frame
+        cost off the streaming path. Blocking and CPU/GPU-bound - call it in a
+        worker thread when growing the pool while streams are running."""
+        import numpy as np
 
-        Falls back to the shared `self.model` when no pool was built (model
-        failed to load). Blocks up to `timeout` seconds when every pool
-        instance is in use — queueing new connections rather than silently
-        loading another copy of the weights and growing VRAM usage.
+        imgsz = settings.INFERENCE_IMGSZ
+        # A square dummy, plus a realistic 16:9 camera shape: the letterboxed
+        # tensor a real RTSP frame produces differs from the square one, and
+        # measured on this repo's own RTSP demo setup the first inference at an
+        # unseen shape costs an extra ~2.9s (CUDA allocator/kernel cache growing
+        # for that size) on top of the RTSP connect itself. Paying both here
+        # keeps that cost off whichever stream connects first.
+        for dummy in (
+            np.zeros((imgsz, imgsz, 3), dtype=np.uint8),
+            np.zeros((720, 1280, 3), dtype=np.uint8),
+        ):
+            instance.predict(
+                dummy,
+                device=self.device,
+                half=self._pool_half,
+                imgsz=imgsz,
+                verbose=False,
+            )
+
+    def _build_pool_instance(self):
+        """Load and warm one more tracker-isolated instance. Blocking."""
+        from ultralytics import YOLO
+
+        instance = YOLO(self._pool_model_path)
+        self._warm_pool_instance(instance)
+        return instance
+
+    async def _grow_pool(self):
+        """Add one instance to the pool, or return None once at the ceiling.
+
+        Loading and warming takes seconds, so it runs in a worker thread rather
+        than stalling the event loop - and with it every other stream's frames -
+        while a newly connected camera waits.
+        """
+        pool = self._model_pool
+        async with self._pool_lock:
+            # A stream may have finished and returned its instance while this
+            # coroutine waited for the lock - take that one over loading more.
+            try:
+                return pool.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            if self._pool_created >= self._pool_size:
+                return None
+            # Claimed before the await so two concurrent callers can't both take
+            # the last slot; rolled back below if the load fails.
+            self._pool_created += 1
+            slot = self._pool_created
+        try:
+            instance = await asyncio.to_thread(self._build_pool_instance)
+        except Exception:
+            async with self._pool_lock:
+                self._pool_created -= 1
+            logger.error(
+                "Failed to grow model pool to %d instance(s)", slot, exc_info=True
+            )
+            return None
+        logger.info(
+            f"Grew model pool to {slot} of up to {self._pool_size} instance(s) "
+            f"on {self.device}"
+        )
+        return instance
+
+    async def acquire_model_instance(self, timeout: float = 30.0):
+        """Borrow a model instance from the pool for one stream.
+
+        Takes an idle instance when there is one, otherwise loads another (up
+        to MAX_CONCURRENT_STREAMS) so adding a camera needs no config change.
+        Only once the pool is at its ceiling *and* every instance is checked
+        out does this queue, for up to `timeout` seconds. Falls back to the
+        shared `self.model` when no pool was built (model failed to load).
         """
         pool = getattr(self, "_model_pool", None)
         if pool is None:
             return self.model
         try:
+            return pool.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+        instance = await self._grow_pool()
+        if instance is not None:
+            return instance
+        try:
             return await asyncio.wait_for(pool.get(), timeout=timeout)
         except asyncio.TimeoutError as exc:
             raise RuntimeError(
                 f"All {getattr(self, '_pool_size', 0)} model instance(s) are busy; "
-                "too many concurrent streams."
+                "too many concurrent streams. Raise MAX_CONCURRENT_STREAMS if this "
+                "machine has VRAM for another camera."
             ) from exc
 
     def release_model_instance(self, instance) -> None:
