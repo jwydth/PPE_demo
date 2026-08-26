@@ -23,6 +23,7 @@ from app.db.session import get_session
 from app.repositories.behavior_incident_repository import BehaviorIncidentRepository
 from app.repositories.camera_repository import CameraRepository
 from app.repositories.factory_repository import FactoryRepository
+from app.services.live_streams import active_stream_sources
 from app.repositories.physical_zone_repository import PhysicalZoneRepository
 from app.repositories.ppe_violation_repository import PPEViolationRepository
 from app.repositories.zone_violation_repository import ZoneViolationRepository
@@ -88,8 +89,18 @@ class AnalyticsService:
         )
 
         cameras = self.camera_repository.list_all()
-        total_cameras = sum(1 for c in cameras if c.is_active)
+        # is_active is a soft-delete flag (set False only by
+        # CameraRepository.delete), so this is "registered cameras", not
+        # "cameras currently running".
+        registered = [c for c in cameras if c.is_active]
+        total_cameras = len(registered)
         active_camera_ids = {i.camera_id for i in filtered if i.camera_id is not None}
+        # Counted against `registered` rather than as len(live_sources) so the
+        # numerator can't exceed the denominator: a stream can also be an
+        # ad-hoc uploaded video with no camera row behind it, and those
+        # shouldn't inflate a "N of M cameras" reading.
+        live_sources = active_stream_sources()
+        live_cameras = sum(1 for c in registered if c.source_key in live_sources)
 
         severity_counts = _count_severities(filtered)
         open_incidents = severity_counts.Critical + severity_counts.High
@@ -104,6 +115,7 @@ class AnalyticsService:
             active_zone_ids=active_zone_ids,
             open_incidents=open_incidents,
             active_cameras=len(active_camera_ids),
+            live_cameras=live_cameras,
             total_cameras=total_cameras,
         )
 

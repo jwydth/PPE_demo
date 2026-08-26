@@ -568,7 +568,7 @@ export function SuggestionOverlayLayer({
                   setEditableNames((prev) => ({ ...prev, [s.suggestion_id]: e.target.value }))
                 }
                 aria-label="Zone name"
-                className="w-full rounded border border-slate-700 bg-slate-900 px-1.5 py-1 text-[11px] text-white outline-none focus-visible:border-sky-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-sky-400"
+                className="w-full rounded border border-slate-700 bg-slate-900 px-1.5 py-1 text-xs text-white outline-none focus-visible:border-sky-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-sky-400"
               />
             </DetectionChip>
           </div>

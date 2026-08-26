@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID, uuid4
+from weakref import WeakKeyDictionary
 
 from minio import Minio
 from minio.error import S3Error
@@ -25,6 +26,12 @@ class StorageObject:
     bucket_name: str
 
 
+# Buckets already confirmed to exist, per Minio client. Weak-keyed so a client
+# built for a test doesn't keep its entry alive after the test drops it, and so
+# a recycled id() can never be mistaken for a previously-checked client.
+_READY_BUCKETS: "WeakKeyDictionary[Minio, set[str]]" = WeakKeyDictionary()
+
+
 class EvidenceStorage:
     def __init__(
         self,
@@ -35,7 +42,23 @@ class EvidenceStorage:
         self.bucket_name = bucket_name or get_bucket_name()
 
     def ensure_ready(self) -> str:
-        ensure_bucket_exists(self.client, self.bucket_name)
+        """Confirm the bucket exists, at most once per (client, bucket).
+
+        This is a readiness check, but it used to run on *every* call — and
+        get_object_url() calls it per object, so building the incident feed
+        fired one bucket_exists() round-trip per row: ~1.3ms x 810 rows =
+        ~1.1s of pure network wait on every analytics request, which is what
+        made selecting a zone feel slow.
+
+        A bucket that exists does not stop existing under us, so the result is
+        memoized process-wide (keyed by endpoint + bucket, so tests and any
+        second bucket still get their own check). Uploads still surface a
+        genuine outage: fput_object fails on its own if MinIO is unreachable.
+        """
+        checked = _READY_BUCKETS.setdefault(self.client, set())
+        if self.bucket_name not in checked:
+            ensure_bucket_exists(self.client, self.bucket_name)
+            checked.add(self.bucket_name)
         return self.bucket_name
 
     def upload_ppe_snapshot(

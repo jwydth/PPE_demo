@@ -13,7 +13,15 @@ export function MetricCard({ metric }: { metric: SafetyMetric }) {
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="text-sm font-medium text-slate-500">{metric.label}</p>
-          <p className="mt-2 text-2xl font-semibold text-slate-950">{metric.value}</p>
+          {metric.pending ? (
+            <div
+              className="mt-2 h-8 w-16 animate-pulse rounded bg-slate-200 motion-reduce:animate-none"
+              role="status"
+              aria-label={`${metric.label} loading`}
+            />
+          ) : (
+            <p className="mt-2 text-2xl font-semibold text-slate-950">{metric.value}</p>
+          )}
         </div>
         <div className={`rounded-md p-2 ring-1 ${metricTone[metric.tone]}`}>
           <metric.icon className="size-5" aria-hidden="true" />
@@ -22,7 +30,7 @@ export function MetricCard({ metric }: { metric: SafetyMetric }) {
       <p className="mt-2 text-sm text-slate-600">{metric.helper}</p>
       <p
         className={`mt-1 text-xs font-semibold uppercase tracking-wide ${
-          metric.tone === "slate" ? "text-slate-400" : "text-emerald-700"
+          metric.tone === "slate" ? "text-slate-500" : "text-emerald-700"
         }`}
       >
         {metric.trend}

@@ -15,6 +15,10 @@ export type SafetyMetric = {
   trend: string;
   icon: LucideIcon;
   tone: "green" | "amber" | "blue" | "slate";
+  /** The value isn't known yet (still loading, or the request failed).
+   * MetricCard renders a placeholder instead of `value` — a safety readout
+   * must never show a real-looking number it hasn't actually got. */
+  pending?: boolean;
 };
 
 // 3D Map ("factory3d" view) is temporarily hidden from navigation — the

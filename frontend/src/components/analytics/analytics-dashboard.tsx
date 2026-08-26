@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Area,
   AreaChart,
@@ -218,6 +218,9 @@ export function AnalyticsDashboard({
     queryKey: ["analytics", "compare", comparisonMode, selectedZone],
     queryFn: () => getAnalyticsCompare(comparisonMode, selectedZone),
     refetchInterval: ANALYTICS_POLL_MS,
+    // Same reason as the summary query: keep the chart drawn while the new
+    // zone's numbers load, instead of emptying it on every selection.
+    placeholderData: keepPreviousData,
   });
   const compare = compareQuery.data ?? null;
 

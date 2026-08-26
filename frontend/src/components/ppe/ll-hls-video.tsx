@@ -239,7 +239,7 @@ export function LlHlsVideo({
           // pointer-events-none: the tooltip needs hover to fire, and this
           // corner is otherwise empty in both matrix and single view.
           <div
-            className="absolute bottom-3 left-3 z-20 flex items-center gap-1 rounded-md border border-white/10 bg-slate-950/75 px-2 py-1 text-[10px] font-medium text-slate-200 backdrop-blur"
+            className="absolute bottom-3 left-3 z-20 flex items-center gap-1 rounded-md border border-white/10 bg-slate-950/75 px-2 py-1 text-xs font-medium text-slate-200 backdrop-blur"
             title="This footage is AI-generated for demonstration purposes only and does not depict real De Heus factory video or incidents."
             aria-label="This footage is AI-generated for demonstration purposes only and does not depict real De Heus factory video or incidents."
           >

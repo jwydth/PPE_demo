@@ -53,7 +53,9 @@ import {
   PeopleResults,
 } from "@/components/ppe/result-panels";
 import { doPolygonsOverlap } from "@/lib/spatial-utils";
-import { CONFIRM_DELETE_ALL_INCIDENTS, CONFIRM_DELETE_INCIDENT } from "@/lib/messages";
+import { CONFIRM_DELETE_INCIDENT } from "@/lib/messages";
+import { ConfirmDeleteAllDialog } from "./confirm-delete-all-dialog";
+import { MonitoringStatus } from "./monitoring-status";
 import {
   Severity,
   SEVERITY_ACTIVE_CLASS,
@@ -1008,7 +1010,7 @@ function CameraPanel({
                 {tempCameras.map((cam, idx) => (
                   <div key={cam.id} className="grid gap-2 rounded border border-slate-800 bg-slate-900 p-3">
                     <div className="flex items-start justify-between gap-2">
-                      <label className="grid gap-0.5 text-[10px] text-slate-400 flex-1 min-w-0">
+                      <label className="grid gap-0.5 text-xs text-slate-400 flex-1 min-w-0">
                         Camera name
                         <input
                           type="text"
@@ -1023,7 +1025,7 @@ function CameraPanel({
                         />
                       </label>
                       <div className="flex items-center gap-1.5 shrink-0 pt-3.5">
-                        <label className="flex items-center gap-1 cursor-pointer text-[10px] text-slate-300">
+                        <label className="flex items-center gap-1 cursor-pointer text-xs text-slate-300">
                           <input
                             type="checkbox"
                             checked={cam.active}
@@ -1049,7 +1051,7 @@ function CameraPanel({
                         </button>
                       </div>
                     </div>
-                    <label className="grid gap-0.5 text-[10px] text-slate-400">
+                    <label className="grid gap-0.5 text-xs text-slate-400">
                       Camera URL
                       <input
                         type="text"
@@ -1064,7 +1066,7 @@ function CameraPanel({
                       />
                     </label>
                     <div className="grid grid-cols-2 gap-2">
-                      <label className="grid gap-0.5 text-[10px] text-slate-400">
+                      <label className="grid gap-0.5 text-xs text-slate-400">
                         3D Blueprint Zone
                         <select
                           value={cam.zoneId ?? ""}
@@ -1081,7 +1083,7 @@ function CameraPanel({
                           <option value="Z03">Packing (Z03)</option>
                         </select>
                       </label>
-                      <label className="grid gap-0.5 text-[10px] text-slate-400">
+                      <label className="grid gap-0.5 text-xs text-slate-400">
                         Home zone (Analytics)
                         <select
                           value={cam.homeZoneId ?? ""}
@@ -1131,19 +1133,19 @@ function CameraPanel({
                           }}
                           className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-white outline-none focus:border-lime-500"
                         />
-                        {newZoneError && <p className="text-[10px] text-red-400">{newZoneError}</p>}
+                        {newZoneError && <p className="text-xs text-red-400">{newZoneError}</p>}
                         <div className="flex justify-end gap-2">
                           <button
                             type="button"
                             onClick={() => setCreatingZoneForIdx(null)}
-                            className="rounded px-2 py-1 text-[10px] font-semibold text-slate-400 hover:text-white transition cursor-pointer"
+                            className="rounded px-2 py-1 text-xs font-semibold text-slate-400 hover:text-white transition cursor-pointer"
                           >
                             Cancel
                           </button>
                           <button
                             type="button"
                             onClick={() => void handleCreateZone(idx)}
-                            className="rounded bg-lime-600 hover:bg-lime-500 px-2 py-1 text-[10px] font-semibold text-white transition cursor-pointer"
+                            className="rounded bg-lime-600 hover:bg-lime-500 px-2 py-1 text-xs font-semibold text-white transition cursor-pointer"
                           >
                             Create &amp; assign
                           </button>
@@ -1419,15 +1421,15 @@ function CameraPanel({
                                   {c.active ? (
                                     <>
                                       <Loader2 className="size-6 animate-spin text-slate-400" />
-                                      <span className="text-[10px] uppercase font-semibold tracking-wider text-slate-400">Connecting stream...</span>
+                                      <span className="text-xs uppercase font-semibold tracking-wider text-slate-400">Connecting stream...</span>
                                     </>
                                   ) : (
-                                    <span className="text-[10px] uppercase font-semibold tracking-wider text-slate-500">Camera Offline</span>
+                                    <span className="text-xs uppercase font-semibold tracking-wider text-slate-500">Camera Offline</span>
                                   )}
                                 </div>
                               )}
                               {/* Overlay Badge */}
-                              <div className="absolute top-2 left-2 flex items-center gap-1.5 rounded bg-slate-950/70 px-2 py-0.5 text-[10px] font-medium text-white backdrop-blur-sm">
+                              <div className="absolute top-2 left-2 flex items-center gap-1.5 rounded bg-slate-950/70 px-2 py-0.5 text-xs font-medium text-white backdrop-blur-sm">
                                 <span className={`size-1.5 rounded-full ${c.active ? "bg-emerald-500" : "bg-slate-400"}`} />
                                 {c.name}
                               </div>
@@ -1644,12 +1646,25 @@ const TIME_PRESET_HOURS: Record<"24h" | "7d" | "30d", number> = {
   "30d": 24 * 30,
 };
 
-/** <input type="datetime-local"> works in local time with no timezone
- * suffix; the backend expects an ISO instant, so this is the one spot that
- * conversion happens. Blank/unparseable input means that bound isn't set. */
-function localDateTimeToIso(value: string): string | undefined {
-  if (!value) return undefined;
-  const parsed = new Date(value);
+/** <input type="date"> yields "YYYY-MM-DD", and the backend expects an ISO
+ * instant — this is the one spot that conversion happens. Blank/unparseable
+ * input means that bound isn't set.
+ *
+ * Built from parts rather than `new Date(value)` on purpose: the spec parses a
+ * bare date string as *UTC* midnight, which would shift both bounds by the
+ * local offset and silently drop incidents near either edge of the range.
+ *
+ * `end` resolves to the last millisecond of the chosen day so the To bound is
+ * inclusive — picking the same day for From and To means "that whole day",
+ * not an empty zero-width range. */
+function localDayToIso(value: string, bound: "start" | "end"): string | undefined {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return undefined;
+  const [, year, month, day] = match;
+  const parsed =
+    bound === "start"
+      ? new Date(Number(year), Number(month) - 1, Number(day), 0, 0, 0, 0)
+      : new Date(Number(year), Number(month) - 1, Number(day), 23, 59, 59, 999);
   return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
 }
 
@@ -1668,7 +1683,10 @@ function computeIncidentDateRange(
 ): { dateFrom: string | undefined; dateTo: string | undefined } {
   if (timePreset === "all") return { dateFrom: undefined, dateTo: undefined };
   if (timePreset === "custom") {
-    return { dateFrom: localDateTimeToIso(customFrom), dateTo: localDateTimeToIso(customTo) };
+    return {
+      dateFrom: localDayToIso(customFrom, "start"),
+      dateTo: localDayToIso(customTo, "end"),
+    };
   }
   const since = new Date(Date.now() - TIME_PRESET_HOURS[timePreset] * 3_600_000);
   return { dateFrom: since.toISOString(), dateTo: undefined };
@@ -1701,7 +1719,9 @@ function FilterRow({
 }) {
   return (
     <div className="flex flex-wrap items-center gap-2 py-2.5">
-      <span className="flex w-20 shrink-0 items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+      {/* w-24, not w-20: at the 12px floor "SEVERITY" plus its icon no longer
+          fits 5rem, and the pills would lose their shared left edge. */}
+      <span className="flex w-24 shrink-0 items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">
         {icon}
         {label}
       </span>
@@ -1867,6 +1887,7 @@ function IncidentPanel() {
     [camerasQuery.data],
   );
   const [deleteAllError, setDeleteAllError] = useState("");
+  const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
   const [deletingAll, setDeletingAll] = useState(false);
   const [selectedIncident, setSelectedIncident] = useState<{
     category: IncidentCategory;
@@ -1947,16 +1968,28 @@ function IncidentPanel() {
     invalidateEvents();
   };
 
+  // Shared by the filter bar's "Clear filters" and the filtered empty state,
+  // so the two can't drift apart on what "clear" means.
+  const clearFilters = () =>
+    applyFilterChange(() => {
+      setCategoryFilter([]);
+      setSeverityFilter([]);
+      setTimePreset("all");
+      setCustomFrom("");
+      setCustomTo("");
+    });
+
   const deleteAllEvents = async () => {
-    if (!confirm(CONFIRM_DELETE_ALL_INCIDENTS)) return;
     setDeletingAll(true);
     setDeleteAllError("");
     try {
       await deleteAllIncidents();
       setPage(1);
       invalidateEvents();
+      setConfirmDeleteAll(false);
     } catch (err) {
       setDeleteAllError(err instanceof Error ? err.message : "Could not delete incidents");
+      setConfirmDeleteAll(false);
     } finally {
       setDeletingAll(false);
     }
@@ -1972,20 +2005,16 @@ function IncidentPanel() {
           <h2 className="text-sm font-semibold text-slate-950">Recent Incidents</h2>
           <p className="text-xs text-slate-500">Loaded from PPE, zone, and behavior incident stores.</p>
         </div>
+        {/* Refresh sits alone here. Delete All used to be its immediate
+            neighbour, which put an irreversible action one slipped click from
+            the control people press most — it now lives at the foot of the
+            panel, away from the routine controls. */}
         <div className="flex items-center gap-2">
           <button
-            onClick={() => void deleteAllEvents()}
-            disabled={totalEvents === 0 || loading}
-            className="flex items-center gap-1.5 rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-xs font-semibold text-red-700 transition hover:bg-red-100 hover:border-red-300 disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:border-slate-200 disabled:text-slate-400"
-            type="button"
-          >
-            <Trash2 className="size-3.5" />
-            <span>Delete All</span>
-          </button>
-          <button
             onClick={() => void eventsQuery.refetch()}
-            className="rounded-md border border-slate-200 bg-white p-2 text-xs font-semibold text-slate-700 transition hover:border-slate-300 hover:text-slate-950"
+            className="rounded-md border border-slate-200 bg-white p-2 text-xs font-semibold text-slate-700 transition hover:border-slate-300 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
             type="button"
+            aria-label="Refresh incidents"
           >
             <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} aria-hidden="true" />
           </button>
@@ -2000,30 +2029,22 @@ function IncidentPanel() {
             aria-controls="incident-filters-body"
             className="flex items-center gap-1.5 rounded-md text-xs font-semibold uppercase tracking-wide text-slate-500 transition-colors duration-150 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lime-400 focus-visible:ring-offset-1"
           >
-            <SlidersHorizontal className="size-3.5 text-slate-400" aria-hidden="true" />
+            <SlidersHorizontal className="size-3.5 text-slate-500" aria-hidden="true" />
             Filters
             {hasActiveFilters ? (
-              <span className="rounded-full bg-lime-100 px-1.5 py-0.5 text-[10px] font-bold normal-case tracking-normal text-lime-800">
+              <span className="rounded-full bg-lime-100 px-1.5 py-0.5 text-xs font-bold normal-case tracking-normal text-lime-800">
                 {activeFilterCount} active
               </span>
             ) : null}
             <ChevronDown
-              className={`size-3.5 text-slate-400 transition-transform duration-200 motion-reduce:transition-none ${filtersExpanded ? "rotate-180" : ""}`}
+              className={`size-3.5 text-slate-500 transition-transform duration-200 motion-reduce:transition-none ${filtersExpanded ? "rotate-180" : ""}`}
               aria-hidden="true"
             />
           </button>
           {hasActiveFilters ? (
             <button
               type="button"
-              onClick={() =>
-                applyFilterChange(() => {
-                  setCategoryFilter([]);
-                  setSeverityFilter([]);
-                  setTimePreset("all");
-                  setCustomFrom("");
-                  setCustomTo("");
-                })
-              }
+              onClick={clearFilters}
               className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold text-slate-500 transition-colors duration-150 hover:bg-slate-100 hover:text-slate-950"
             >
               <X className="size-3" aria-hidden="true" />
@@ -2108,8 +2129,9 @@ function IncidentPanel() {
                   <label className="flex items-center gap-2 text-xs font-medium text-slate-600">
                     From
                     <input
-                      type="datetime-local"
+                      type="date"
                       value={customFrom}
+                      max={customTo || undefined}
                       onChange={(e) => applyFilterChange(() => setCustomFrom(e.target.value))}
                       className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-800 shadow-sm transition-colors focus:border-slate-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-lime-400"
                     />
@@ -2117,8 +2139,9 @@ function IncidentPanel() {
                   <label className="flex items-center gap-2 text-xs font-medium text-slate-600">
                     To
                     <input
-                      type="datetime-local"
+                      type="date"
                       value={customTo}
+                      min={customFrom || undefined}
                       onChange={(e) => applyFilterChange(() => setCustomTo(e.target.value))}
                       className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-800 shadow-sm transition-colors focus:border-slate-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-lime-400"
                     />
@@ -2146,13 +2169,16 @@ function IncidentPanel() {
         </div>
       ) : null}
       {loading && !eventsQuery.data ? <LoadingState text="Loading recent incidents..." /> : null}
-      {error ? <ErrorState text={error} /> : null}
+      {error ? <ErrorState text={error} onRetry={() => void eventsQuery.refetch()} /> : null}
       {!loading && !error && totalEvents === 0 ? (
         <EmptyState
           text={
             hasActiveFilters
               ? "No incidents match the selected filters."
               : "No incidents have been recorded yet."
+          }
+          action={
+            hasActiveFilters ? { label: "Clear filters", onClick: clearFilters } : undefined
           }
         />
       ) : null}
@@ -2191,7 +2217,7 @@ function IncidentPanel() {
             </button>
             {getPageWindow(currentPage, totalPages).map((p, i) =>
               p === "…" ? (
-                <span key={`ellipsis-${i}`} className="px-1 text-xs text-slate-400">
+                <span key={`ellipsis-${i}`} className="px-1 text-xs text-slate-500">
                   …
                 </span>
               ) : (
@@ -2230,6 +2256,30 @@ function IncidentPanel() {
             </button>
           </div>
         </div>
+      ) : null}
+      {totalEvents > 0 ? (
+        <div className="mt-4 flex items-center justify-between gap-3 border-t border-slate-200 pt-3">
+          <p className="text-xs text-slate-500">
+            Clearing the log removes your compliance history. This cannot be undone.
+          </p>
+          <button
+            onClick={() => setConfirmDeleteAll(true)}
+            disabled={loading || deletingAll}
+            className="flex shrink-0 items-center gap-1.5 rounded-md border border-red-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-red-700 transition hover:border-red-300 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+            type="button"
+          >
+            <Trash2 className="size-3.5" aria-hidden="true" />
+            <span>Delete all incidents</span>
+          </button>
+        </div>
+      ) : null}
+      {confirmDeleteAll ? (
+        <ConfirmDeleteAllDialog
+          count={totalEvents}
+          deleting={deletingAll}
+          onConfirm={() => void deleteAllEvents()}
+          onCancel={() => setConfirmDeleteAll(false)}
+        />
       ) : null}
       {selectedIncident ? (
         <IncidentDetailModal
@@ -2298,10 +2348,11 @@ export function DashboardShell() {
     setCamerasLoading(false);
   }, []);
   const [physicalZones, setPhysicalZones] = useState<PhysicalZone[]>([]);
+  const [zonesLoaded, setZonesLoaded] = useState(false);
   // Same hook and default range/zone (7D, all zones) as the Incident
   // Analytics tab's KPI row, so the two stay in sync instead of this one
   // showing static placeholder data.
-  const { kpis } = useSafetyKpis();
+  const { kpis, summary: kpiSummary, isError: kpiError } = useSafetyKpis();
 
   useEffect(() => {
     let cancelled = false;
@@ -2318,7 +2369,13 @@ export function DashboardShell() {
     }
     loaded = normalizeConfiguredCameras(loaded);
 
-    void getPhysicalZones().then(setPhysicalZones).catch(() => {});
+    // `zonesLoaded` gates the sidebar's empty state. Without it an unresolved
+    // fetch looks identical to "this factory has no zones", and the sidebar
+    // told the user to go create zones that already existed.
+    void getPhysicalZones()
+      .then(setPhysicalZones)
+      .catch(() => {})
+      .finally(() => setZonesLoaded(true));
 
     // Re-resolve every source to its database camera in the background. When
     // `cameras` was already seeded from a cached, previously-resolved list
@@ -2395,6 +2452,7 @@ export function DashboardShell() {
       <div className="lg:flex">
         <ZoneSidebar
           physicalZones={physicalZones}
+          zonesLoaded={zonesLoaded}
           cameraCounts={cameraCountsByZone}
           onPhysicalZonesUpdate={setPhysicalZones}
         />
@@ -2402,10 +2460,7 @@ export function DashboardShell() {
           <div className="flex w-full flex-col gap-4">
             <section className="flex flex-col justify-between gap-4 rounded-md border border-slate-200 bg-white p-4 shadow-sm md:flex-row md:items-center">
               <div>
-                <div className="flex items-center gap-2">
-                  <span className="size-2 rounded-full bg-emerald-500" />
-                  <p className="text-sm font-medium text-slate-600">Live monitoring active</p>
-                </div>
+                <MonitoringStatus summary={kpiSummary} isError={kpiError} />
                 <h2 className="mt-2 text-2xl font-semibold tracking-normal text-slate-950 md:text-3xl">
                   {pageTitle}
                 </h2>
@@ -2420,7 +2475,9 @@ export function DashboardShell() {
               </div>
             </section>
 
-            <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            {/* Column count follows the number of live metrics rather than a
+                fixed 4, so removing the placeholder cards doesn't leave gaps. */}
+            <section className="grid gap-3 md:grid-cols-2">
               {kpis.map((metric) => (
                 <MetricCard key={metric.label} metric={metric} />
               ))}

@@ -76,7 +76,7 @@ export function ZoneButton({
               disabled={loading}
               onClick={() => void handleSave()}
               aria-label="Save changes"
-              className="rounded p-1 text-slate-400 hover:bg-emerald-50 hover:text-emerald-600 transition cursor-pointer"
+              className="rounded p-1 text-slate-500 hover:bg-emerald-50 hover:text-emerald-600 transition cursor-pointer"
             >
               <Check className="size-4" />
             </button>
@@ -85,7 +85,7 @@ export function ZoneButton({
               disabled={loading}
               onClick={handleCancel}
               aria-label="Cancel changes"
-              className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 transition cursor-pointer"
+              className="rounded p-1 text-slate-500 hover:bg-red-50 hover:text-red-600 transition cursor-pointer"
             >
               <X className="size-4" />
             </button>

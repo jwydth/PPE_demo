@@ -19,9 +19,23 @@ from app.services.incident_service import (
 
 router = APIRouter(tags=["analytics"])
 
+# These handlers are deliberately `def`, not `async def`.
+#
+# AnalyticsService does synchronous SQLAlchemy work and then aggregates the
+# rows in Python (see its module docstring for why aggregation is in-process).
+# Declared `async def`, that ran directly on the asyncio event loop and blocked
+# the entire server for the duration — a single /analytics/summary call pushed
+# /health from a 4ms median to 1549ms, and every camera WebSocket stalled with
+# it. Selecting a zone fires two of these at once, which is what made the Zone
+# Pulse feel unresponsive.
+#
+# FastAPI runs `def` handlers in its threadpool instead, so the blocking work
+# happens off the loop. Each request still gets its own Session from
+# get_session, so nothing is shared across threads.
+
 
 @router.get("/analytics/incidents", response_model=list[UnifiedIncidentRead])
-async def list_unified_incidents(
+def list_unified_incidents(
     service: Annotated[UnifiedIncidentService, Depends(get_unified_incident_service)],
     limit: int = Query(default=30, ge=1, le=500),
     zone_id: int | None = Query(default=None, ge=1),
@@ -50,7 +64,7 @@ async def list_unified_incidents(
 
 
 @router.get("/analytics/summary", response_model=AnalyticsSummary)
-async def get_analytics_summary(
+def get_analytics_summary(
     service: Annotated[AnalyticsService, Depends(get_analytics_service)],
     range: AnalyticsRange = Query(default="7D"),
     zone_id: int | None = Query(default=None, ge=1),
@@ -62,7 +76,7 @@ async def get_analytics_summary(
 
 
 @router.get("/analytics/trend", response_model=AnalyticsTrend)
-async def get_analytics_trend(
+def get_analytics_trend(
     service: Annotated[AnalyticsService, Depends(get_analytics_service)],
     range: AnalyticsRange = Query(default="7D"),
     zone_id: int | None = Query(default=None, ge=1),
@@ -74,7 +88,7 @@ async def get_analytics_trend(
 
 
 @router.get("/analytics/compare", response_model=AnalyticsCompare)
-async def get_analytics_compare(
+def get_analytics_compare(
     service: Annotated[AnalyticsService, Depends(get_analytics_service)],
     mode: CompareMode = Query(default="week"),
     zone_id: int | None = Query(default=None, ge=1),

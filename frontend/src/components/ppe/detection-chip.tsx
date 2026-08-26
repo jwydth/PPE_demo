@@ -13,9 +13,9 @@ export interface ChipAction {
 }
 
 const PRIMARY_ACTION_CLASS =
-  "inline-flex items-center gap-1 rounded bg-sky-400 px-2 py-1 text-[11px] font-semibold text-slate-950 transition hover:bg-sky-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300";
+  "inline-flex items-center gap-1 rounded bg-sky-400 px-2 py-1 text-xs font-semibold text-slate-950 transition hover:bg-sky-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300";
 const SECONDARY_ACTION_CLASS =
-  "inline-flex items-center gap-1 rounded border border-slate-600 px-2 py-1 text-[11px] font-semibold text-slate-300 transition hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-300";
+  "inline-flex items-center gap-1 rounded border border-slate-600 px-2 py-1 text-xs font-semibold text-slate-300 transition hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-300";
 
 export function ChipActionButton({ action }: { action: ChipAction }) {
   const Icon = action.icon;

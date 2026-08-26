@@ -6,10 +6,15 @@ import { ZoneButton } from "./zone-button";
 
 export function ZoneSidebar({
   physicalZones,
+  zonesLoaded,
   cameraCounts,
   onPhysicalZonesUpdate,
 }: {
   physicalZones: PhysicalZone[];
+  /** False until the zone fetch settles. An empty list before that means
+   * "not known yet", not "none exist" — showing the create-a-zone prompt then
+   * tells the user to duplicate zones that are about to appear. */
+  zonesLoaded: boolean;
   cameraCounts: Record<number, number>;
   onPhysicalZonesUpdate: (updated: PhysicalZone[]) => void;
 }) {
@@ -83,15 +88,26 @@ export function ZoneSidebar({
           <button
             type="submit"
             disabled={loading || !newZoneName.trim()}
+            aria-label="Add zone"
+            title="Add zone"
             className="flex items-center justify-center rounded bg-slate-900 hover:bg-slate-800 disabled:opacity-50 disabled:bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white transition cursor-pointer"
           >
-            <Plus className="size-4" />
+            <Plus className="size-4" aria-hidden="true" />
           </button>
         </form>
 
         <div className="flex flex-col gap-2 overflow-y-auto flex-1 pr-1">
-          {physicalZones.length === 0 ? (
-            <p className="px-1 text-xs text-slate-400">
+          {!zonesLoaded ? (
+            <div className="flex flex-col gap-2" aria-label="Loading zones" role="status">
+              {[0, 1, 2].map((i) => (
+                <div
+                  key={i}
+                  className="h-11 animate-pulse rounded-md bg-slate-100 motion-reduce:animate-none"
+                />
+              ))}
+            </div>
+          ) : physicalZones.length === 0 ? (
+            <p className="px-1 text-xs text-slate-500">
               No zones yet — create one from Camera Feeds → Configure cameras.
             </p>
           ) : (

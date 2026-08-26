@@ -31,7 +31,10 @@ export interface AnalyticsSummary {
   type_counts: TypeCount[];
   active_zone_ids: (number | null)[];
   open_incidents: number;
+  /** Cameras with an incident inside the range — historical, used by reports. */
   active_cameras: number;
+  /** Cameras streaming right now — point-in-time, independent of the range. */
+  live_cameras: number;
   total_cameras: number;
 }
 

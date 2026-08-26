@@ -55,7 +55,7 @@ export function ZoneDetailPanel({ zone, aggregate, loading }: ZoneDetailPanelPro
           <dl className="mt-2 grid grid-cols-3 gap-2 rounded-md border border-slate-200 bg-white p-2">
             {CATEGORY_READOUT.map(({ key, label }) => (
               <div key={key} className="text-center">
-                <dt className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">{label}</dt>
+                <dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</dt>
                 <dd className="font-mono text-sm font-semibold text-slate-900">{aggregate[key]}</dd>
               </div>
             ))}

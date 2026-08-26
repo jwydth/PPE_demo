@@ -26,7 +26,17 @@ def get_engine() -> Engine:
     if not database_url:
         raise RuntimeError("DATABASE_URL is not configured.")
 
-    return create_engine(_normalize_database_url(database_url), pool_pre_ping=True)
+    url = _normalize_database_url(database_url)
+    connect_args: dict[str, object] = {}
+    if url.startswith("postgresql"):
+        # libpq blocks in connect() indefinitely by default. Every DB-backed
+        # endpoint is `async def` calling sync SQLAlchemy, so that block lands
+        # on the asyncio event loop thread and freezes the whole server —
+        # including already-running camera WebSocket streams. Failing fast
+        # turns an unrecoverable hang into a 503.
+        connect_args["connect_timeout"] = 5
+
+    return create_engine(url, pool_pre_ping=True, connect_args=connect_args)
 
 
 def get_session() -> Generator[Session, None, None]:

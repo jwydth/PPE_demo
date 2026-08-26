@@ -102,8 +102,25 @@ export function IncidentCard({
 
   return (
     <article
-      className={`overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm ${canOpenDetail ? "cursor-pointer transition hover:border-slate-300 hover:shadow-md" : ""}`}
+      className={`overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm ${canOpenDetail ? "cursor-pointer transition hover:border-slate-300 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400" : ""}`}
       onClick={canOpenDetail ? () => onOpenDetail!(category, event.id as number) : undefined}
+      // The card is the control that opens the incident, so it has to behave
+      // like one: reachable by Tab and activated by Enter/Space. Without these
+      // the detail view was mouse-only. The nested delete button stops
+      // propagation, so it still can't trigger this by accident.
+      role={canOpenDetail ? "button" : undefined}
+      tabIndex={canOpenDetail ? 0 : undefined}
+      onKeyDown={
+        canOpenDetail
+          ? (e) => {
+              if (e.target !== e.currentTarget) return;
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onOpenDetail!(category, event.id as number);
+              }
+            }
+          : undefined
+      }
     >
       {imageUrl ? (
         // eslint-disable-next-line @next/next/no-img-element
@@ -159,10 +176,27 @@ export function IncidentCard({
   );
 }
 
-export function EmptyState({ text }: { text: string }) {
+export function EmptyState({
+  text,
+  action,
+}: {
+  text: string;
+  /** Optional way out of the empty state — e.g. clearing the filters that
+   * produced it. A dead end and its escape hatch belong in the same place. */
+  action?: { label: string; onClick: () => void };
+}) {
   return (
-    <div className="rounded-md border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
-      {text}
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
+      <span>{text}</span>
+      {action ? (
+        <button
+          type="button"
+          onClick={action.onClick}
+          className="shrink-0 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
+        >
+          {action.label}
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -175,10 +209,32 @@ export function LoadingState({ text }: { text: string }) {
   );
 }
 
-export function ErrorState({ text }: { text: string }) {
+export function ErrorState({
+  text,
+  onRetry,
+}: {
+  text: string;
+  /** Wire this wherever a refetch exists. An error with no way forward leaves
+   * a manual page reload as the only option. */
+  onRetry?: () => void;
+}) {
   return (
-    <div className="rounded-md border border-red-200 bg-red-50 p-4 text-sm font-medium text-red-700">
-      {text}
+    // role="alert" so assistive tech announces the failure — previously this
+    // was a red box and nothing else, invisible to a screen reader.
+    <div
+      role="alert"
+      className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-red-200 bg-red-50 p-4 text-sm font-medium text-red-700"
+    >
+      <span>{text}</span>
+      {onRetry ? (
+        <button
+          type="button"
+          onClick={onRetry}
+          className="shrink-0 rounded-md border border-red-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-red-700 transition hover:bg-red-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400"
+        >
+          Try again
+        </button>
+      ) : null}
     </div>
   );
 }

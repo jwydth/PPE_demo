@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse, Response
 from app.core.config import settings
 from app.schemas.streaming import StreamEvent
 from app.services.annotated_stream import latest_annotated_frame
+from app.services.live_streams import claim_stream, release_stream
 from app.services.ppe.response_builder import _encode_frame_to_jpeg
 from app.services.ppe_detector import PPEDetector
 from app.services.stream_health import (
@@ -28,8 +29,9 @@ _detector = PPEDetector()
 _stream_locks: dict[str, asyncio.Lock] = {}
 # Monotonic counter so each WebSocket connection has a stable id in the logs.
 _conn_counter = itertools.count(1)
-# Map of video_name -> Event to cancel orphaned connections for a specific camera/video.
-_current_cancels: dict[str, asyncio.Event] = {}
+# The video_name -> cancel Event map that used to live here now lives in
+# app.services.live_streams, so analytics can report which cameras are
+# streaming without importing this router.
 # How long listen_for_settings() waits for a client message before probing
 # liveness with a ping. Bounds how long a truly-dead connection (dropped
 # network, sleep, a hard reload that skips a clean WS close frame) can hold
@@ -75,7 +77,6 @@ async def stream_video_ws(
     enable_sign: bool = Query(True),
     metadata_only: bool = Query(False),
 ):
-    global _current_cancel
     conn_id = next(_conn_counter)
     await websocket.accept()
     ensure_upload_dir()
@@ -110,8 +111,7 @@ async def stream_video_ws(
     # Set when a newer connection wants to take over for this specific stream.
     # Allows this stream to be superseded even if the browser never closed it (orphaned WebSocket).
     cancel_event = asyncio.Event()
-    previous_cancel = _current_cancels.get(video_name)
-    _current_cancels[video_name] = cancel_event
+    previous_cancel = claim_stream(video_name, cancel_event)
     if previous_cancel is not None:
         previous_cancel.set()
         logger.info(f"[conn {conn_id}] superseding previous stream for {video_name} — signalled it to stop")
@@ -401,8 +401,7 @@ async def stream_video_ws(
         logger.info(f"[conn {conn_id}] entering cleanup (closing generator + releasing lock)")
         # Only clear the global if we're still the active stream — a newer
         # connection may have already replaced it.
-        if _current_cancels.get(video_name) is cancel_event:
-            _current_cancels.pop(video_name, None)
+        release_stream(video_name, cancel_event)
         settings_task.cancel()
         # Make sure produce() stops even if we got here via an exception path
         # where neither flag was set yet, then wait for it to actually finish

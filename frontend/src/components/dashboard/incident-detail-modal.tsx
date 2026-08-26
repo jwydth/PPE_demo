@@ -2,6 +2,7 @@
 
 import { Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
+import { useModalDismiss } from "@/hooks/useModalDismiss";
 import { CONFIRM_DELETE_INCIDENT } from "@/lib/messages";
 import {
   deleteIncident,
@@ -48,6 +49,11 @@ export function IncidentDetailModal({
   const [deleting, setDeleting] = useState(false);
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [physicalZones, setPhysicalZones] = useState<PhysicalZone[]>([]);
+  // Escape to close, focus held inside, focus returned to the incident row.
+  const dialogRef = useModalDismiss<HTMLDivElement>({
+    onDismiss: onClose,
+    enabled: !deleting,
+  });
 
   useEffect(() => {
     getCameras().then(setCameras).catch(() => {});
@@ -97,24 +103,33 @@ export function IncidentDetailModal({
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4"
       role="dialog"
       aria-modal="true"
+      // Two ids: the name reads as "Incident Detail — PPE Violation · #12"
+      // without duplicating the eyebrow on screen.
+      aria-labelledby="incident-detail-title incident-detail-eyebrow"
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
         className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-md border border-slate-200 bg-white shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+            <p
+              id="incident-detail-eyebrow"
+              className="text-xs font-semibold uppercase tracking-wide text-slate-500"
+            >
               {CATEGORY_LABEL[category]} · #{incidentId}
             </p>
-            <h2 className="text-sm font-semibold text-slate-950">Incident Detail</h2>
+            <h2 id="incident-detail-title" className="text-sm font-semibold text-slate-950">
+              Incident Detail
+            </h2>
           </div>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="rounded-md p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 cursor-pointer"
+            className="rounded-md p-1.5 text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 cursor-pointer"
           >
             <X className="size-4" />
           </button>
@@ -283,7 +298,7 @@ function DetailBody({ category, detail, cameras, physicalZones }: DetailBodyProp
 function SnapshotImage({ src }: { src?: string | null }) {
   if (!src) {
     return (
-      <div className="flex aspect-video w-full items-center justify-center rounded-md border border-dashed border-slate-300 bg-slate-50 text-sm text-slate-400">
+      <div className="flex aspect-video w-full items-center justify-center rounded-md border border-dashed border-slate-300 bg-slate-50 text-sm text-slate-500">
         No snapshot available
       </div>
     );
@@ -299,7 +314,7 @@ function FieldGrid({ fields }: { fields: [string, string | number | null | undef
     <div className="grid grid-cols-2 gap-x-4 gap-y-2 border-t border-slate-100 pt-3 text-xs text-slate-600 sm:grid-cols-3">
       {fields.map(([label, value]) => (
         <div key={label}>
-          <p className="font-semibold uppercase tracking-wide text-slate-400">{label}</p>
+          <p className="font-semibold uppercase tracking-wide text-slate-500">{label}</p>
           <p className="mt-0.5 text-slate-800">{value ?? "—"}</p>
         </div>
       ))}

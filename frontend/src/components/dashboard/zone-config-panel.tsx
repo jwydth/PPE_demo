@@ -44,7 +44,7 @@ export function ZoneConfigPanel({
             <span className="text-xs font-bold text-lime-200">Drawing Active</span>
             <button
               onClick={togglePlayback}
-              className="flex items-center gap-1.5 rounded bg-white/10 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-white hover:bg-white/20"
+              className="flex items-center gap-1.5 rounded bg-white/10 px-2 py-1 text-xs font-bold uppercase tracking-wider text-white hover:bg-white/20"
             >
               {isPlaying ? (
                 <>

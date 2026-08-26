@@ -35,7 +35,15 @@ class AnalyticsSummary(BaseModel):
     type_counts: list[TypeCount]
     active_zone_ids: list[int | None]
     open_incidents: int
+    # Cameras that recorded an incident inside `range` — a historical figure,
+    # which is what the PDF report's coverage narrative wants. Not the same as
+    # live_cameras, and deliberately kept separate from it.
     active_cameras: int
+    # Cameras whose source is being streamed right now, point-in-time and
+    # independent of `range`. This is what the dashboard KPI card shows.
+    # Defaults to 0 so report-side constructors, which describe a past period
+    # where "streaming right now" is meaningless, don't have to supply it.
+    live_cameras: int = 0
     total_cameras: int
 
 
