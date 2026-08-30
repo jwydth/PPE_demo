@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Check,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -62,6 +63,7 @@ import {
   SEVERITY_DOT_CLASS,
   VALID_SEVERITIES,
 } from "@/lib/incident-severity";
+import { Camera } from "@/types/camera";
 import { TrackingOverlay, ViolationReport } from "@/types/detection";
 import { PhysicalZone, ZoneType, ZoneViolation } from "@/types/zone";
 import { useDetectionUpload } from "@/hooks/useDetectionUpload";
@@ -209,6 +211,46 @@ function normalizeConfiguredCameras(cameras: CameraConfig[]): CameraConfig[] {
       sourceKeys.add(camera.rtspUrl);
       return true;
     });
+}
+
+/**
+ * Append every registered camera the configured list doesn't already cover.
+ *
+ * The "Active Cameras" KPI counts is_active rows in the backend cameras table
+ * (analytics_service.get_summary), while this panel renders a localStorage
+ * list — two different sources for what is meant to be one set. Any row the
+ * backend gained on its own therefore showed up in the count but nowhere in
+ * the UI, so the two numbers disagreed and nothing on screen explained why.
+ * (Cameras are created implicitly: saving a zone, or an incident arriving for
+ * a source_key with no camera row — see useSafetyKpis' note.)
+ *
+ * Adopting them here makes the configured list the same set the KPI counts, so
+ * the numbers agree by construction and a stray row is visible — and therefore
+ * removable — in Configure cameras instead of only inflating a number.
+ */
+function adoptRegisteredCameras(
+  configured: CameraConfig[],
+  registered: Camera[],
+): CameraConfig[] {
+  const known = new Set(
+    configured.map((camera) => normalizeCameraSourceKey(camera.rtspUrl)),
+  );
+  const adopted = registered
+    .filter((camera) => camera.is_active)
+    .filter(
+      (camera) => !known.has(normalizeCameraSourceKey(camera.source_key)),
+    )
+    .map((camera) => ({
+      id: camera.id,
+      name: camera.name,
+      rtspUrl: normalizeCameraSourceKey(camera.source_key),
+      zoneId: "",
+      homeZoneId: camera.home_zone_id,
+      // Listed, not streamed: a row the user never configured shouldn't start
+      // pulling a feed just because it exists.
+      active: false,
+    }));
+  return [...configured, ...adopted];
 }
 
 // Synchronously seeds initial state from whatever camera list (with backend
@@ -1526,7 +1568,7 @@ function CameraPanel({
                       </p>
                     ) : currentZoneEnabled ? (
                       <p className="mt-2 text-xs text-slate-400">
-                        Viewing saved zones. Click &quot;Start draw zone&quot; to add new areas.
+                        Viewing saved zones. Click &quot;Configure zones&quot; to add new areas.
                       </p>
                     ) : null}
                   </div>
@@ -1627,6 +1669,29 @@ const INCIDENTS_PAGE_SIZE = 6;
 // faster than this, and a flash too brief to read is the same as no feedback at
 // all — so the indicator is held for this long even once the data has arrived.
 const PAGE_INDICATOR_MIN_MS = 2500;
+// The refresh request settles in single-digit milliseconds, so a spinner is the
+// wrong signal for it: a spinner says "wait", and there is no wait. It only
+// appears if the request is actually slow enough to be worth waiting on.
+const REFRESH_SPINNER_DELAY_MS = 300;
+// How long the checkmark replaces the refresh icon after a successful reload.
+// The question the click asks is "did that work?", which is answered by
+// confirming completion, not by simulating a delay.
+const REFRESH_CONFIRM_MS = 1200;
+// How often the "Updated ..." label re-renders so it ages in place.
+const FRESHNESS_TICK_MS = 15_000;
+
+/** "just now" / "40s ago" / "6 min ago" / clock time once it stops being recent. */
+function formatUpdatedAt(updatedAt: number, now: number): string {
+  const seconds = Math.max(0, Math.round((now - updatedAt) / 1000));
+  if (seconds < 10) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  return new Date(updatedAt).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
 
 const CATEGORY_FILTER_OPTIONS: IncidentCategory[] = ["ppe", "zone", "behavior"];
 const CATEGORY_FILTER_ICON: Record<IncidentCategory, ReactNode> = {
@@ -1859,7 +1924,20 @@ function IncidentPanel() {
   // Busy while either the request is running or the indicator's minimum has
   // not elapsed — so a slow response extends the state instead of the timer
   // cutting it short.
-  const isPaging = !floorElapsed || eventsQuery.isFetching;
+  // A page change is in flight exactly when a request is running and the data
+  // on screen is still the page we're leaving — keepPreviousData holds the old
+  // page for the whole fetch, so this is true from click until the new page
+  // lands, and stays true for a slow response instead of the floor timer
+  // cutting it short.
+  //
+  // Gating on `isFetching` alone (the previous version) meant *any* fetch lit
+  // the paging banner: the manual refresh button and React Query's background
+  // refetches included. Those settle in a couple of milliseconds, so the green
+  // "Fetching results · page N" box was mounted and unmounted inside a frame or
+  // two — a flash, announcing a page change that was not happening.
+  const pageChangePending =
+    eventsQuery.isFetching && page !== (eventsQuery.data?.page ?? page);
+  const isPaging = !floorElapsed || pageChangePending;
   // Paging state comes from the response, not from local arithmetic: the server
   // clamps an out-of-range page (rows deleted since the controls were rendered)
   // and owns the true total, so trusting its numbers keeps the controls honest
@@ -1907,6 +1985,25 @@ function IncidentPanel() {
   useEffect(() => () => {
     if (pagingTimerRef.current) clearTimeout(pagingTimerRef.current);
   }, []);
+  // Refresh feedback. The reload is near-instant, so the click is confirmed by
+  // showing that it *finished* (a checkmark plus a freshened "Updated" label)
+  // rather than by holding a spinner open for a wait that never happens. The
+  // spinner is kept for the case where the request really is slow.
+  const [refreshSpinning, setRefreshSpinning] = useState(false);
+  const [refreshConfirmed, setRefreshConfirmed] = useState(false);
+  const spinnerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (spinnerTimerRef.current) clearTimeout(spinnerTimerRef.current);
+    if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
+  }, []);
+  // Re-render on a timer so the "Updated ..." label ages while the panel sits
+  // open. Interval callback, not a synchronous setState in the effect body.
+  const [freshnessNow, setFreshnessNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setFreshnessNow(Date.now()), FRESHNESS_TICK_MS);
+    return () => clearInterval(id);
+  }, []);
   const goToPage = (next: number, control: "prev" | "next" | number) => {
     setPage(next);
     setPagingControl(control);
@@ -1943,6 +2040,36 @@ function IncidentPanel() {
   // on having no data yet, rather than on `loading` alone, or it would
   // reappear over already-populated content on every single tab switch.
   const loading = eventsQuery.isFetching || deletingAll;
+  const handleRefresh = () => {
+    if (spinnerTimerRef.current) clearTimeout(spinnerTimerRef.current);
+    if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
+    setRefreshConfirmed(false);
+    // Only becomes a "please wait" if there is actually something to wait for.
+    spinnerTimerRef.current = setTimeout(
+      () => setRefreshSpinning(true),
+      REFRESH_SPINNER_DELAY_MS,
+    );
+    void eventsQuery.refetch().then((result) => {
+      if (spinnerTimerRef.current) clearTimeout(spinnerTimerRef.current);
+      setRefreshSpinning(false);
+      // A failure is reported by the ErrorState below; confirming here as well
+      // would show a checkmark over an error message.
+      if (result.isError) return;
+      setRefreshConfirmed(true);
+      // Also re-renders the "Updated" label immediately rather than waiting for
+      // the next freshness tick.
+      setFreshnessNow(Date.now());
+      confirmTimerRef.current = setTimeout(
+        () => setRefreshConfirmed(false),
+        REFRESH_CONFIRM_MS,
+      );
+    });
+  };
+  // dataUpdatedAt is React Query's own record of the last *successful* fetch,
+  // so this stays honest for background refetches too — not just clicks.
+  const updatedLabel = eventsQuery.dataUpdatedAt
+    ? `Updated ${formatUpdatedAt(eventsQuery.dataUpdatedAt, freshnessNow)}`
+    : "";
   // Gated on already having data so the very first load keeps its own
   // "Loading recent incidents…" state instead of showing both at once.
   const showPagingIndicator = Boolean(shownPage) && isPaging;
@@ -2007,6 +2134,21 @@ function IncidentPanel() {
         <div>
           <h2 className="text-sm font-semibold text-slate-950">Recent Incidents</h2>
           <p className="text-xs text-slate-500">Loaded from PPE, zone, and behavior incident stores.</p>
+          {/* The durable answer to "is this current?", which is the real
+              question behind "did my refresh work?". aria-live because the
+              icon is aria-hidden — without this a screen reader gets no
+              confirmation that the reload happened at all. */}
+          {updatedLabel ? (
+            <p
+              className={`mt-0.5 text-xs font-medium transition-colors duration-200 ${
+                refreshConfirmed ? "text-lime-700" : "text-slate-500"
+              }`}
+              role="status"
+              aria-live="polite"
+            >
+              {updatedLabel}
+            </p>
+          ) : null}
         </div>
         {/* Refresh sits alone here. Delete All used to be its immediate
             neighbour, which put an irreversible action one slipped click from
@@ -2014,12 +2156,25 @@ function IncidentPanel() {
             panel, away from the routine controls. */}
         <div className="flex items-center gap-2">
           <button
-            onClick={() => void eventsQuery.refetch()}
+            onClick={handleRefresh}
             className="rounded-md border border-slate-200 bg-white p-2 text-xs font-semibold text-slate-700 transition hover:border-slate-300 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
             type="button"
             aria-label="Refresh incidents"
+            aria-busy={refreshSpinning}
           >
-            <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} aria-hidden="true" />
+            {/* Swap, not motion: the checkmark reads identically with
+                prefers-reduced-motion, and it says "done" where a spinner can
+                only say "working". The spinner is still here for a genuinely
+                slow request, and stays spinning under reduced motion — that is
+                busy feedback, matching goToPage. */}
+            {refreshConfirmed ? (
+              <Check className="size-3.5 text-lime-600" aria-hidden="true" />
+            ) : (
+              <RefreshCw
+                className={`size-3.5 ${refreshSpinning ? "animate-spin" : ""}`}
+                aria-hidden="true"
+              />
+            )}
           </button>
         </div>
       </div>
@@ -2172,7 +2327,9 @@ function IncidentPanel() {
         </div>
       ) : null}
       {loading && !eventsQuery.data ? <LoadingState text="Loading recent incidents..." /> : null}
-      {error ? <ErrorState text={error} onRetry={() => void eventsQuery.refetch()} /> : null}
+      {/* Same action as the toolbar icon, so it goes through the same handler
+          and spins that icon too — otherwise retrying from here looks inert. */}
+      {error ? <ErrorState text={error} onRetry={handleRefresh} /> : null}
       {!loading && !error && totalEvents === 0 ? (
         <EmptyState
           text={
@@ -2387,21 +2544,27 @@ export function DashboardShell() {
     // renamed/recreated server-side, changing its id) rather than gate the
     // first paint. On a true first-ever visit (no cache yet), `cameras`
     // starts empty and this is what populates it.
-    void Promise.all(
-      loaded.map(async (camera) => {
-        const backendCamera = await ensureCamera(camera.name, camera.rtspUrl);
-        return {
-          ...camera,
-          id: backendCamera.id,
-          homeZoneId: backendCamera.home_zone_id,
-        };
-      }),
-    )
-      .then((reconciled) => {
+    void Promise.all([
+      Promise.all(
+        loaded.map(async (camera) => {
+          const backendCamera = await ensureCamera(camera.name, camera.rtspUrl);
+          return {
+            ...camera,
+            id: backendCamera.id,
+            homeZoneId: backendCamera.home_zone_id,
+          };
+        }),
+      ),
+      // Tolerated separately: failing to list the registered cameras costs the
+      // adoption step, not the reconciliation the stream startup depends on.
+      getCameras().catch(() => [] as Camera[]),
+    ])
+      .then(([reconciled, registered]) => {
         if (cancelled) return;
-        localStorage.setItem("ppe_demo_cameras", JSON.stringify(reconciled));
-        setCameras(reconciled);
-        const active = reconciled.find((camera) => camera.active) || reconciled[0];
+        const merged = adoptRegisteredCameras(reconciled, registered);
+        localStorage.setItem("ppe_demo_cameras", JSON.stringify(merged));
+        setCameras(merged);
+        const active = merged.find((camera) => camera.active) || merged[0];
         setActiveCameraId(active?.id ?? 0);
         setCamerasLoading(false);
       })

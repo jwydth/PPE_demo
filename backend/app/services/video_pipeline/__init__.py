@@ -680,6 +680,11 @@ async def real_video_pipeline(
                         frame_height,
                         sign_packet.frame_index,
                         fps,
+                        # Read fresh each pass off the enclosing scope, which the
+                        # main loop rebinds on reload_zones — so accepting or
+                        # deleting a zone changes what gets suggested on the very
+                        # next sign frame rather than only after a reconnect.
+                        existing_zones=zones,
                     ):
                         await sign_events.put(
                             _stream_event(

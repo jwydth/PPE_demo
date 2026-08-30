@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum, auto
+from typing import Any, Sequence
 
 from app.core.config import settings
 from app.schemas.zone import PPESuggestion, ZoneSuggestion
+from app.services.spatial import is_point_in_polygon
+from app.services.zone_service import COORD_SCALE
 
 
 _ALL_SIGN_CLASSES = None
@@ -62,6 +65,61 @@ def derive_zone_polygon(
     ]
 
 
+# Fraction of a suggested zone that must already sit inside a saved zone of the
+# same type before the suggestion is suppressed. A majority test rather than
+# containment: derive_zone_polygon() lays down a rectangle on the floor below
+# the sign, and a zone the user drew or dragged around that same sign covers
+# most of it but rarely all of it.
+AUTO_ZONE_COVERAGE_THRESHOLD = 0.5
+_COVERAGE_GRID = 5  # sample points per axis across the suggested rectangle
+
+
+def is_already_zoned(
+    coords: list[dict],
+    zone_type: str,
+    existing_zones: Sequence[Any],
+) -> bool:
+    """True when a saved zone of the same type already covers this suggestion.
+
+    The registry's own record of what it has emitted lives in memory, dies with
+    the connection, and is never told when the user accepts or deletes a zone.
+    On its own it gets this wrong in both directions: it re-raises suggestions
+    for zones that already exist (a looped video brings the sign back around
+    after the emitted track has been pruned), and it stays silent about a sign
+    whose zone was deleted. Deciding from the saved zones instead makes both
+    accept and delete take effect on the next sign frame, and survives a
+    reconnect because it is derived from persisted state rather than remembered.
+
+    `existing_zones` are ZoneViolationRecords, whose polygons are in COORD_SCALE
+    units; `coords` is normalized 0-1.
+    """
+    same_type = [
+        zone
+        for zone in existing_zones
+        if str(getattr(zone, "zone_type", "")).upper() == zone_type.upper()
+    ]
+    if not same_type:
+        return False
+
+    xs = [point["x"] for point in coords]
+    ys = [point["y"] for point in coords]
+    x1, x2 = min(xs), max(xs)
+    y1, y2 = min(ys), max(ys)
+    if x2 <= x1 or y2 <= y1:
+        return False
+
+    inside = 0
+    for row in range(_COVERAGE_GRID):
+        for col in range(_COVERAGE_GRID):
+            # Cell centres, so the rectangle's edges — the part least likely to
+            # be covered by a hand-drawn zone — don't dominate the result.
+            sx = (x1 + (x2 - x1) * (col + 0.5) / _COVERAGE_GRID) * COORD_SCALE
+            sy = (y1 + (y2 - y1) * (row + 0.5) / _COVERAGE_GRID) * COORD_SCALE
+            if any(is_point_in_polygon((sx, sy), zone.poly) for zone in same_type):
+                inside += 1
+    return inside / (_COVERAGE_GRID * _COVERAGE_GRID) >= AUTO_ZONE_COVERAGE_THRESHOLD
+
+
 def signature(class_id: int, bbox: tuple[float, float, float, float], frame_w: int, frame_h: int) -> str:
     """Stable dedupe key: quantize bbox center by AUTO_ZONE_DEDUPE_GRID."""
     cx = ((bbox[0] + bbox[2]) / 2) / frame_w
@@ -93,7 +151,13 @@ class _SignTrack:
     last_seen: int          # frame_index of the most recent detection
     bbox: tuple             # most recent bbox (used to derive the polygon on emit)
     conf: float
+    # A suggestion for this resting spot is currently outstanding on the client.
+    # Cleared again once a saved zone covers the spot, so that deleting that
+    # zone re-offers the suggestion — see update().
     emitted: bool = False
+    # The user said no. Unlike `emitted` this is final for the connection: a
+    # dismissal is an answer, not a pending question.
+    dismissed: bool = False
     suggestion_id: str | None = None  # set when emitted; lets dismiss/accept target this track
 
 
@@ -115,6 +179,21 @@ class SignZoneRegistry:
         threshold = settings.AUTO_ZONE_DEDUPE_GRID * 2
         return any(abs(cx - ex) < threshold and abs(cy - ey) < threshold for ex, ey in self._emitted_centers)
 
+    def _forget_emitted(self, cx: float, cy: float) -> None:
+        """Drop recorded centers near (cx, cy).
+
+        Called when a saved zone takes over responsibility for this spot. The
+        recorded center must not outlive the zone: if it did, deleting the zone
+        would leave `_near_emitted` still suppressing the sign for the rest of
+        the connection.
+        """
+        threshold = settings.AUTO_ZONE_DEDUPE_GRID * 2
+        self._emitted_centers = [
+            (ex, ey)
+            for ex, ey in self._emitted_centers
+            if not (abs(cx - ex) < threshold and abs(cy - ey) < threshold)
+        ]
+
     def _match(self, class_id: int, cx: float, cy: float, tol: float) -> _SignTrack | None:
         """Find an existing track of the same class whose anchor is within tol of (cx, cy)."""
         for track in self._tracks:
@@ -131,6 +210,7 @@ class SignZoneRegistry:
         frame_h: int,
         frame_index: int,
         fps: float,
+        existing_zones: Sequence[Any] = (),
     ) -> list[ZoneSuggestion]:
         suggestions: list[ZoneSuggestion] = []
         tol = settings.AUTO_ZONE_MOVE_TOLERANCE
@@ -156,43 +236,70 @@ class SignZoneRegistry:
             track.bbox = bbox
             track.conf = sign["conf"]
 
-            # Already emitted for this resting spot — don't re-emit.
-            if track.emitted:
+            # The user answered no for this resting spot; never ask again.
+            if track.dismissed:
                 continue
 
-            # Held still long enough → emit one suggestion.
-            if frame_index - track.stable_since >= required_frames:
+            # Not held still long enough yet.
+            if frame_index - track.stable_since < required_frames:
+                continue
+
+            zone_type = settings.SIGN_CLASS_ZONE_MAP[class_id]
+            coords = derive_zone_polygon(bbox, frame_w, frame_h, settings.AUTO_ZONE_BUFFER_RATIO)
+
+            # A saved zone of the same type already covers this sign, so there is
+            # nothing to suggest. Clearing `emitted` rather than latching it is
+            # what makes a later *deletion* of that zone bring the suggestion
+            # straight back, instead of the sign staying silently suppressed for
+            # the rest of the connection.
+            if is_already_zoned(coords, zone_type, existing_zones):
+                track.emitted = False
+                self._forget_emitted(cx, cy)
+                continue
+
+            # A suggestion for this spot — or one close enough to it — is already
+            # outstanding on the client.
+            if track.emitted or self._near_emitted(cx, cy):
                 track.emitted = True
-                if self._near_emitted(cx, cy):
-                    continue  # duplicate of a nearby already-emitted sign
-                self._emitted_centers.append((cx, cy))
-                sig = signature(class_id, bbox, frame_w, frame_h)
-                track.suggestion_id = sig
-                coords = derive_zone_polygon(bbox, frame_w, frame_h, settings.AUTO_ZONE_BUFFER_RATIO)
-                suggestions.append(
-                    ZoneSuggestion(
-                        suggestion_id=sig,
-                        zone_type=settings.SIGN_CLASS_ZONE_MAP[class_id],
-                        source_class=settings.SIGN_CLASS_NAMES.get(class_id, str(class_id)),
-                        confidence=sign["conf"],
-                        normalized_coordinates=coords,
-                        frame_index=frame_index,
-                    )
+                continue
+
+            track.emitted = True
+            self._emitted_centers.append((cx, cy))
+            sig = signature(class_id, bbox, frame_w, frame_h)
+            track.suggestion_id = sig
+            suggestions.append(
+                ZoneSuggestion(
+                    suggestion_id=sig,
+                    zone_type=zone_type,
+                    source_class=settings.SIGN_CLASS_NAMES.get(class_id, str(class_id)),
+                    confidence=sign["conf"],
+                    normalized_coordinates=coords,
+                    frame_index=frame_index,
                 )
+            )
 
         # A detection that drifts beyond tol from its anchor won't match its old
         # track, so a fresh (un-emitted) track is started at the new position —
         # i.e. moving the sign restarts the still-streak. Prune tracks that
         # haven't been seen for a while so a returning sign starts clean.
+        #
+        # Tracks that already carry an answer are kept regardless of how long the
+        # sign has been out of frame. On a looped video the sign leaves for far
+        # longer than this cutoff, and dropping its track meant the loop brought
+        # it back, a fresh track formed, and the same suggestion was raised all
+        # over again a few seconds later.
         stale_cutoff = frame_index - required_frames * 2
-        self._tracks = [t for t in self._tracks if t.last_seen >= stale_cutoff]
+        self._tracks = [
+            t
+            for t in self._tracks
+            if t.last_seen >= stale_cutoff or t.emitted or t.dismissed
+        ]
         return suggestions
 
     def dismiss(self, sig: str) -> None:
-        # Already-emitted tracks never re-emit; this just makes the intent explicit
-        # for the specific suggestion the user dismissed.
         for track in self._tracks:
             if track.suggestion_id == sig:
+                track.dismissed = True
                 track.emitted = True
 
     def accept(self, sig: str) -> None:

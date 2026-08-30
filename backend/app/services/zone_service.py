@@ -24,6 +24,7 @@ from app.schemas.detection import PersonResult
 from app.schemas.violation import ZoneViolation
 from app.schemas.zone import Zone
 from app.services import ServiceNotFoundError, ServiceValidationError
+from app.services.camera_identity import normalize_camera_source_key
 from app.services.spatial import is_point_in_polygon
 from app.services.zone_violation_service import open_zone_violation_service
 from app.storage.local_paths import SNAPSHOT_DIR
@@ -245,7 +246,9 @@ class ZoneService:
         return zone
 
     def _get_camera_by_video_name(self, video_name: str) -> Camera:
-        source_key = _require_text(video_name, "video_name")
+        source_key = normalize_camera_source_key(
+            _require_text(video_name, "video_name")
+        )
         camera = self.camera_repository.get_by_source_key(source_key)
         if camera is None:
             raise ServiceNotFoundError(
@@ -259,7 +262,16 @@ class ZoneService:
         *,
         factory_id: int | None = None,
     ) -> Camera:
-        source_key = _require_text(video_name, "video_name")
+        # Normalized to the same identity the violation services write
+        # (zone_violation_service / ppe_violation_service /
+        # behavior_incident_service all call this). Matching on the raw string
+        # meant saving a zone for rtsp://localhost:8554/stream2 did not find the
+        # existing camera at rtsp://127.0.0.1:8554/stream2, so this quietly
+        # minted a second camera row for the same physical stream — inflating
+        # the camera count and splitting that stream's incidents across two ids.
+        source_key = normalize_camera_source_key(
+            _require_text(video_name, "video_name")
+        )
         camera = self.camera_repository.get_by_source_key(source_key)
         if camera is not None:
             return camera

@@ -197,6 +197,121 @@ class TestSignZoneRegistry:
         assert len(results) == 1
 
 
+# ── Suppression driven by the saved zones ─────────────────────────────────────
+
+
+def _saved_zone(suggestion, zone_type: str) -> ZoneViolationRecord:
+    """The zone the user gets when they accept `suggestion` as-is."""
+    return ZoneViolationRecord(
+        camera_zone_view_id=1,
+        physical_zone_id=1,
+        zone_name="Auto zone",
+        zone_type=zone_type,
+        poly=[
+            (point["x"] * COORD_SCALE, point["y"] * COORD_SCALE)
+            for point in suggestion.normalized_coordinates
+        ],
+        threshold=0.5,
+    )
+
+
+class TestSavedZoneSuppression:
+    """The registry's in-memory record dies with the connection and is never told
+    when a zone is accepted or deleted, so suppression is decided from the saved
+    zones instead. These cover both directions of getting that wrong."""
+
+    FPS = 10.0
+
+    @pytest.fixture(autouse=True)
+    def _fast_stationary(self, monkeypatch):
+        monkeypatch.setattr(settings, "AUTO_ZONE_STATIONARY_SECONDS", 1.0)  # 10 frames
+
+    def _emit_once(self, reg, sign):
+        reg.update([sign], 1000, 1000, 0, self.FPS)
+        [suggestion] = reg.update([sign], 1000, 1000, 10, self.FPS)
+        return suggestion
+
+    def test_looped_video_does_not_re_suggest_an_accepted_zone(self):
+        """The sign leaves frame, the loop brings it back long after the emitted
+        track would once have been pruned, and the zone already exists."""
+        reg = SignZoneRegistry()
+        sign = _sign(class_id=3)
+        suggestion = self._emit_once(reg, sign)
+        zones = [_saved_zone(suggestion, "SLIPPERY")]
+
+        for frame in range(20, 400, 10):  # sign out of frame for ~38 s at 10 fps
+            assert reg.update([], 1000, 1000, frame, self.FPS, existing_zones=zones) == []
+        # Loop wraps and the sign comes back to the same resting spot.
+        assert reg.update([sign], 1000, 1000, 400, self.FPS, existing_zones=zones) == []
+        assert reg.update([sign], 1000, 1000, 410, self.FPS, existing_zones=zones) == []
+
+    def test_deleting_the_zone_makes_the_sign_suggestible_again(self):
+        """The reported bug: after deleting the zone the sign was never flagged
+        again for the life of the connection."""
+        reg = SignZoneRegistry()
+        sign = _sign(class_id=3)
+        suggestion = self._emit_once(reg, sign)
+        zones = [_saved_zone(suggestion, "SLIPPERY")]
+
+        assert reg.update([sign], 1000, 1000, 20, self.FPS, existing_zones=zones) == []
+        # User deletes the zone; reload_zones empties the pipeline's list.
+        [again] = reg.update([sign], 1000, 1000, 30, self.FPS, existing_zones=[])
+        assert again.suggestion_id == suggestion.suggestion_id
+
+    def test_a_dismissal_still_outranks_a_deleted_zone(self):
+        reg = SignZoneRegistry()
+        sign = _sign(class_id=3)
+        suggestion = self._emit_once(reg, sign)
+        reg.dismiss(suggestion.suggestion_id)
+        assert reg.update([sign], 1000, 1000, 20, self.FPS, existing_zones=[]) == []
+
+    @pytest.mark.parametrize(
+        "zone_type, expected_suggestions",
+        [
+            # Same hazard already zoned — nothing to offer.
+            ("SLIPPERY", 0),
+            # Covers the same floor, but a walkway says nothing about the
+            # slippery hazard the sign is warning about.
+            ("WALKWAY", 1),
+        ],
+    )
+    def test_only_a_zone_of_the_same_type_suppresses(self, zone_type, expected_suggestions):
+        covering = ZoneViolationRecord(
+            camera_zone_view_id=1,
+            physical_zone_id=1,
+            zone_name="Covers the whole floor",
+            zone_type=zone_type,
+            poly=[
+                (0.0, 0.0),
+                (COORD_SCALE, 0.0),
+                (COORD_SCALE, COORD_SCALE),
+                (0.0, COORD_SCALE),
+            ],
+            threshold=0.5,
+        )
+        reg = SignZoneRegistry()
+        sign = _sign(class_id=3)  # W011_Slippery -> SLIPPERY
+        reg.update([sign], 1000, 1000, 0, self.FPS, existing_zones=[covering])
+        results = reg.update([sign], 1000, 1000, 10, self.FPS, existing_zones=[covering])
+        assert len(results) == expected_suggestions
+
+    def test_a_distant_zone_does_not_suppress(self):
+        reg = SignZoneRegistry()
+        far = ZoneViolationRecord(
+            camera_zone_view_id=1,
+            physical_zone_id=1,
+            zone_name="Far away",
+            zone_type="SLIPPERY",
+            poly=[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)],
+            threshold=0.5,
+        )
+        reg.update([_sign(class_id=3)], 1000, 1000, 0, self.FPS, existing_zones=[far])
+        results = reg.update(
+            [_sign(class_id=3)], 1000, 1000, 10, self.FPS, existing_zones=[far]
+        )
+        assert len(results) == 1
+
+
 # ── Pipeline: sign inference → zone_suggestion ────────────────────────────────
 
 

@@ -343,6 +343,11 @@ export function useZoneDrawing({
           setZonesForVideo([]);
           setDraftPoints([]);
           setPendingAutoZoneIds(new Set());
+          // Same signal persistZones sends. Without it the running pipeline kept
+          // enforcing the zones that were just deleted until the next reconnect,
+          // and the sign registry never learned that the sign's zone was gone —
+          // so the sign was never suggested again either.
+          onZonesPersisted?.();
           setStatus("Cleared saved zones for this camera video.");
         })(),
         new Promise((r) => setTimeout(r, 600)),
