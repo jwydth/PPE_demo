@@ -54,7 +54,13 @@ class BehaviorStreamWorker:
         self.ignore_zones_provider = ignore_zones_provider
         self.session = detector.create_live_session(fps=self.fps, frame_stride=1)
         self.latest_payload: dict[str, Any] | None = None
-        self.unavailable: str | None = None
+        # Reported to the UI through snapshot(). A source too slow for the
+        # classifier's timeline used to produce nothing at all with no error
+        # anywhere — the toggle was on, the worker ran, and behavior simply
+        # never happened.
+        self.unavailable: str | None = self.session.unsupported_source_reason()
+        if self.unavailable:
+            logger.warning("[BEHAVIOR] '%s' cannot be classified: %s", source, self.unavailable)
         self._incidents: list[dict[str, Any]] = []
         self._task: asyncio.Task[None] | None = None
         self._last_logged_status: str | None = None

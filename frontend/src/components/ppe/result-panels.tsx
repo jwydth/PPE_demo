@@ -86,10 +86,6 @@ export function IncidentCard({
       ? formatBehaviorType(event.behavior_type)
       : formatZoneType(event.zone_type, event.zone_name);
   const sourceLabel = isPpe ? "PPE" : isBehavior ? "Behavior" : "Zone";
-  const categoryLabel = isBehavior ? "Safety Incident" : "Violation";
-  const categoryClass = isBehavior
-    ? "bg-orange-50 text-orange-700 ring-orange-200"
-    : "bg-red-50 text-red-700 ring-red-200";
   const badgeClass = isPpe
     ? "bg-red-50 text-red-700 ring-red-200"
     : isBehavior
@@ -138,10 +134,10 @@ export function IncidentCard({
             </p>
             <p className="mt-1 text-xs text-slate-500">{formatTime(event.timestamp)}</p>
           </div>
-          <div className="flex shrink-0 flex-col items-end gap-1">
-            <span className={`rounded px-2 py-1 text-xs font-semibold ring-1 ${categoryClass}`}>
-              {categoryLabel}
-            </span>
+          {/* Type and severity read as one label ("PPE · High"), so they sit
+              on one line. Stacked, three badges built a column taller than the
+              title block they were annotating. */}
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
             <span className={`rounded px-2 py-1 text-xs font-semibold ring-1 ${badgeClass}`}>
               {sourceLabel}
             </span>
@@ -176,23 +172,64 @@ export function IncidentCard({
   );
 }
 
+/**
+ * Surface these panels sit on. They are used both on the light page body and
+ * inside the dark camera panel; a light box dropped into the dark panel reads
+ * as a piece of another page pasted over the video, which is exactly how the
+ * live-stream status and RTSP errors used to look.
+ */
+export type PanelSurface = "light" | "dark";
+
+const emptySurface: Record<PanelSurface, string> = {
+  light: "border-slate-200 bg-slate-50 text-slate-600",
+  dark: "border-slate-800 bg-slate-900 text-slate-300",
+};
+
+const emptyActionSurface: Record<PanelSurface, string> = {
+  light:
+    "border-slate-300 bg-white text-slate-700 hover:bg-slate-100 focus-visible:ring-slate-400",
+  dark:
+    "border-slate-700 bg-slate-800 text-slate-100 hover:bg-slate-700 focus-visible:ring-slate-500",
+};
+
+const loadingSurface: Record<PanelSurface, string> = {
+  light: "border-lime-200 bg-lime-50 text-green-900",
+  dark: "border-lime-900 bg-lime-950 text-lime-200",
+};
+
+const errorSurface: Record<PanelSurface, string> = {
+  light: "border-red-200 bg-red-50 text-red-700",
+  dark: "border-red-900 bg-red-950 text-red-200",
+};
+
+const errorActionSurface: Record<PanelSurface, string> = {
+  light:
+    "border-red-300 bg-white text-red-700 hover:bg-red-100 focus-visible:ring-red-400",
+  dark:
+    "border-red-800 bg-red-900 text-red-100 hover:bg-red-800 focus-visible:ring-red-500",
+};
+
 export function EmptyState({
   text,
   action,
+  surface = "light",
 }: {
   text: string;
   /** Optional way out of the empty state — e.g. clearing the filters that
    * produced it. A dead end and its escape hatch belong in the same place. */
   action?: { label: string; onClick: () => void };
+  surface?: PanelSurface;
 }) {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
+    <div
+      className={`flex flex-wrap items-center justify-between gap-3 rounded-md border p-4 text-sm ${emptySurface[surface]}`}
+    >
       <span>{text}</span>
       {action ? (
         <button
           type="button"
           onClick={action.onClick}
-          className="shrink-0 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
+          className={`shrink-0 rounded-md border px-2.5 py-1.5 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 ${emptyActionSurface[surface]}`}
         >
           {action.label}
         </button>
@@ -201,9 +238,15 @@ export function EmptyState({
   );
 }
 
-export function LoadingState({ text }: { text: string }) {
+export function LoadingState({
+  text,
+  surface = "light",
+}: {
+  text: string;
+  surface?: PanelSurface;
+}) {
   return (
-    <div className="rounded-md border border-lime-200 bg-lime-50 p-4 text-sm font-medium text-green-900">
+    <div className={`rounded-md border p-4 text-sm font-medium ${loadingSurface[surface]}`}>
       {text}
     </div>
   );
@@ -212,25 +255,27 @@ export function LoadingState({ text }: { text: string }) {
 export function ErrorState({
   text,
   onRetry,
+  surface = "light",
 }: {
   text: string;
   /** Wire this wherever a refetch exists. An error with no way forward leaves
    * a manual page reload as the only option. */
   onRetry?: () => void;
+  surface?: PanelSurface;
 }) {
   return (
     // role="alert" so assistive tech announces the failure — previously this
     // was a red box and nothing else, invisible to a screen reader.
     <div
       role="alert"
-      className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-red-200 bg-red-50 p-4 text-sm font-medium text-red-700"
+      className={`flex flex-wrap items-center justify-between gap-3 rounded-md border p-4 text-sm font-medium ${errorSurface[surface]}`}
     >
       <span>{text}</span>
       {onRetry ? (
         <button
           type="button"
           onClick={onRetry}
-          className="shrink-0 rounded-md border border-red-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-red-700 transition hover:bg-red-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400"
+          className={`shrink-0 rounded-md border px-2.5 py-1.5 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 ${errorActionSurface[surface]}`}
         >
           Try again
         </button>

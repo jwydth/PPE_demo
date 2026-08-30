@@ -2,6 +2,7 @@ import pytest
 
 from app.services.incident_normalization import (
     behavior_type_label,
+    default_zone_severity,
     normalize_behavior_severity,
     normalize_ppe_severity,
     normalize_zone_severity,
@@ -86,3 +87,15 @@ def test_zone_type_label(zone_type, expected):
 )
 def test_behavior_type_label(behavior_type, expected):
     assert behavior_type_label(behavior_type) == expected
+
+
+def test_default_zone_severity_puts_restricted_incursions_in_open_incidents():
+    # Open Incidents on the dashboard is Critical + High. A stored "Medium"
+    # (which is what NULL normalizes to) keeps a keep-out breach off that
+    # count entirely.
+    assert default_zone_severity("RESTRICTED") == "High"
+    assert default_zone_severity("restricted") == "High"
+    assert default_zone_severity("WALKWAY") == "Medium"
+    assert default_zone_severity("SLIPPERY") == "Medium"
+    assert default_zone_severity(None) == "Medium"
+    assert default_zone_severity("SOMETHING_NEW") == "Medium"

@@ -16,8 +16,18 @@ const textTone: Record<Tone, string> = {
   pending: "text-slate-500",
 };
 
+// The badge surface carries the same state as the dot and the sentence. A bad
+// state should look like one at a glance in the page header, not sit in a
+// neutral chip that only differs by a 8px dot.
+const badgeTone: Record<Tone, string> = {
+  live: "border-emerald-200 bg-emerald-50",
+  idle: "border-amber-200 bg-amber-50",
+  down: "border-red-200 bg-red-50",
+  pending: "border-slate-200 bg-slate-50",
+};
+
 /**
- * The "is anything actually being watched right now" line above the page title.
+ * The "is anything actually being watched right now" badge beside the page title.
  *
  * This used to be a hardcoded green dot beside the words "Live monitoring
  * active" — no state binding of any kind. It read as healthy while zero
@@ -53,7 +63,11 @@ export function MonitoringStatus({
           : `Live monitoring · ${live} of ${total} camera${total === 1 ? "" : "s"}`;
 
   return (
-    <div className="flex items-center gap-2" role="status" aria-live="polite">
+    <div
+      className={`inline-flex items-center gap-2 rounded-md border px-3 py-1.5 ${badgeTone[tone]}`}
+      role="status"
+      aria-live="polite"
+    >
       <span
         className={`size-2 shrink-0 rounded-full ${dotTone[tone]} ${
           tone === "pending" ? "animate-pulse motion-reduce:animate-none" : ""

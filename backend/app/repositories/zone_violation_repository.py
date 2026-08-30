@@ -9,6 +9,7 @@ from sqlmodel import Session, select
 from app.db.session import get_session
 from app.models.zone_violation import ZoneViolation
 from app.repositories import RepositoryError
+from app.repositories.incident_filters import area_zone_predicate
 
 
 class ZoneViolationRepository:
@@ -83,6 +84,8 @@ class ZoneViolationRepository:
         date_from: datetime | None,
         date_to: datetime | None,
         limit: int,
+        zone_id: int | None = None,
+        camera_id: int | None = None,
     ) -> list[ZoneViolation]:
         try:
             statement = select(ZoneViolation)
@@ -90,6 +93,14 @@ class ZoneViolationRepository:
                 statement = statement.where(ZoneViolation.occurred_at >= date_from)
             if date_to is not None:
                 statement = statement.where(ZoneViolation.occurred_at <= date_to)
+            # Filtered in SQL, not after the fetch: applying these to an
+            # already-LIMITed page returns only the matches that happen to fall
+            # inside the newest `limit` rows overall, which reads as "this zone
+            # has no incidents" whenever a busier zone fills that window.
+            if zone_id is not None:
+                statement = statement.where(area_zone_predicate(ZoneViolation, zone_id))
+            if camera_id is not None:
+                statement = statement.where(ZoneViolation.camera_id == camera_id)
             statement = statement.order_by(
                 ZoneViolation.occurred_at.desc(),
                 ZoneViolation.id.desc(),

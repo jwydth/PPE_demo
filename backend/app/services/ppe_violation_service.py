@@ -78,6 +78,7 @@ class PPEViolationService:
         violation = self.repository.create(
             PPEViolation(
                 camera_id=_optional_positive_id(camera_id, "camera_id"),
+                area_zone_id=self._area_zone_id_for(camera_id),
                 source_key=source_key,
                 occurred_at=_parse_timestamp(timestamp),
                 violation_type=_require_text(
@@ -129,6 +130,7 @@ class PPEViolationService:
         violation = self.repository.create(
             PPEViolation(
                 camera_id=_optional_positive_id(camera_id, "camera_id"),
+                area_zone_id=self._area_zone_id_for(camera_id),
                 source_key=source_key,
                 occurred_at=_parse_timestamp(timestamp),
                 violation_type=_require_text(
@@ -286,6 +288,19 @@ class PPEViolationService:
         if self.storage is None:
             return _to_snapshot_url(snapshot_path)
         return self.storage.get_object_url(snapshot_path)
+
+    def _area_zone_id_for(self, camera_id: int | None) -> int | None:
+        """The camera's home AREA zone, frozen onto the incident at write time.
+
+        Costs one indexed PK lookup per incident written. That is deliberate:
+        resolving it lazily at read time is what let a camera deletion or a
+        home-zone reassignment silently rewrite the zone of every incident the
+        camera had already recorded.
+        """
+        if camera_id is None or self.camera_repository is None:
+            return None
+        camera = self.camera_repository.get_by_id(camera_id)
+        return camera.home_zone_id if camera is not None else None
 
     def _resolve_camera_id(
         self,

@@ -15,6 +15,7 @@ from app.repositories.zone_violation_repository import ZoneViolationRepository
 from app.schemas.violation import ZoneViolation
 from app.services import ServiceNotFoundError, ServiceValidationError
 from app.services.camera_identity import normalize_camera_source_key
+from app.services.incident_normalization import default_zone_severity
 from app.storage.evidence_storage import EvidenceStorage, get_evidence_storage
 
 
@@ -63,6 +64,7 @@ class ZoneViolationService:
         violation = self.repository.create(
             ZoneViolationModel(
                 camera_id=context.camera_id,
+                area_zone_id=context.area_zone_id,
                 physical_zone_id=context.physical_zone_id,
                 camera_zone_view_id=context.camera_zone_view_id,
                 zone_name=_require_text(zone_name, "zone_name"),
@@ -108,6 +110,7 @@ class ZoneViolationService:
         violation = self.repository.create(
             ZoneViolationModel(
                 camera_id=context.camera_id,
+                area_zone_id=context.area_zone_id,
                 physical_zone_id=context.physical_zone_id,
                 camera_zone_view_id=context.camera_zone_view_id,
                 zone_name=_require_text(zone_name, "zone_name"),
@@ -205,13 +208,22 @@ class ZoneViolationService:
                 resolved_camera_id = view.camera_id
                 resolved_physical_zone_id = view.physical_zone_id
 
-        if resolved_camera_id is None and self.camera_repository:
-            camera = self.camera_repository.get_by_source_key(source_key)
-            if camera is not None:
+        camera = None
+        if self.camera_repository:
+            camera = (
+                self.camera_repository.get_by_source_key(source_key)
+                if resolved_camera_id is None
+                else self.camera_repository.get_by_id(resolved_camera_id)
+            )
+            if resolved_camera_id is None and camera is not None:
                 resolved_camera_id = camera.id
 
         return ZoneViolationContext(
             camera_id=resolved_camera_id,
+            # Frozen here rather than resolved through the camera on every read
+            # — see PPEViolation.area_zone_id. Not the same thing as
+            # physical_zone_id below, which is the drawn zone that was entered.
+            area_zone_id=camera.home_zone_id if camera is not None else None,
             physical_zone_id=resolved_physical_zone_id,
             camera_zone_view_id=resolved_view_id,
         )
@@ -220,6 +232,7 @@ class ZoneViolationService:
 @dataclass(frozen=True)
 class ZoneViolationContext:
     camera_id: int | None
+    area_zone_id: int | None
     physical_zone_id: int | None
     camera_zone_view_id: int | None
 

@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
@@ -144,7 +145,7 @@ def test_list_incidents_unassigned_when_no_home_zone():
     assert result[0].camera_label == "factory.mp4"
 
 
-def test_list_incidents_filters_by_category_zone_and_severity():
+def test_list_incidents_filters_by_category_and_severity():
     camera_a = _camera(1, home_zone_id=5)
     camera_b = _camera(2, home_zone_id=6)
     service = _service(
@@ -160,29 +161,41 @@ def test_list_incidents_filters_by_category_zone_and_severity():
     only_ppe = service.list_incidents(category="ppe")
     assert {i.id for i in only_ppe} == {1, 2}
 
-    only_zone_5 = service.list_incidents(zone_id=5)
-    assert {i.id for i in only_zone_5} == {1, 3}
-
     only_high = service.list_incidents(severity="High")
     assert {i.id for i in only_high} == {1, 2, 3}
     assert service.list_incidents(severity="Low") == []
 
 
-def test_list_incidents_filters_by_camera():
-    camera_a = _camera(1, home_zone_id=5)
-    camera_b = _camera(2, home_zone_id=6)
-    service = _service(
-        ppe=[
-            _ppe_violation(1, NOW, camera_id=1),
-            _ppe_violation(2, NOW, camera_id=2),
-        ],
-        cameras={1: camera_a, 2: camera_b},
-        zones={5: _zone(5, "Zone A"), 6: _zone(6, "Zone B")},
-    )
+def test_zone_and_camera_filters_reach_every_category_query():
+    # These are SQL filters, not post-fetch ones: applying them to an
+    # already-LIMITed page returns only the matches inside the newest `limit`
+    # rows overall, which is how selecting a quiet zone produced an empty feed
+    # while the zone chart counted its incidents.
+    service = _service()
 
-    only_camera_1 = service.list_incidents(camera_id=1)
-    assert {i.id for i in only_camera_1} == {1}
-    assert service.list_incidents(camera_id=999) == []
+    service.list_incidents(zone_id=5, camera_id=1, limit=30)
+
+    for repository in (
+        service.ppe_repository,
+        service.zone_repository,
+        service.behavior_repository,
+    ):
+        kwargs = repository.list_between.call_args.kwargs
+        assert kwargs["zone_id"] == 5
+        assert kwargs["camera_id"] == 1
+        assert kwargs["limit"] == 30
+
+
+def test_severity_filter_widens_the_scan_because_it_cannot_be_pushed_to_sql():
+    # Severity is derived per category rather than stored, so it is applied to
+    # fetched rows. Scanning only `limit` of them would drop matches whenever
+    # the newest rows are a different severity.
+    service = _service()
+
+    service.list_incidents(severity="Critical", limit=30)
+
+    kwargs = service.ppe_repository.list_between.call_args.kwargs
+    assert kwargs["limit"] == settings.ANALYTICS_LIMIT
 
 
 def test_ppe_severity_derivation_feeds_through_unified_incident():
@@ -242,3 +255,89 @@ def test_list_incidents_rejects_invalid_limit():
         service.list_incidents(limit=0)
     with pytest.raises(ServiceValidationError):
         service.list_incidents(limit=settings.ANALYTICS_LIMIT + 1)
+
+
+def _service_at_limit(limit: int) -> UnifiedIncidentService:
+    """Every category returns exactly `limit` rows, so both the per-category
+    and the merged-slice truncation paths trigger."""
+    return _service(
+        ppe=[
+            _ppe_violation(i, NOW - timedelta(minutes=i), camera_id=1)
+            for i in range(1, limit + 1)
+        ],
+        zone=[
+            _zone_violation(i, NOW - timedelta(minutes=i), camera_id=1)
+            for i in range(1, limit + 1)
+        ],
+        behavior=[
+            _behavior_incident(i, NOW - timedelta(minutes=i), camera_id=1)
+            for i in range(1, limit + 1)
+        ],
+    )
+
+
+def test_list_incidents_warns_on_truncation_for_aggregation_reads(caplog):
+    service = _service_at_limit(3)
+
+    with caplog.at_level(logging.WARNING, logger="app.services.incident_service"):
+        result = service.list_incidents(limit=3)
+
+    assert len(result) == 3
+    messages = [record.getMessage() for record in caplog.records]
+    assert sum("hit its limit" in m for m in messages) == 3
+    assert any("truncated 6 merged row(s)" in m for m in messages)
+
+
+def test_list_incidents_stays_quiet_for_feed_reads(caplog):
+    service = _service_at_limit(3)
+
+    with caplog.at_level(logging.WARNING, logger="app.services.incident_service"):
+        result = service.list_incidents(limit=3, warn_on_truncation=False)
+
+    # A feed read still returns the correct newest-N set — it just doesn't
+    # warn about the older rows it was never meant to include.
+    assert len(result) == 3
+    assert caplog.records == []
+
+
+def test_stored_area_zone_survives_camera_deletion():
+    # Deleting a camera SET NULLs camera_id on every incident it recorded.
+    # The zone frozen on the row is what keeps that history out of
+    # "Unassigned".
+    violation = _ppe_violation(1, NOW, camera_id=None)
+    violation.area_zone_id = 5
+    service = _service(ppe=[violation], zones={5: _zone(5, "Production Area")})
+
+    result = service.list_incidents()
+
+    assert [(i.zone_id, i.zone_name) for i in result] == [(5, "Production Area")]
+
+
+def test_stored_area_zone_wins_over_the_cameras_current_home_zone():
+    # The camera has since been reassigned to another zone; the incident
+    # stays where it actually happened.
+    violation = _ppe_violation(1, NOW, camera_id=1)
+    violation.area_zone_id = 5
+    service = _service(
+        ppe=[violation],
+        cameras={1: _camera(1, home_zone_id=6)},
+        zones={5: _zone(5, "Production Area"), 6: _zone(6, "Warehouse Intake")},
+    )
+
+    result = service.list_incidents()
+
+    assert [(i.zone_id, i.zone_name) for i in result] == [(5, "Production Area")]
+
+
+def test_camera_home_zone_is_the_fallback_for_rows_written_before_area_zone():
+    violation = _ppe_violation(1, NOW, camera_id=1)
+    assert violation.area_zone_id is None
+    service = _service(
+        ppe=[violation],
+        cameras={1: _camera(1, home_zone_id=6)},
+        zones={6: _zone(6, "Warehouse Intake")},
+    )
+
+    result = service.list_incidents()
+
+    assert [(i.zone_id, i.zone_name) for i in result] == [(6, "Warehouse Intake")]

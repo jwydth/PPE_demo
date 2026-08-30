@@ -133,3 +133,22 @@ def test_pose_repair_rejects_long_or_implausible_gaps():
     assert session._repair_trailing_pose_gap(unsafe_gap, current_far) == 0
     assert any(sample is None for sample in long_gap)
     assert any(sample is None for sample in unsafe_gap)
+
+
+def test_sub_canonical_source_is_reported_instead_of_silently_classifying_nothing():
+    # accept_source_frame pads the 24-FPS canonical timeline with missing
+    # samples, so a 15-FPS camera caps out at 15/24 = 62% real poses per
+    # window — under extract_window_features' 70% gate. classify() then bails
+    # before it even loads the classifier, which is a silent no-op unless
+    # something says so.
+    detector = FallDetector()
+
+    reason = detector.create_live_session(fps=15.0).unsupported_source_reason()
+
+    assert reason is not None
+    assert "15 FPS" in reason and "24 FPS" in reason
+    assert detector.create_live_session(fps=24.0).unsupported_source_reason() is None
+    assert detector.create_live_session(fps=30.0).unsupported_source_reason() is None
+    # fps is clamped to 1.0 when the hub has not measured a rate; don't warn
+    # about a stream that is still coming up.
+    assert detector.create_live_session(fps=0.0).unsupported_source_reason() is None

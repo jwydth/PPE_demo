@@ -77,6 +77,21 @@ class BehaviorIncident(SQLModel, table=True):
         index=True,
         sa_type=BigInteger,
     )
+    # The AREA zone the camera was assigned to when this incident happened,
+    # frozen at write time rather than resolved through the camera on every
+    # read. Deleting a camera SET NULLs camera_id above, which used to strand
+    # every incident it ever recorded in "Unassigned"; reassigning a camera's
+    # home zone used to rewrite the zone of its whole history. Distinct from
+    # zone_violations.physical_zone_id, which is the *drawn* zone (RESTRICTED /
+    # WALKWAY / IGNORE) the person entered.
+    area_zone_id: int | None = Field(
+        default=None,
+        foreign_key="physical_zones.id",
+        ondelete="SET NULL",
+        nullable=True,
+        index=True,
+        sa_type=BigInteger,
+    )
     source_key: str | None = Field(
         default=None,
         sa_column=Column(String(500), nullable=True, index=True),

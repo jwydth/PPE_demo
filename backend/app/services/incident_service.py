@@ -94,8 +94,25 @@ class UnifiedIncidentService:
         date_from: datetime | None = None,
         date_to: datetime | None = None,
         limit: int = 100,
+        warn_on_truncation: bool = True,
     ) -> list[UnifiedIncident]:
+        """`warn_on_truncation=False` for feed reads ("give me the newest N"):
+        fetching `limit` rows per category and slicing the merge back to `limit`
+        yields exactly the correct newest-N set, so the dropped rows are the
+        point of the call, not a problem. Leave it on for aggregation reads,
+        where dropped rows silently undercount."""
         normalized_limit = _validate_limit(limit)
+        # zone_id/camera_id are pushed into each category's query below, so
+        # their LIMIT applies to matching rows. `severity` can't be: it is
+        # derived per category (see incident_normalization) rather than stored,
+        # so it still has to be applied to fetched rows. Scanning only
+        # `normalized_limit` rows would then return a short list whenever the
+        # newest rows aren't the severity being asked for, so a severity read
+        # scans up to the same cap the analytics aggregation already uses and
+        # slices afterwards.
+        fetch_limit = (
+            normalized_limit if severity is None else settings.ANALYTICS_LIMIT
+        )
         # Per-call caches: dedup camera/zone lookups across rows sharing the
         # same camera, without persisting stale data across separate calls.
         camera_cache: dict[int, Camera | None] = {}
@@ -104,28 +121,59 @@ class UnifiedIncidentService:
         incidents: list[UnifiedIncident] = []
         if category is None or category == "ppe":
             ppe_rows = self.ppe_repository.list_between(
-                date_from=date_from, date_to=date_to, limit=normalized_limit
+                date_from=date_from,
+                date_to=date_to,
+                limit=fetch_limit,
+                zone_id=zone_id,
+                camera_id=camera_id,
             )
-            _warn_if_category_hit_limit("ppe", len(ppe_rows), normalized_limit, date_from, date_to)
+            _warn_if_category_hit_limit(
+                "ppe",
+                len(ppe_rows),
+                fetch_limit,
+                date_from,
+                date_to,
+                enabled=warn_on_truncation,
+            )
             for violation in ppe_rows:
                 incidents.append(
                     self._ppe_to_unified(violation, camera_cache, zone_cache)
                 )
         if category is None or category == "zone":
             zone_rows = self.zone_repository.list_between(
-                date_from=date_from, date_to=date_to, limit=normalized_limit
+                date_from=date_from,
+                date_to=date_to,
+                limit=fetch_limit,
+                zone_id=zone_id,
+                camera_id=camera_id,
             )
-            _warn_if_category_hit_limit("zone", len(zone_rows), normalized_limit, date_from, date_to)
+            _warn_if_category_hit_limit(
+                "zone",
+                len(zone_rows),
+                fetch_limit,
+                date_from,
+                date_to,
+                enabled=warn_on_truncation,
+            )
             for violation in zone_rows:
                 incidents.append(
                     self._zone_to_unified(violation, camera_cache, zone_cache)
                 )
         if category is None or category == "behavior":
             behavior_rows = self.behavior_repository.list_between(
-                date_from=date_from, date_to=date_to, limit=normalized_limit
+                date_from=date_from,
+                date_to=date_to,
+                limit=fetch_limit,
+                zone_id=zone_id,
+                camera_id=camera_id,
             )
             _warn_if_category_hit_limit(
-                "behavior", len(behavior_rows), normalized_limit, date_from, date_to
+                "behavior",
+                len(behavior_rows),
+                fetch_limit,
+                date_from,
+                date_to,
+                enabled=warn_on_truncation,
             )
             # Batch-fetch evidence for every row in one query instead of one
             # get_evidence() round trip per incident (PERF_PLAN.md Tier 3.3).
@@ -139,15 +187,11 @@ class UnifiedIncidentService:
                     )
                 )
 
-        if zone_id is not None:
-            incidents = [i for i in incidents if i.zone_id == zone_id]
-        if camera_id is not None:
-            incidents = [i for i in incidents if i.camera_id == camera_id]
         if severity is not None:
             incidents = [i for i in incidents if i.severity == severity]
 
         incidents.sort(key=lambda i: i.timestamp, reverse=True)
-        if len(incidents) > normalized_limit:
+        if warn_on_truncation and len(incidents) > normalized_limit:
             # The merged set across categories alone exceeds normalized_limit
             # (independent of any single category hitting its own limit above)
             # — the final slice below drops the oldest rows. Surface it instead
@@ -172,7 +216,7 @@ class UnifiedIncidentService:
         zone_cache: dict[int, PhysicalZone | None],
     ) -> UnifiedIncident:
         camera = self._camera_for(violation.camera_id, camera_cache)
-        zone = self._zone_for(camera, zone_cache)
+        zone = self._zone_for(violation.area_zone_id, camera, zone_cache)
         return UnifiedIncident(
             id=_require_id(violation.id),
             category="ppe",
@@ -193,7 +237,7 @@ class UnifiedIncidentService:
         zone_cache: dict[int, PhysicalZone | None],
     ) -> UnifiedIncident:
         camera = self._camera_for(violation.camera_id, camera_cache)
-        zone = self._zone_for(camera, zone_cache)
+        zone = self._zone_for(violation.area_zone_id, camera, zone_cache)
         return UnifiedIncident(
             id=_require_id(violation.id),
             category="zone",
@@ -215,7 +259,7 @@ class UnifiedIncidentService:
         evidence_by_incident: dict[int, list[BehaviorEvidence]],
     ) -> UnifiedIncident:
         camera = self._camera_for(incident.camera_id, camera_cache)
-        zone = self._zone_for(camera, zone_cache)
+        zone = self._zone_for(incident.area_zone_id, camera, zone_cache)
         incident_id = _require_id(incident.id)
         newest_evidence = evidence_by_incident.get(incident_id, [])
         object_key = newest_evidence[0].object_key if newest_evidence else None
@@ -245,12 +289,21 @@ class UnifiedIncidentService:
 
     def _zone_for(
         self,
+        area_zone_id: int | None,
         camera: Camera | None,
         zone_cache: dict[int, PhysicalZone | None],
     ) -> PhysicalZone | None:
-        if camera is None or camera.home_zone_id is None:
+        """The zone stored on the incident wins; the camera's current home zone
+        is only a fallback for rows written before area_zone_id existed.
+
+        Reading the zone through the camera alone meant history moved whenever
+        the camera did — and deleting a camera (which SET NULLs camera_id)
+        dumped every incident it had ever recorded into "Unassigned"."""
+        zone_id = area_zone_id
+        if zone_id is None:
+            zone_id = camera.home_zone_id if camera is not None else None
+        if zone_id is None:
             return None
-        zone_id = camera.home_zone_id
         if zone_id not in zone_cache:
             zone_cache[zone_id] = self.physical_zone_repository.get_by_id(zone_id)
         return zone_cache[zone_id]
@@ -315,12 +368,14 @@ def _warn_if_category_hit_limit(
     normalized_limit: int,
     date_from: datetime | None,
     date_to: datetime | None,
+    *,
+    enabled: bool,
 ) -> None:
     # A category's list_between() call returning exactly `normalized_limit`
     # rows means it was cut off by its own LIMIT — older rows within the range
     # never made it into this call, independent of any truncation from
     # merging categories together (see list_incidents' final-slice warning).
-    if row_count < normalized_limit:
+    if not enabled or row_count < normalized_limit:
         return
     logger.warning(
         "UnifiedIncidentService.list_incidents: '%s' category hit its limit "

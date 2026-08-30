@@ -58,7 +58,14 @@ def list_unified_incidents(
             snapshot_url=i.snapshot_url,
         )
         for i in service.list_incidents(
-            zone_id=zone_id, camera_id=camera_id, severity=severity, limit=limit
+            zone_id=zone_id,
+            camera_id=camera_id,
+            severity=severity,
+            limit=limit,
+            # A feed read is truncated by design — it asks for the newest
+            # `limit` rows and nothing aggregates over them, so the service's
+            # undercount warnings would be pure noise on every poll.
+            warn_on_truncation=False,
         )
     ]
 

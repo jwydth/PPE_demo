@@ -74,7 +74,6 @@ import { useSafetyKpis } from "@/hooks/useSafetyKpis";
 import { TopBar, type DashboardView } from "./top-bar";
 import { ZoneSidebar } from "./zone-sidebar";
 import { MetricCard } from "./metric-card";
-import { IconButton } from "./icon-button";
 import { ZoneOverlaySvg } from "./zone-overlay-svg";
 import { ZoneConfigPanel } from "./zone-config-panel";
 import { AnalysisResultPanel } from "./analysis-result-panel";
@@ -518,14 +517,17 @@ function CameraPanel({
     });
   }, [cameras, cameraZones]);
 
+  // Keyed by the camera the zones were actually loaded for, not by whichever
+  // camera is being viewed when this runs. A camera switch updates those two
+  // in separate steps (loadSavedZones resolves, then setViewedCamera — or the
+  // reverse, in handleSaveCameraConfig), so keying on liveUrl filed the new
+  // camera's zones under the old camera's URL and left them there: opening
+  // Warehouse Intake then Packing Area drew each one's zones on the other.
   useEffect(() => {
-    if (liveStream.liveUrl) {
-      setCameraZones((prev) => ({
-        ...prev,
-        [liveStream.liveUrl]: zoneDrawing.zonesForVideo,
-      }));
-    }
-  }, [zoneDrawing.zonesForVideo, liveStream.liveUrl]);
+    const key = zoneDrawing.zonesSourceKey;
+    if (!key) return;
+    setCameraZones((prev) => ({ ...prev, [key]: zoneDrawing.zonesForVideo }));
+  }, [zoneDrawing.zonesForVideo, zoneDrawing.zonesSourceKey]);
 
   const autoZone = useAutoZoneSuggestions({
     sourceKey,
@@ -1446,7 +1448,7 @@ function CameraPanel({
                   )}
                 </div>
               ) : (
-                <div className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_340px]">
+                <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1.4fr)_340px]">
                   <div>
                     <div
                       ref={liveStream.isLive ? undefined : zoneDrawing.setSurfaceElement}
@@ -1547,9 +1549,10 @@ function CameraPanel({
           </div>
         ) : null}
 
-        {phase === "loading" && (currentPpeEnabled || currentZoneEnabled || currentFallEnabled) ? <LoadingState text="Running inference..." /> : null}
-        {phase === "error" ? <ErrorState text={error} /> : null}
-        {status ? <EmptyState text={status} /> : null}
+        {/* surface="dark": these sit inside the camera panel, not on the page body. */}
+        {phase === "loading" && (currentPpeEnabled || currentZoneEnabled || currentFallEnabled) ? <LoadingState text="Running inference..." surface="dark" /> : null}
+        {phase === "error" ? <ErrorState text={error} surface="dark" /> : null}
+        {status ? <EmptyState text={status} surface="dark" /> : null}
 
         {phase === "done" && upload.file && upload.imageResult ? (
           <div className="grid gap-4">
@@ -2436,15 +2439,7 @@ export function DashboardShell() {
         ? "Factory 3D Map"
         : activeView === "analytics"
           ? "Incident Analytics"
-          : "Packaging Line 1";
-  const pageDescription =
-    activeView === "violations"
-      ? "Review live PPE, zone, and behavior incidents recorded by the backend stores."
-      : activeView === "factory3d"
-        ? "Explore the factory blueprint in 3D and drill into a zone's incident log."
-        : activeView === "analytics"
-          ? "Trends, zone comparisons, and live incident feed across all cameras."
-          : "Upload a camera simulation file, choose which detection models are enabled, and review the model outputs in one place.";
+          : "Safety Cameras Feed";
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-950">
@@ -2458,26 +2453,20 @@ export function DashboardShell() {
         />
         <main className="min-w-0 flex-1 p-3 lg:p-4">
           <div className="flex w-full flex-col gap-4">
-            <section className="flex flex-col justify-between gap-4 rounded-md border border-slate-200 bg-white p-4 shadow-sm md:flex-row md:items-center">
-              <div>
-                <MonitoringStatus summary={kpiSummary} isError={kpiError} />
-                <h2 className="mt-2 text-2xl font-semibold tracking-normal text-slate-950 md:text-3xl">
+            {/* Title and KPI tiles share one row on wide screens. Stacked,
+                they were two near-empty bands: a title bar holding one line of
+                text, then two cards stretched to half the page each with the
+                number in the top-left corner. The tiles take a fixed 15rem
+                track so they stay dense as more metrics arrive, and the title
+                bar absorbs the remaining width. Everything here is p-3 to keep
+                one left edge down the page. */}
+            <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(16rem,1fr)_repeat(2,15rem)]">
+              <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-md border border-slate-200 bg-white p-3 shadow-sm sm:col-span-2 lg:col-span-1">
+                <h2 className="text-2xl font-semibold tracking-normal text-slate-950 md:text-3xl">
                   {pageTitle}
                 </h2>
-                <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
-                  {pageDescription}
-                </p>
+                <MonitoringStatus summary={kpiSummary} isError={kpiError} />
               </div>
-              <div className="grid grid-cols-2 gap-3 text-sm sm:flex">
-                <StatusPill label="Shift" value="Night B" />
-                <StatusPill label="Supervisor" value="Nguyen T." />
-                <StatusPill label="Model" value="Safety v4.2" />
-              </div>
-            </section>
-
-            {/* Column count follows the number of live metrics rather than a
-                fixed 4, so removing the placeholder cards doesn't leave gaps. */}
-            <section className="grid gap-3 md:grid-cols-2">
               {kpis.map((metric) => (
                 <MetricCard key={metric.label} metric={metric} />
               ))}
@@ -2556,11 +2545,3 @@ function safeParsePoints(value: string) {
   }
 }
 
-function StatusPill({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</p>
-      <p className="mt-1 font-semibold text-slate-950">{value}</p>
-    </div>
-  );
-}

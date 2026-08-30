@@ -113,6 +113,13 @@ export function useZoneDrawing({
   const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null);
   const [dragState, setDragState] = useState<DragState>(null);
   const [zonesForVideo, setZonesForVideo] = useState<DraftZone[]>([]);
+  // Which camera zonesForVideo actually belongs to. Callers used to infer this
+  // from whichever camera was being viewed at the time they looked, but the
+  // two are set by different async steps of a camera switch: for a render or
+  // two, the freshly loaded zones are paired with the previous camera's URL
+  // (and vice versa). That mispairing is what copied one camera's zones onto
+  // another's overlay.
+  const [zonesSourceKey, setZonesSourceKey] = useState<string | null>(null);
   const [draftPoints, setDraftPoints] = useState<Point2D[]>([]);
   const [zoneName, setZoneName] = useState("Restricted Area");
   const [zoneType, setZoneType] = useState<ZoneType>("RESTRICTED");
@@ -170,9 +177,13 @@ export function useZoneDrawing({
         : zonesForVideo,
     [draftPoints, dwellThresholdSeconds, zoneName, zoneType, zonesForVideo],
   );
+  const zonesBelongToCurrentSource =
+    zonesSourceKey === null || zonesSourceKey === sourceKey;
   const displayedZones = useMemo(
     () =>
-      draftPoints.length > 0
+      !zonesBelongToCurrentSource
+        ? []
+        : draftPoints.length > 0
         ? [
             ...zonesForVideo,
             {
@@ -184,25 +195,39 @@ export function useZoneDrawing({
             },
           ]
         : zonesForVideo,
-    [draftPoints, dwellThresholdSeconds, zoneName, zoneType, zonesForVideo],
+    [
+      draftPoints,
+      dwellThresholdSeconds,
+      zoneName,
+      zoneType,
+      zonesBelongToCurrentSource,
+      zonesForVideo,
+    ],
   );
 
   const loadSavedZones = async (videoName: string) => {
     try {
       const savedZones = await getZones(videoName);
       setZonesForVideo(savedZones.map(zoneFromBackend));
+      setZonesSourceKey(videoName);
       setStatus(
         savedZones.length > 0
           ? `Loaded ${savedZones.length} saved zone(s) for this camera video.`
           : "",
       );
     } catch {
-      setStatus("");
+      // Clear rather than leave the previous camera's zones standing: they
+      // would render over this camera's video as if they were its own, and a
+      // save would then write them to this camera.
+      setZonesForVideo([]);
+      setZonesSourceKey(videoName);
+      setStatus("Could not load saved zones for this camera.");
     }
   };
 
   const resetZoneDrawing = () => {
     setZonesForVideo([]);
+    setZonesSourceKey(null);
     setDraftPoints([]);
     setSelectedZoneId(null);
     setIsDrawing(false);
@@ -238,6 +263,13 @@ export function useZoneDrawing({
 
   const persistZones = async (zonesToPersist = zonesReadyToSave) => {
     if (!sourceKey) return;
+    // Saving replaces every zone stored for this camera, so refuse to run
+    // while the loaded set still belongs to a different one — that would
+    // delete this camera's zones and write the other camera's in their place.
+    if (zonesSourceKey !== null && zonesSourceKey !== sourceKey) {
+      setStatus("Zones are still loading for this camera — try saving again in a moment.");
+      return;
+    }
     await deleteZonesForVideo(sourceKey);
     for (const zone of zonesToPersist) {
       await saveZone(toBackendZone(zone, sourceKey));
@@ -248,6 +280,7 @@ export function useZoneDrawing({
         id: zone.id === "draft" ? crypto.randomUUID() : zone.id,
       })),
     );
+    setZonesSourceKey(sourceKey);
     setDraftPoints([]);
     setPendingAutoZoneIds(new Set());
     setStatus(`Saved ${zonesToPersist.length} zone(s) for this camera video.`);
@@ -487,6 +520,7 @@ export function useZoneDrawing({
     setSelectedZoneId,
     zonesForVideo,
     setZonesForVideo,
+    zonesSourceKey,
     draftPoints,
     setDraftPoints,
     zoneName,

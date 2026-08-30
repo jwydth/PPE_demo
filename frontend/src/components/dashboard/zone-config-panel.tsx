@@ -244,7 +244,7 @@ export function ZoneConfigPanel({
             <DraftZoneStatus count={zoneDrawing.pendingAutoZoneIds.size} />
           )}
           {!zoneEnabled && zoneDrawing.pendingAutoZoneIds.size === 0 ? (
-            <EmptyState text="Enable Zone Monitoring to view saved areas or start drawing." />
+            <EmptyState text="Enable Zone Monitoring to view saved areas or start drawing." surface="dark" />
           ) : zoneDrawing.pendingAutoZoneIds.size === 0 ? (
             <div className="rounded-md bg-slate-900 p-3 text-sm text-slate-300">
               Viewing {zoneDrawing.zonesForVideo.length} saved zone(s).

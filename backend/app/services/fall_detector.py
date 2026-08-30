@@ -25,7 +25,11 @@ from app.schemas.fall_detection import (
     BehaviorIncidentRead, FallDetectionSummary, FallImagePredictionResponse,
     FallPoseDetection, FallTimelineItem, FallVideoMetadata, FallVideoPredictionResponse,
 )
-from app.services.behavior_features import extract_window_features, feature_columns
+from app.services.behavior_features import (
+    MIN_VALID_FRAME_RATIO,
+    extract_window_features,
+    feature_columns,
+)
 from app.models.behavior_incident import BehaviorIncidentSeverity, BehaviorType
 from app.services.behavior_incident_service import BehaviorIncidentService, open_behavior_incident_service
 from app.services.ppe.device import _select_inference_device
@@ -173,11 +177,17 @@ class FallDetector:
                 )
                 return self.behavior_model
             except Exception as exc:
+                # Carry the real error through. This message used to assert a
+                # cause it had not checked ("install scikit-learn"), which sent
+                # people looking at their environment when the actual failure
+                # was a half-copied weights file: a truncated joblib surfaces
+                # here as "EOF: reading array data, expected N bytes got M",
+                # and that string is the difference between a five-minute fix
+                # and an afternoon.
                 raise FallModelUnavailable(
-                    "Fall detection model is unavailable: configured behavior "
-                    f"classifier could not be loaded from {self.behavior_model_path}. "
-                    "Install its runtime dependencies (scikit-learn for the "
-                    "current ExtraTrees model)."
+                    "Fall detection model is unavailable: could not load the "
+                    f"behavior classifier at {self.behavior_model_path} "
+                    f"({type(exc).__name__}: {exc})"
                 ) from exc
 
         # Retain the portable XGBoost artifact solely as a fallback when the
@@ -267,6 +277,14 @@ class FallLiveSession:
     def __init__(self, detector: FallDetector, *, fps: float, frame_stride: int) -> None:
         self.detector, self.fps, self.frame_stride = detector, fps, frame_stride
         self.canonical_fps = max(1, settings.FALL_BEHAVIOR_CANONICAL_FPS)
+        # Best window quality this source can ever produce. accept_source_frame
+        # maps capture times onto the canonical timeline and pads every skipped
+        # index with a missing sample, so a source below canonical_fps caps out
+        # at source_fps / canonical_fps — below the classifier's gate, every
+        # window is discarded as low_quality and nothing is ever classified.
+        self.max_valid_frame_ratio = (
+            min(1.0, self.fps / self.canonical_fps) if self.fps > 0 else 0.0
+        )
         self.last_canonical_frame = -1
         self.timestamp_origin: float | None = None
         self.windows: dict[int, deque[dict[str, Any] | None]] = defaultdict(lambda: deque(maxlen=detector.window_size))
@@ -283,6 +301,31 @@ class FallLiveSession:
         self.last_feature_ms = 0.0
         self.last_classifier_ms = 0.0
         self.last_pose_repaired_samples = 0
+
+    def unsupported_source_reason(self) -> str | None:
+        """Why this source cannot produce a classifiable window, or None.
+
+        Without this the failure is completely silent: the worker runs, frames
+        are processed, no error is raised, and no behavior is ever reported —
+        because classify() bails on window quality before it even loads the
+        classifier.
+        """
+        # create_live_session clamps fps to a floor of 1.0, so <= 1 means the
+        # hub has not measured a rate yet rather than a genuinely 1-FPS camera.
+        # Staying quiet there avoids crying wolf on a stream that is still
+        # coming up.
+        if self.fps <= 1.0:
+            return None
+        if self.max_valid_frame_ratio >= MIN_VALID_FRAME_RATIO:
+            return None
+        return (
+            f"source runs at {self.fps:.0f} FPS but the behavior classifier "
+            f"needs a {self.canonical_fps} FPS timeline; only "
+            f"{self.max_valid_frame_ratio:.0%} of each window can carry a pose "
+            f"(needs {MIN_VALID_FRAME_RATIO:.0%}), so no window is ever "
+            "classified. Publish this camera at "
+            f"{self.canonical_fps} FPS or higher."
+        )
 
     def mark_discontinuity(
         self,

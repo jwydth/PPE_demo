@@ -35,6 +35,25 @@ def normalize_ppe_severity(violation_type: str) -> str:
     return "Medium"
 
 
+# What to *store* on a new zone violation. The detection pipeline never set a
+# severity, so every incursion landed NULL and normalize_zone_severity below
+# turned it into "Medium" on read. The dashboard's Open Incidents figure is
+# Critical + High, so walking into a RESTRICTED area — the one thing a
+# keep-out zone exists to catch — never registered there.
+_ZONE_TYPE_SEVERITY = {
+    "RESTRICTED": "High",
+    "SLIPPERY": "Medium",
+    "WALKWAY": "Medium",
+}
+
+
+def default_zone_severity(zone_type: str | None) -> str:
+    """Severity to persist for an incursion of this zone type."""
+    if not zone_type:
+        return "Medium"
+    return _ZONE_TYPE_SEVERITY.get(zone_type.strip().upper(), "Medium")
+
+
 def normalize_zone_severity(raw: str | None) -> str:
     """zone_violations.severity is nullable free text; Title-case it and
     default to Medium when missing or unrecognized."""

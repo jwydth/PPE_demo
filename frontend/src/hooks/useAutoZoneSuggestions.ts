@@ -1,6 +1,7 @@
-import { Dispatch, SetStateAction } from "react";
+import { Dispatch, SetStateAction, useMemo } from "react";
 import { PPESuggestion, ZoneSuggestion } from "@/types/zone";
 import { DraftZone } from "./camera-panel-types";
+import { suggestionKey } from "./useLiveStream";
 
 /**
  * Handlers for sign-detection-driven zone/PPE suggestions. The suggestion
@@ -37,24 +38,37 @@ export function useAutoZoneSuggestions({
   setPpeEnabled: (enabled: boolean) => void;
   openModifyModeFor: (draft: DraftZone) => void;
 }) {
+  // The suggestion dictionaries hold every suggestion raised this session and
+  // are never cleared when the viewed camera changes, so show only the ones
+  // this camera actually raised. Without this, walking from Warehouse Intake
+  // to Packing Area carried Warehouse Intake's sign banner along with it.
+  const zoneSuggestionsForSource = useMemo(
+    () => filterBySource(zoneSuggestions, sourceKey),
+    [zoneSuggestions, sourceKey],
+  );
+  const ppeSuggestionsForSource = useMemo(
+    () => filterBySource(ppeSuggestions, sourceKey),
+    [ppeSuggestions, sourceKey],
+  );
+
   const handleDismissSuggestion = (suggestion: ZoneSuggestion) => {
     sendMessage({ event: "dismiss_suggestion", data: { suggestion_id: suggestion.suggestion_id } });
-    setZoneSuggestions(({ [suggestion.suggestion_id]: _, ...rest }) => rest);
+    setZoneSuggestions(({ [keyOf(suggestion)]: _, ...rest }) => rest);
   };
 
   const handleEnablePPESuggestion = (suggestion: PPESuggestion) => {
-    setPpeSuggestions(({ [suggestion.suggestion_id]: _, ...rest }) => rest);
+    setPpeSuggestions(({ [keyOf(suggestion)]: _, ...rest }) => rest);
     setPpeEnabled(true);
   };
 
   const handleDismissPPESuggestion = (suggestion: PPESuggestion) => {
     sendMessage({ event: "dismiss_ppe_suggestion", data: { suggestion_id: suggestion.suggestion_id } });
-    setPpeSuggestions(({ [suggestion.suggestion_id]: _, ...rest }) => rest);
+    setPpeSuggestions(({ [keyOf(suggestion)]: _, ...rest }) => rest);
   };
 
   const handleAcceptSuggestion = async (suggestion: ZoneSuggestion, name: string) => {
     if (!sourceKey) return;
-    setZoneSuggestions(({ [suggestion.suggestion_id]: _, ...rest }) => rest);
+    setZoneSuggestions(({ [keyOf(suggestion)]: _, ...rest }) => rest);
     const draft: DraftZone = {
       id: crypto.randomUUID(),
       name,
@@ -78,11 +92,25 @@ export function useAutoZoneSuggestions({
   };
 
   return {
-    zoneSuggestions,
-    ppeSuggestions,
+    zoneSuggestions: zoneSuggestionsForSource,
+    ppeSuggestions: ppeSuggestionsForSource,
     handleDismissSuggestion,
     handleEnablePPESuggestion,
     handleDismissPPESuggestion,
     handleAcceptSuggestion,
   };
+}
+
+function keyOf(suggestion: { source_key?: string; suggestion_id: string }): string {
+  return suggestionKey(suggestion.source_key ?? "", suggestion.suggestion_id);
+}
+
+function filterBySource<T extends { source_key?: string }>(
+  suggestions: Record<string, T>,
+  sourceKey: string | undefined,
+): Record<string, T> {
+  if (!sourceKey) return {};
+  return Object.fromEntries(
+    Object.entries(suggestions).filter(([, s]) => s.source_key === sourceKey),
+  );
 }

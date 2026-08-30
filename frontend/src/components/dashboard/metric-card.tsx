@@ -28,11 +28,11 @@ export function MetricCard({ metric }: { metric: SafetyMetric }) {
         </div>
       </div>
       <p className="mt-2 text-sm text-slate-600">{metric.helper}</p>
-      <p
-        className={`mt-1 text-xs font-semibold uppercase tracking-wide ${
-          metric.tone === "slate" ? "text-slate-500" : "text-emerald-700"
-        }`}
-      >
+      {/* `trend` is the scope the number was measured over ("All zones",
+          "Live"), not a direction of travel. It used to render emerald, which
+          on a safety readout reads as "good" — a green label under a rising
+          incident count says the opposite of what the number means. */}
+      <p className="mt-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
         {metric.trend}
       </p>
     </section>

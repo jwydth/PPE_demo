@@ -4,12 +4,10 @@ import {
   Bell,
   Calendar,
   Camera as CameraIcon,
-  ChevronDown,
   ClipboardCheck,
   Factory,
   FileDown,
   Minus,
-  Siren,
   Trash2,
   TrendingDown,
   TrendingUp,
@@ -224,11 +222,23 @@ export function AnalyticsDashboard({
   });
   const compare = compareQuery.data ?? null;
 
-  const feedQueryKey = ["analytics", "feed", FEED_LIMIT] as const;
+  const feedQueryKey = [
+    "analytics",
+    "feed",
+    FEED_LIMIT,
+    selectedZone,
+    selectedCamera,
+    selectedSeverity,
+  ] as const;
   const feedQuery = useQuery({
     queryKey: feedQueryKey,
-    queryFn: () => getUnifiedIncidents(FEED_LIMIT, null),
+    queryFn: () =>
+      getUnifiedIncidents(FEED_LIMIT, selectedZone, selectedCamera, selectedSeverity),
     refetchInterval: FEED_POLL_MS,
+    // Changing a filter starts a new query; without this the list blanks to
+    // the empty state for a beat before the new rows land, which looks like
+    // "no incidents here" — the exact answer this fix exists to stop giving.
+    placeholderData: keepPreviousData,
   });
   const feed = useMemo(() => feedQuery.data ?? [], [feedQuery.data]);
 
@@ -286,16 +296,13 @@ export function AnalyticsDashboard({
     () => new Set((summary?.active_zone_ids ?? []).map(zoneKey)),
     [summary],
   );
-  // Camera/severity filters apply client-side over the same unfiltered
-  // FEED_LIMIT-row fetch the zone filter already uses (see plan §0.3, D6)
-  // — consistent with the existing zone-filter behavior rather than a new
-  // fetch-per-filter strategy.
-  const filteredFeed = feed.filter((f) => {
-    if (selectedZone != null && f.zone_id !== selectedZone) return false;
-    if (selectedCamera != null && f.camera_id !== selectedCamera) return false;
-    if (selectedSeverity != null && f.severity !== selectedSeverity) return false;
-    return true;
-  });
+  // Zone/camera/severity are part of feedQueryKey above, so the rows that
+  // arrive are already the newest FEED_LIMIT *matching* ones. Filtering here
+  // as well would re-introduce the bug it used to cause: the previous version
+  // fetched the newest 30 rows overall and filtered them in the browser, so
+  // selecting a zone whose incidents were older than those 30 showed an empty
+  // feed while the zone chart counted them.
+  const filteredFeed = feed;
 
   // Zone Pulse geometry
   const centerX = 200;
@@ -400,28 +407,19 @@ export function AnalyticsDashboard({
               Incident Analytics
             </span>
           </nav>
-          <div className="flex items-center gap-2">
-            <div className="hidden items-center gap-1 md:flex">
-              {[Bell, Siren, Factory].map((Icon, i) => (
-                <button
-                  key={i}
-                  type="button"
-                  aria-label="action"
-                  className="inline-flex size-10 items-center justify-center rounded-md text-slate-300 transition hover:bg-white/10 hover:text-white"
-                >
-                  <Icon className="size-4" aria-hidden="true" />
-                </button>
-              ))}
-            </div>
-            <button
-              type="button"
-              className="flex items-center gap-2 rounded-md border border-slate-700 bg-slate-900 py-1.5 pl-1.5 pr-2 text-sm text-slate-100 transition hover:bg-slate-800"
+          {/* Matches the shell's TopBar: the three action buttons here had no
+              handlers and announced themselves to a screen reader as "action",
+              and the account chevron opened nothing. */}
+          <div className="flex shrink-0 items-center gap-2 rounded-md border border-slate-700 bg-slate-900 py-1.5 pl-1.5 pr-2.5">
+            <span
+              className="flex size-7 items-center justify-center rounded bg-lime-200 text-xs font-bold text-green-950"
+              aria-hidden="true"
             >
-              <span className="flex size-7 items-center justify-center rounded bg-lime-200 text-xs font-bold text-green-950">
-                DH
-              </span>
-              <ChevronDown className="size-4 text-slate-400" aria-hidden="true" />
-            </button>
+              DH
+            </span>
+            <span className="hidden text-sm font-medium text-slate-300 sm:inline">
+              Safety team
+            </span>
           </div>
         </header>
       )}
@@ -433,7 +431,13 @@ export function AnalyticsDashboard({
 
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h2 className="text-lg font-semibold text-slate-950">Incident Analytics</h2>
+              {/* Embedded, the shell's page header is already titled "Incident
+                  Analytics" directly above this row — repeating it gave the
+                  view two identical headings and two <h2>s at the same level.
+                  Standalone (/analytics) this is the only title, so it stays. */}
+              {embedded ? null : (
+                <h2 className="text-lg font-semibold text-slate-950">Incident Analytics</h2>
+              )}
               <p className="text-xs text-slate-500">
                 {selectedZoneMeta ? selectedZoneMeta.name : "All zones"} · updated{" "}
                 {now.toLocaleTimeString("en-US", { hour12: false })}

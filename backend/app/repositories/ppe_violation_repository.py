@@ -9,6 +9,7 @@ from sqlmodel import Session, select
 from app.db.session import get_session
 from app.models.ppe_violation import PPEViolation, PPEViolationSubject
 from app.repositories import RepositoryError
+from app.repositories.incident_filters import area_zone_predicate
 
 ModelT = TypeVar("ModelT", PPEViolation, PPEViolationSubject)
 
@@ -85,6 +86,8 @@ class PPEViolationRepository:
         date_from: datetime | None,
         date_to: datetime | None,
         limit: int,
+        zone_id: int | None = None,
+        camera_id: int | None = None,
     ) -> list[PPEViolation]:
         try:
             statement = select(PPEViolation)
@@ -92,6 +95,14 @@ class PPEViolationRepository:
                 statement = statement.where(PPEViolation.occurred_at >= date_from)
             if date_to is not None:
                 statement = statement.where(PPEViolation.occurred_at <= date_to)
+            # Filtered in SQL, not after the fetch: applying these to an
+            # already-LIMITed page returns only the matches that happen to fall
+            # inside the newest `limit` rows overall, which reads as "this zone
+            # has no incidents" whenever a busier zone fills that window.
+            if zone_id is not None:
+                statement = statement.where(area_zone_predicate(PPEViolation, zone_id))
+            if camera_id is not None:
+                statement = statement.where(PPEViolation.camera_id == camera_id)
             statement = statement.order_by(
                 PPEViolation.occurred_at.desc(),
                 PPEViolation.id.desc(),

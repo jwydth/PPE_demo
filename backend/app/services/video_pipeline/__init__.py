@@ -330,6 +330,18 @@ def save_violation(
         )
 
 
+def _dwell_step(frames_per_step: int, fps: float) -> float:
+    """Seconds of presence to credit for one processed frame.
+
+    fps comes from the source hub's health reading and is 0 until it has
+    measured one, so guard the divide — a live stream's very first frames
+    would otherwise raise instead of just not accumulating yet.
+    """
+    if fps <= 0:
+        return 0.0
+    return frames_per_step / fps
+
+
 def _prepare_pooled_model_instance(model_instance) -> None:
     """Clear tracker state left over from a previous stream on a pooled instance.
 
@@ -545,6 +557,13 @@ async def real_video_pipeline(
             [0, 1, 2, 3],
             ppe_cadence.interval_frames if ppe_subscription is not None else stride,
         )
+        # Source frames consumed per frame that actually reaches the zone logic
+        # below. On a live stream that is the PPE cadence interval, not
+        # `stride`: ppe_gate drops the frames in between, so crediting dwell
+        # with stride/fps counted a 1.5s threshold at a third of real time on a
+        # 24fps source (LIVE_PPE_TARGET_FPS=8) — people walked through a
+        # restricted zone without ever crossing it.
+        dwell_frames_per_step = model_stride
         inference_device = detector.device
         half = bool(settings.INFERENCE_HALF) and str(detector.device).startswith("cuda")
         image_size, stream_buffer = settings.INFERENCE_IMGSZ, False
@@ -886,6 +905,12 @@ async def real_video_pipeline(
             persons, helmets, vests, cleaning_coveralls = _extract_result_boxes(result)
 
             response = _build_response(persons, helmets, vests, cleaning_coveralls, 0.0)
+            # Must be read before the ignore-zone filter below: frame_width /
+            # frame_height start out None, so normalizing a foot point against
+            # last iteration's dimensions (or None, on the first frame) is what
+            # get_person_foot_point would otherwise divide by.
+            frame = result.orig_img.copy()
+            frame_height, frame_width = frame.shape[:2]
             if zones:
                 response.persons = [
                     person
@@ -903,8 +928,6 @@ async def real_video_pipeline(
                     pose_track_id = render_store.match_pose_track(packet, person.bbox)
                     if pose_track_id is not None:
                         person.track_id = pose_track_id
-            frame = result.orig_img.copy()
-            frame_height, frame_width = frame.shape[:2]
             if curr_fall and behavior_separate:
                 last_fall_payload, fall_unavailable_message, pending_incidents = behavior_worker.snapshot() if behavior_worker else (None, None, [])
                 for incident in pending_incidents:
@@ -1037,7 +1060,7 @@ async def real_video_pipeline(
                                 worker.zone_dwell[cv_id] = 0
                                 worker.reported_zones.discard(cv_id)
                             else:
-                                worker.zone_dwell[cv_id] = worker.zone_dwell.get(cv_id, 0) + (stride / fps)
+                                worker.zone_dwell[cv_id] = worker.zone_dwell.get(cv_id, 0) + _dwell_step(dwell_frames_per_step, fps)
                                 dwell = worker.zone_dwell[cv_id]
                                 if frame_index % 30 == 0:
                                     logger.info(f"[ZONE] Frame {frame_index} worker {person.track_id}: WALKWAY '{zone.zone_name}' dwell={dwell:.2f}s / threshold={zone.threshold}s already_reported={cv_id in worker.reported_zones}")
@@ -1053,7 +1076,7 @@ async def real_video_pipeline(
                                 continue
 
                             if in_z:
-                                worker.zone_dwell[cv_id] = worker.zone_dwell.get(cv_id, 0) + (stride / fps)
+                                worker.zone_dwell[cv_id] = worker.zone_dwell.get(cv_id, 0) + _dwell_step(dwell_frames_per_step, fps)
                                 dwell = worker.zone_dwell[cv_id]
                                 logger.info(f"[ZONE] Frame {frame_index} worker {person.track_id} in role {worker.role}: {zone.zone_type} '{zone.zone_name}' dwell={dwell:.2f}s / threshold={zone.threshold}s already_reported={cv_id in worker.reported_zones}")
                                 if dwell > zone.threshold and cv_id not in worker.reported_zones:

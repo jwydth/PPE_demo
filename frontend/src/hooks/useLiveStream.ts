@@ -41,6 +41,12 @@ export const emptyStreamData = (): StreamData => ({
   live_frame: null,
 });
 
+/** Suggestion dictionary key. The backend's suggestion_id carries no camera,
+ * so it alone is not unique across cameras — see ZoneSuggestion.source_key. */
+export function suggestionKey(sourceKey: string, suggestionId: string): string {
+  return `${sourceKey}::${suggestionId}`;
+}
+
 export function useLiveStream({
   ppeEnabled,
   zoneEnabled,
@@ -469,11 +475,29 @@ export function useLiveStream({
           }));
         } else if (eventType === "zone_suggestion") {
           if (isCurrent) {
-            setZoneSuggestions((prev) => ({ ...prev, [data.suggestion_id]: data as ZoneSuggestion }));
+            // Keyed and stamped per camera. These dictionaries are never
+            // cleared on a camera switch, so keying them by suggestion_id
+            // alone left one camera's "Must Wear Hard Hat" banner sitting over
+            // the next camera's feed — and since the backend builds that id
+            // from sign class + grid position with no camera in it, two
+            // cameras could also overwrite each other's suggestion.
+            setZoneSuggestions((prev) => ({
+              ...prev,
+              [suggestionKey(videoName, data.suggestion_id)]: {
+                ...(data as ZoneSuggestion),
+                source_key: videoName,
+              },
+            }));
           }
         } else if (eventType === "ppe_suggestion") {
           if (isCurrent) {
-            setPpeSuggestions((prev) => ({ ...prev, [data.suggestion_id]: data as PPESuggestion }));
+            setPpeSuggestions((prev) => ({
+              ...prev,
+              [suggestionKey(videoName, data.suggestion_id)]: {
+                ...(data as PPESuggestion),
+                source_key: videoName,
+              },
+            }));
           }
         } else if (eventType === "summary") {
           if (isCurrent) {

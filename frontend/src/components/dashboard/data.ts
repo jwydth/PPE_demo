@@ -1,10 +1,7 @@
 import {
   BarChart3,
-  Bell,
   Camera,
   ClipboardCheck,
-  Factory,
-  Siren,
   type LucideIcon,
 } from "lucide-react";
 
@@ -27,10 +24,4 @@ export const navigation = [
   { label: "Camera Feeds", active: true, icon: Camera },
   { label: "Live Incident Panel", active: false, icon: ClipboardCheck },
   { label: "Analytics", active: false, icon: BarChart3 },
-];
-
-export const appActions = [
-  { label: "Notifications", icon: Bell },
-  { label: "Emergency escalation", icon: Siren },
-  { label: "Factory settings", icon: Factory },
 ];

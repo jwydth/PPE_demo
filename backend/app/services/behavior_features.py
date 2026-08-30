@@ -8,6 +8,11 @@ from typing import Any, Iterable
 
 
 CANONICAL_FPS = 24
+# Share of the 60-sample window that must carry a real pose for the window to
+# be classified at all. A source slower than CANONICAL_FPS can never reach it:
+# accept_source_frame pads the canonical timeline with missing samples, so the
+# ceiling is source_fps / CANONICAL_FPS.
+MIN_VALID_FRAME_RATIO = 0.70
 COCO = {"nose": 0, "left_shoulder": 5, "right_shoulder": 6, "left_hip": 11, "right_hip": 12, "left_ankle": 15, "right_ankle": 16}
 STEP_METRICS = ("torso_angle", "compression", "spread_ratio", "combined_speed", "hip_ankle", "ground_speed", "scale_speed", "body_speed")
 
@@ -126,4 +131,4 @@ def extract_window_features(frames: list[dict[str, Any] | None]) -> dict[str, An
     centers = [metric["body_center"] for metric in metrics]
     jumps = [_distance(current, previous) / max(metrics[index]["body_size"], 1.0) for index, (previous, current) in enumerate(zip(centers, centers[1:], strict=False), 1) if previous and current]
     raw.update({"avg_keypoint_confidence": _mean(confidences), "missing_ankle_ratio": sum(frame is None or any(float(frame.get("keypoint_scores", [0.0] * 17)[index]) < .10 for index in (15, 16)) for frame in frames) / 60, "valid_frame_ratio": len(observed) / 60, "missing_hip_ratio": sum(frame is None or any(float(frame.get("keypoint_scores", [0.0] * 17)[index]) < .10 for index in (11, 12)) for frame in frames) / 60, "track_gap_count": float(sum((right - left) > 1 for left, right in zip(observed, observed[1:], strict=False))), "skeleton_jump_score": max(jumps, default=0.0)})
-    return {"raw": raw, "quality": {"status": "good" if len(observed) / 60 >= .70 else "low_quality", "valid_frame_ratio": len(observed) / 60}}
+    return {"raw": raw, "quality": {"status": "good" if len(observed) / 60 >= MIN_VALID_FRAME_RATIO else "low_quality", "valid_frame_ratio": len(observed) / 60}}

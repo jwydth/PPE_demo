@@ -27,6 +27,11 @@ export interface PhysicalZone {
 
 export interface ZoneSuggestion {
   suggestion_id: string;
+  /** Source key of the camera that raised it. Stamped on by useLiveStream —
+   * the backend's suggestion_id is "<class>:<grid_x>:<grid_y>" with no camera
+   * in it, so two cameras seeing the same sign in the same part of frame
+   * produce the same id. */
+  source_key?: string;
   zone_type: ZoneType;
   source_class: string;
   confidence: number;
@@ -36,6 +41,8 @@ export interface ZoneSuggestion {
 
 export interface PPESuggestion {
   suggestion_id: string;
+  /** See ZoneSuggestion.source_key. */
+  source_key?: string;
   source_class: string;
   confidence: number;
   frame_index: number;

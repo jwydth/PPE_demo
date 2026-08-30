@@ -327,9 +327,17 @@ export async function getAnalyticsCompare(
 export async function getUnifiedIncidents(
   limit: number,
   zoneId: number | null,
+  cameraId: number | null = null,
+  severity: string | null = null,
 ): Promise<UnifiedIncident[]> {
+  // Every filter goes to the server. Fetching the newest `limit` rows and
+  // filtering them in the browser returns only the matches that happen to
+  // fall inside that window, so a quiet zone reads as empty while the zone
+  // chart — which counts the whole range — says otherwise.
   const params = new URLSearchParams({ limit: String(limit) });
   if (zoneId != null) params.set("zone_id", String(zoneId));
+  if (cameraId != null) params.set("camera_id", String(cameraId));
+  if (severity != null) params.set("severity", severity);
   const res = await fetch(`${API_URL}/analytics/incidents?${params}`);
   if (!res.ok) throw await readError(res, "Could not load incident feed");
   const incidents = (await res.json()) as UnifiedIncident[];
