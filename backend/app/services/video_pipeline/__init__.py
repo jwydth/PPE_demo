@@ -1096,9 +1096,17 @@ async def real_video_pipeline(
                                 worker.zone_dwell[cv_id] = 0
 
                     for zone in incursion_zones:
-                        if zone.zone_type in ("RESTRICTED", "SLIPPERY"):
-                            track_camera_zone_view_id, track_physical_zone_id, track_zone_name, track_zone_type = zone.camera_zone_view_id, zone.physical_zone_id, zone.zone_name, zone.zone_type
-                            break
+                        if zone.zone_type not in ("RESTRICTED", "SLIPPERY"):
+                            continue
+                        # Mirror the persistence guard above: a janitor in a
+                        # slippery zone is not a violation, so the overlay must
+                        # not attribute the zone to them either — otherwise the
+                        # bounding box goes red and reads "Zone: Slippery area"
+                        # for an incident that is never recorded.
+                        if zone.zone_type == "SLIPPERY" and worker.role == "janitor":
+                            continue
+                        track_camera_zone_view_id, track_physical_zone_id, track_zone_name, track_zone_type = zone.camera_zone_view_id, zone.physical_zone_id, zone.zone_name, zone.zone_type
+                        break
                     if track_zone_type is None:
                         walkway_zones = [z for z in zones if z.zone_type == "WALKWAY"]
                         if walkway_zones and not any(z.camera_zone_view_id in incursion_ids for z in walkway_zones):
