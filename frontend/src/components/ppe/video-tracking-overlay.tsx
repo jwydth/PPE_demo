@@ -428,15 +428,42 @@ function trackingLabels(frame: TrackingOverlayFrame): string[] {
         : "Walkway violation";
     labels.push(`Zone: ${frame.zone_name ? `${zoneLabel} - ${frame.zone_name}` : zoneLabel}`);
   }
-  if (frame.behavior?.status === "running" || frame.behavior?.status === "falling") {
-    const behaviorLabel =
-      frame.behavior.status[0].toUpperCase() + frame.behavior.status.slice(1);
-    labels.push(`Behavior: ${behaviorLabel}`);
+  const behavior = frame.behavior?.status;
+  if (behavior === "running" || behavior === "falling") {
+    labels.push(`Behavior: ${behavior[0].toUpperCase() + behavior.slice(1)}`);
+  } else if (behavior === "unknown") {
+    // Not "this person is behaving normally" — it is "the classifier has no
+    // verdict for this person". fall_detector emits status "unknown" for any
+    // track whose 60-sample window has not filled, which is 2.5s of unbroken
+    // tracking under one track_id; a new id from a tracker switch restarts
+    // that from zero. Someone running across the frame frequently never gets
+    // there, so this state is common exactly when it matters most.
+    //
+    // It carries its own line rather than qualifying the fallback below, so
+    // it composes with a PPE or zone finding instead of replacing it, and so
+    // that "assessed as normal" (`others`, which adds nothing here and falls
+    // through to Compliant) stays distinguishable from "not assessed".
+    // Matches the label fall_detector's own warm-up comment names.
+    labels.push("Behavior: Unknown");
   }
   if (labels.length === 0) {
-    labels.push(frame.status === "violation" ? "Violation" : "Compliant");
+    labels.push(complianceLabel(frame));
   }
   return labels;
+}
+
+/** The label for a person with nothing flagged against them at all.
+ *
+ * "Compliant" is an assertion, and it used to be made for anything short of an
+ * outright violation — including `status: "unknown"`, where the PPE verdict
+ * itself is undecided. Reaching this function now means every check that ran
+ * came back clean, so the remaining job is to not let an undecided PPE verdict
+ * borrow the word.
+ */
+function complianceLabel(frame: TrackingOverlayFrame): string {
+  if (frame.status === "violation") return "Violation";
+  if (frame.status === "unknown") return "Unknown";
+  return "Compliant";
 }
 
 function formatEquipmentLabel(label: string): string {
@@ -613,7 +640,16 @@ export function PPESuggestionBanner({
         })}
       </svg>
 
-      <div className="pointer-events-none absolute left-0 right-0 top-0 flex flex-col gap-1.5 p-2">
+      {/* Anchored to the bottom so the banner doesn't cover the top of the
+          frame, which is where an overhead camera usually shows the sign it
+          is reacting to. `pb-14` keeps it clear of the two controls already
+          parked along the bottom edge of LlHlsVideo — the "AI-generated demo
+          footage" badge (bottom-3 left-3) and the fullscreen button (bottom-3
+          right-3) — which together occupy about 46px. The extra gap is
+          harmless on the uploaded-file path, where neither control renders.
+          The chip-in keyframe translates upward into place, so it reads as
+          rising off the bottom edge here rather than being cut off by it. */}
+      <div className="pointer-events-none absolute bottom-0 left-0 right-0 flex flex-col gap-1.5 p-2 pb-14">
         {suggestions.map((s) => {
           const humanName = SIGN_HUMAN_NAMES[s.source_class] ?? s.source_class;
           return (

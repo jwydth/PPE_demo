@@ -54,13 +54,27 @@ class BehaviorStreamWorker:
         self.ignore_zones_provider = ignore_zones_provider
         self.session = detector.create_live_session(fps=self.fps, frame_stride=1)
         self.latest_payload: dict[str, Any] | None = None
-        # Reported to the UI through snapshot(). A source too slow for the
-        # classifier's timeline used to produce nothing at all with no error
-        # anywhere — the toggle was on, the worker ran, and behavior simply
-        # never happened.
-        self.unavailable: str | None = self.session.unsupported_source_reason()
-        if self.unavailable:
-            logger.warning("[BEHAVIOR] '%s' cannot be classified: %s", source, self.unavailable)
+        # Only ever set by a hard failure — the model would not load, or the
+        # worker loop died. Latched, because past that point the worker has
+        # stopped producing anything and the operator needs to know.
+        self.unavailable: str | None = None
+        # Diagnostics only; deliberately never surfaced to the UI.
+        #
+        # unsupported_source_reason() compares the raw source rate against the
+        # canonical timeline, which is window quality *before* pose-gap repair.
+        # Repair pads the skipped canonical slots and classify() gates on the
+        # repaired ratio, so a source under that raw bar classifies anyway: a
+        # 15 FPS camera projects 62% against a 70% gate and still produces
+        # behavior output continuously. Shown as an error it contradicted the
+        # falls and runs visible on the same screen, which is worse than
+        # silence — an operator who learns to disbelieve one banner discounts
+        # the next one too, and `unavailable` above is real.
+        #
+        # Kept as a log line because it is still the one place that records why
+        # a source is marginal, which is worth having when tuning the publisher.
+        source_warning = self.session.unsupported_source_reason()
+        if source_warning:
+            logger.warning("[BEHAVIOR] '%s' is below the canonical rate: %s", source, source_warning)
         self._incidents: list[dict[str, Any]] = []
         self._task: asyncio.Task[None] | None = None
         self._last_logged_status: str | None = None
